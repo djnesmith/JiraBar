@@ -12,6 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.orgName) var orgName
     @Default(.instanceType) var instanceType
     @Default(.jiraHost) var jiraHost
+    @Default(.transitionPrompts) var transitionPrompts
 
     let jiraClient = JiraClient()
 
@@ -30,6 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     var preferencesWindow: NSWindow!
     var aboutWindow: NSWindow!
+    var transitionWindow: NSWindow?
     
     var unknownPersonAvatar: NSImage!
     
@@ -116,7 +118,7 @@ extension AppDelegate {
                                 transitionsMenu.addItem(header)
                                 for transition in transitions {
                                     let transitionItem = NSMenuItem(title: transition.name, action: #selector(self.transitionIssue), keyEquivalent: "")
-                                    transitionItem.representedObject = [issue.key, transition.id]
+                                    transitionItem.representedObject = [issue.key, transition.id, transition.name]
                                     transitionsMenu.addItem(transitionItem)
                                 }
                             }
@@ -153,11 +155,119 @@ extension AppDelegate {
     
     @objc
     func transitionIssue(_ sender: NSMenuItem) {
-        let issueKeyAndTo = sender.representedObject as! [String]
-        
-        jiraClient.transitionIssue(issueKey: issueKeyAndTo[0], to: issueKeyAndTo[1]) {
-            print("refreshing")
+        guard let parts = sender.representedObject as? [String], parts.count >= 2 else { return }
+        let issueKey = parts[0]
+        let transitionId = parts[1]
+        let transitionName = parts.count >= 3 ? parts[2] : ""
+
+        if let config = transitionPrompts.first(where: { $0.matches(transitionName: transitionName) }) {
+            presentTransitionDialog(
+                issueKey: issueKey,
+                transitionId: transitionId,
+                transitionName: transitionName,
+                config: config
+            )
+            return
+        }
+
+        jiraClient.transitionIssue(issueKey: issueKey, to: transitionId) {
             self.refreshMenu()
+        }
+    }
+
+    private func presentTransitionDialog(
+        issueKey: String,
+        transitionId: String,
+        transitionName: String,
+        config: TransitionPromptConfig
+    ) {
+        transitionWindow?.close()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Transition: \(transitionName)"
+        window.isReleasedWhenClosed = false
+
+        let view = TransitionDialog(
+            issueKey: issueKey,
+            transitionName: transitionName,
+            config: config,
+            onSubmit: { [weak self] comment, users, freeText, selectValue, done in
+                self?.submitTransition(
+                    issueKey: issueKey,
+                    transitionId: transitionId,
+                    config: config,
+                    comment: comment,
+                    users: users,
+                    freeText: freeText,
+                    selectValue: selectValue,
+                    completion: done
+                )
+            },
+            onCancel: { [weak self] in
+                self?.transitionWindow?.close()
+                self?.transitionWindow = nil
+            }
+        )
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+
+        transitionWindow = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func submitTransition(
+        issueKey: String,
+        transitionId: String,
+        config: TransitionPromptConfig,
+        comment: String,
+        users: [JiraUser],
+        freeText: String,
+        selectValue: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        var updates: [JiraClient.TransitionFieldUpdate] = []
+        if config.hasUserField, !users.isEmpty {
+            updates.append(.users(
+                fieldId: config.userFieldId.trimmingCharacters(in: .whitespaces),
+                users: users,
+                multi: config.userFieldAllowsMultiple
+            ))
+        }
+        if config.hasTextField, !freeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updates.append(.text(
+                fieldId: config.textFieldId.trimmingCharacters(in: .whitespaces),
+                value: freeText
+            ))
+        }
+        if config.hasSelectField, !selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            updates.append(.select(
+                fieldId: config.selectFieldId.trimmingCharacters(in: .whitespaces),
+                value: selectValue
+            ))
+        }
+
+        let effectiveComment = config.includeComment ? comment : nil
+
+        jiraClient.transitionIssue(
+            issueKey: issueKey,
+            to: transitionId,
+            comment: effectiveComment,
+            fieldUpdates: updates
+        ) { [weak self] success in
+            DispatchQueue.main.async {
+                if success {
+                    self?.transitionWindow?.close()
+                    self?.transitionWindow = nil
+                    self?.refreshMenu()
+                }
+                completion(success)
+            }
         }
     }
     
@@ -180,36 +290,32 @@ extension AppDelegate {
     @objc
     func openPrefecencesWindow(_: NSStatusBarButton?) {
         NSLog("Open preferences window")
-        let contentView = PreferencesView()
         if preferencesWindow != nil {
             preferencesWindow.close()
         }
+        // Size the window up-front to match PreferencesView's frame; otherwise the hosting view
+        // resizes the window mid-layout and AppKit logs a layout-recursion warning.
         preferencesWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 640),
             styleMask: [.closable, .titled],
             backing: .buffered,
             defer: false
         )
-        
+        // Keep the window alive across close so reopening doesn't fight a released window —
+        // the previous default (isReleasedWhenClosed = true) was a source of CA-commit warnings
+        // on the second open.
+        preferencesWindow.isReleasedWhenClosed = false
         preferencesWindow.title = "Preferences"
-        preferencesWindow.contentView = NSHostingView(rootView: contentView)
-        preferencesWindow.makeKeyAndOrderFront(nil)
-        preferencesWindow.styleMask.remove(.resizable)
-        
-        // allow the preference window can be focused automatically when opened
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        
-        let controller = NSWindowController(window: preferencesWindow)
-        controller.showWindow(self)
-        
+        preferencesWindow.contentView = NSHostingView(rootView: PreferencesView())
         preferencesWindow.center()
-        preferencesWindow.orderFrontRegardless()
+
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        preferencesWindow.makeKeyAndOrderFront(nil)
     }
     
     @objc
     func openAboutWindow(_: NSStatusBarButton?) {
         NSLog("Open about window")
-        let contentView = AboutView()
         if aboutWindow != nil {
             aboutWindow.close()
         }
@@ -219,20 +325,13 @@ extension AppDelegate {
             backing: .buffered,
             defer: false
         )
-        
+        aboutWindow.isReleasedWhenClosed = false
         aboutWindow.title = "About"
-        aboutWindow.contentView = NSHostingView(rootView: contentView)
-        aboutWindow.makeKeyAndOrderFront(nil)
-        aboutWindow.styleMask.remove(.resizable)
-        
-        // allow the preference window can be focused automatically when opened
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        
-        let controller = NSWindowController(window: aboutWindow)
-        controller.showWindow(self)
-        
+        aboutWindow.contentView = NSHostingView(rootView: AboutView())
         aboutWindow.center()
-        aboutWindow.orderFrontRegardless()
+
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        aboutWindow.makeKeyAndOrderFront(nil)
     }
     
     @objc
