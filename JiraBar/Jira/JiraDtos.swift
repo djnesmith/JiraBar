@@ -63,10 +63,42 @@ struct Project: Codable {
 struct User: Codable {
     var name: String?
     var displayName: String
-    
+
     enum CodingKeys: String, CodingKey {
         case name
         case displayName
+    }
+}
+
+//
+// MARK: assignable users
+//
+struct JiraUser: Codable, Identifiable, Hashable {
+    /// Stable identifier for SwiftUI lists. Prefers accountId (Cloud) and falls back to name/key (Server).
+    var id: String {
+        if let accountId, !accountId.isEmpty { return "cloud:\(accountId)" }
+        if let name, !name.isEmpty { return "name:\(name)" }
+        if let key, !key.isEmpty { return "key:\(key)" }
+        return "display:\(displayName)"
+    }
+
+    /// Cloud-only stable identifier.
+    var accountId: String?
+    /// Server/Data Center username.
+    var name: String?
+    /// Older Server "key" identifier, retained for compatibility.
+    var key: String?
+    var displayName: String
+    var emailAddress: String?
+    var active: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case accountId
+        case name
+        case key
+        case displayName
+        case emailAddress
+        case active
     }
 }
 
