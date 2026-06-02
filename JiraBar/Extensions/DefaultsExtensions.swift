@@ -32,6 +32,23 @@ extension Defaults.Keys {
     static let instanceType = Key<JiraInstanceType>("instanceType", default: .cloud)
     /// Auth method for self-hosted Server. Defaults to .pat (modern default).
     static let serverAuthType = Key<JiraServerAuthType>("serverAuthType", default: .pat)
+
+    /// User-supplied display order for status groups in the menu (case-insensitive match against
+    /// Jira's `status.name`). Statuses not present in this list fall to the bottom, alphabetically.
+    static let statusOrder = Key<[String]>("statusOrder", default: [])
+
+    /// Optional dashboard URL. Accepts an absolute URL or a path that's appended to the Jira base URL.
+    /// When non-empty, an "Open Dashboard" entry appears under "Open Search results" in the menu.
+    static let dashboardURL = Key<String>("dashboardURL", default: "")
+
+    /// Jira custom field id for the Flagged field (varies by install — commonly customfield_10021 on Cloud).
+    /// When non-empty, an "Add Flag" entry appears in the per-issue submenu.
+    static let flagFieldId = Key<String>("flagFieldId", default: "")
+
+    /// Jira custom field id for the Rank field (the Lexorank field that powers Scrum/Kanban order).
+    /// Commonly `customfield_10019` on Cloud. When set, issues inside each status group are sorted
+    /// by rank ascending to match the board.
+    static let rankFieldId = Key<String>("rankFieldId", default: "")
 }
 
 extension KeychainKeys {
