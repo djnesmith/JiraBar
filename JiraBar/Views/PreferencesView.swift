@@ -29,6 +29,18 @@ struct PreferencesView: View {
 
                     Divider()
 
+                    StatusOrderSection()
+                        .padding(.horizontal)
+                        .padding(.vertical, 12)
+
+                    Divider()
+
+                    UserFieldShortcutsSection()
+                        .padding(.horizontal)
+                        .padding(.vertical, 12)
+
+                    Divider()
+
                     TransitionPromptsSection()
                         .padding(.horizontal)
                         .padding(.vertical, 12)
@@ -190,6 +202,9 @@ private struct QuerySection: View {
     @Binding var jql: String
     @Binding var maxResults: String
     @Binding var refreshRate: Int
+    @Default(.dashboardURL) var dashboardURL
+    @Default(.flagFieldId) var flagFieldId
+    @Default(.rankFieldId) var rankFieldId
 
     var body: some View {
         TextField("JQL Query:", text: $jql)
@@ -199,6 +214,18 @@ private struct QuerySection: View {
         TextField("Max Results:", text: $maxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
             .frame(width: 120)
+        TextField("Dashboard URL:", text: $dashboardURL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Adds an Open Dashboard entry to the menu. Accepts a full URL or a path that's appended to your Jira base.")
+            .font(.footnote)
+        TextField("Flag field id:", text: $flagFieldId)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Field id for Jira's Flagged custom field (commonly customfield_10021 on Cloud). When set, an Add Flag entry appears in each ticket's submenu.")
+            .font(.footnote)
+        TextField("Rank field id:", text: $rankFieldId)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Lexorank field id (commonly customfield_10019 on Cloud). When set, tickets inside each status group are sorted to match your board order.")
+            .font(.footnote)
         Picker("Refresh Rate:", selection: $refreshRate) {
             Text("1 minute").tag(1)
             Text("5 minutes").tag(5)
@@ -210,6 +237,148 @@ private struct QuerySection: View {
     }
 }
 
+// MARK: - Status Display (order + color)
+
+/// Lets the user define the display order and color of status groups in the menu bar.
+/// Status names are matched case-insensitively against Jira's `status.name`; anything not in this
+/// list falls below, sorted alphabetically. Generic by design — no workflow-specific names live in source.
+private struct StatusOrderSection: View {
+    @Default(.statusDisplay) var entries
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Status Order & Colors").font(.headline)
+                Spacer()
+                Button {
+                    entries.append(StatusDisplay())
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
+
+            Text("Order status groups in the menu to match your board and color the headers. Unlisted statuses fall to the bottom.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if entries.isEmpty {
+                Text("No statuses configured. Headers are listed alphabetically with the default text color.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(Array(entries.enumerated()), id: \.offset) { index, _ in
+                    HStack {
+                        TextField("Status name (e.g. \"To Do\")", text: $entries[index].name)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                        ColorPicker(
+                            "",
+                            selection: colorBinding(for: index),
+                            supportsOpacity: false
+                        )
+                        .labelsHidden()
+                        .frame(width: 44)
+                        if !entries[index].colorHex.isEmpty {
+                            Button {
+                                entries[index].colorHex = ""
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Clear color")
+                        }
+                        Button {
+                            entries.swapAt(index, index - 1)
+                        } label: {
+                            Image(systemName: "arrow.up")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == 0)
+                        Button {
+                            entries.swapAt(index, index + 1)
+                        } label: {
+                            Image(systemName: "arrow.down")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == entries.count - 1)
+                        Button(role: .destructive) {
+                            entries.remove(at: index)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bridges between the SwiftUI `Color` that ColorPicker wants and the `#RRGGBB` we persist.
+    /// Default-shown swatch is white when no color is set; the user picking any color writes hex.
+    private func colorBinding(for index: Int) -> Binding<Color> {
+        Binding(
+            get: {
+                Color(statusHex: entries[index].colorHex) ?? .white
+            },
+            set: { newValue in
+                entries[index].colorHex = newValue.statusHex
+            }
+        )
+    }
+}
+
+// MARK: - User Field Shortcuts
+
+/// Lets the user define menu entries for editing user-picker fields on the active issue
+/// (e.g. "Change Assignee", "Change Reviewer"). Generic — field ids are user-supplied.
+private struct UserFieldShortcutsSection: View {
+    @Default(.userFieldShortcuts) var shortcuts
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("User Field Shortcuts").font(.headline)
+                Spacer()
+                Button {
+                    shortcuts.append(UserFieldShortcut())
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
+
+            Text("Each shortcut shows under \"Add Comment…\" in a ticket's submenu and opens a dialog pre-loaded with the current value. Submitting with no users selected clears the field.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if shortcuts.isEmpty {
+                Text("No shortcuts configured.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(Array(shortcuts.enumerated()), id: \.offset) { index, _ in
+                    HStack(spacing: 6) {
+                        TextField("Menu label (e.g. \"Change Assignee\")", text: $shortcuts[index].label)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                        TextField("Field id", text: $shortcuts[index].fieldId)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .frame(width: 160)
+                        Toggle("Multi", isOn: $shortcuts[index].allowsMultiple)
+                        Button(role: .destructive) {
+                            shortcuts.remove(at: index)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Transition Prompts
 
 /// Lets the user define generic prompt dialogs that appear before specific transitions are submitted.
@@ -217,7 +386,6 @@ private struct QuerySection: View {
 /// and an optional free-text custom field — nothing here assumes a particular workflow.
 private struct TransitionPromptsSection: View {
     @Default(.transitionPrompts) var prompts
-    @State private var importError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -225,28 +393,10 @@ private struct TransitionPromptsSection: View {
                 Text("Transition Prompts").font(.headline)
                 Spacer()
                 Button {
-                    importPrompts()
-                } label: {
-                    Label("Import…", systemImage: "square.and.arrow.down")
-                }
-                Button {
-                    exportPrompts()
-                } label: {
-                    Label("Export…", systemImage: "square.and.arrow.up")
-                }
-                .disabled(prompts.isEmpty)
-                Button {
                     prompts.append(TransitionPromptConfig())
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-            }
-
-            if let importError {
-                Text(importError)
-                    .font(.footnote)
-                    .foregroundColor(.red)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("Show a dialog before a transition is submitted. Match on the transition's display name; expose a comment, a user-picker custom field, and/or a free-text custom field.")
@@ -273,41 +423,6 @@ private struct TransitionPromptsSection: View {
                 }
                 .frame(maxHeight: 320)
             }
-        }
-    }
-
-    private func exportPrompts() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "jirabar-prompts.json"
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(prompts)
-            try data.write(to: url)
-            importError = nil
-        } catch {
-            importError = "Export failed: \(error.localizedDescription)"
-        }
-    }
-
-    private func importPrompts() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        do {
-            let data = try Data(contentsOf: url)
-            let decoded = try JSONDecoder().decode([TransitionPromptConfig].self, from: data)
-            prompts = decoded
-            importError = nil
-        } catch {
-            importError = "Import failed: \(error.localizedDescription)"
         }
     }
 }

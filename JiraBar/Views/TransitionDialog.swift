@@ -261,7 +261,7 @@ struct TransitionDialog: View {
                 switch result {
                 case .success(let users):
                     self.availableUsers = users
-                    self.preselectCurrentUserIfNeeded()
+                    self.preselectIfNeeded()
                 case .failure(let message):
                     self.availableUsers = []
                     self.loadError = message
@@ -271,24 +271,51 @@ struct TransitionDialog: View {
         }
     }
 
-    private func preselectCurrentUserIfNeeded() {
-        guard config.userFieldDefaultsToCurrentUser, selectedUsers.isEmpty else { return }
-        client.getCurrentUser { me in
-            DispatchQueue.main.async {
-                guard let me else { return }
-                // Prefer the JiraUser instance already in availableUsers so identity (and the row's
-                // checked state) matches what's rendered. Fall back to the /myself response if not.
-                if let match = self.availableUsers.first(where: { other in
-                    if let a = me.accountId, let b = other.accountId, !a.isEmpty, !b.isEmpty { return a == b }
-                    if let a = me.name, let b = other.name, !a.isEmpty, !b.isEmpty { return a == b }
-                    return false
-                }) {
-                    self.selectedUsers = [match]
-                } else {
-                    self.selectedUsers = [me]
+    /// Pre-fills the user picker so the user sees who's already assigned before deciding.
+    /// `userFieldDefaultsToCurrentUser` (used for "Start Progress") wins; otherwise we read
+    /// whatever's currently in the configured field on the issue.
+    private func preselectIfNeeded() {
+        guard selectedUsers.isEmpty else { return }
+        if config.userFieldDefaultsToCurrentUser {
+            client.getCurrentUser { me in
+                DispatchQueue.main.async {
+                    if let me { self.applyPrefill([me]) }
+                }
+            }
+        } else {
+            client.getIssueFieldUsers(issueKey: issueKey, fieldId: config.userFieldId) { existing in
+                DispatchQueue.main.async {
+                    self.applyPrefill(existing)
                 }
             }
         }
+    }
+
+    /// Maps prefill candidates to instances already in `availableUsers` so the row checkboxes
+    /// light up; falls back to the raw user otherwise (still selected, just not in the visible list).
+    private func applyPrefill(_ candidates: [JiraUser]) {
+        guard !candidates.isEmpty else { return }
+        let matched: [JiraUser] = candidates.map { candidate in
+            availableUsers.first(where: { Self.sameUser($0, candidate) }) ?? candidate
+        }
+        selectedUsers = Set(matched)
+        arrangeSelectedFirst()
+    }
+
+    /// Moves pre-selected users to the top of the list (one-shot — clicks after this don't reshuffle).
+    /// Selected users not returned by assignable-search are inserted so the row stays visible.
+    private func arrangeSelectedFirst() {
+        let selectedInList = availableUsers.filter { selectedUsers.contains($0) }
+        let selectedNotInList = selectedUsers.filter { !availableUsers.contains($0) }
+        let unselectedInList = availableUsers.filter { !selectedUsers.contains($0) }
+        availableUsers = selectedInList + Array(selectedNotInList) + unselectedInList
+    }
+
+    private static func sameUser(_ a: JiraUser, _ b: JiraUser) -> Bool {
+        if let x = a.accountId, let y = b.accountId, !x.isEmpty, !y.isEmpty { return x == y }
+        if let x = a.name, let y = b.name, !x.isEmpty, !y.isEmpty { return x == y }
+        if let x = a.key, let y = b.key, !x.isEmpty, !y.isEmpty { return x == y }
+        return false
     }
 
     private func dialogHeight() -> CGFloat {
