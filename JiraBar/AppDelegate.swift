@@ -654,7 +654,7 @@ extension AppDelegate {
         // Size the window up-front to match PreferencesView's frame; otherwise the hosting view
         // resizes the window mid-layout and AppKit logs a layout-recursion warning.
         preferencesWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 720),
             styleMask: [.closable, .titled],
             backing: .buffered,
             defer: false

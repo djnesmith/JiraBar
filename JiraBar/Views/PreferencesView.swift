@@ -44,10 +44,18 @@ struct PreferencesView: View {
                     TransitionPromptsSection()
                         .padding(.horizontal)
                         .padding(.vertical, 12)
+
+                    Divider()
+
+                    SettingsBackupSection()
+                        .padding(.horizontal)
+                        .padding(.vertical, 12)
                 }
+                // Extra trailing inset so the macOS scrollbar doesn't sit on top of section content.
+                .padding(.trailing, 12)
             }
         }
-        .frame(width: 500, height: 640)
+        .frame(width: 700, height: 720)
     }
 }
 
@@ -529,6 +537,85 @@ private struct TransitionPromptRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Settings Backup
+
+/// Full export/import of all settings (everything in Defaults). Secrets (API tokens) stay in
+/// Keychain and are NOT included in the JSON — users re-enter the token on the new machine.
+private struct SettingsBackupSection: View {
+    @State private var message: String?
+    @State private var messageIsError: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Settings Backup").font(.headline)
+                Spacer()
+                Button {
+                    importAll()
+                } label: {
+                    Label("Import All…", systemImage: "square.and.arrow.down")
+                }
+                Button {
+                    exportAll()
+                } label: {
+                    Label("Export All…", systemImage: "square.and.arrow.up")
+                }
+            }
+
+            Text("Save every preference to a JSON file or restore from one. The Jira API token is not included — you'll re-enter it after import.")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let message {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundColor(messageIsError ? .red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func exportAll() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "jirabar-settings.json"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(AppSettings.snapshot())
+            try data.write(to: url)
+            message = "Exported to \(url.lastPathComponent)."
+            messageIsError = false
+        } catch {
+            message = "Export failed: \(error.localizedDescription)"
+            messageIsError = true
+        }
+    }
+
+    private func importAll() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+            decoded.apply()
+            message = "Imported from \(url.lastPathComponent). Re-enter your API token if this is a new machine."
+            messageIsError = false
+        } catch {
+            message = "Import failed: \(error.localizedDescription)"
+            messageIsError = true
+        }
     }
 }
 
