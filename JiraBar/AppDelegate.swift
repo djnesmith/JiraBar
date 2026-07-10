@@ -28,6 +28,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.dashboardURL) var dashboardURL
     @Default(.userFieldShortcuts) var userFieldShortcuts
     @Default(.flagFieldId) var flagFieldId
+    @Default(.allIssuesJQL) var allIssuesJQL
+    @Default(.myDashboardURL) var myDashboardURL
+
+    @FromKeychain(.gitHubToken) var gitHubToken
 
     let jiraClient = JiraClient()
 
@@ -51,7 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var userFieldWindow: NSWindow?
     var flagWindow: NSWindow?
     var uploadWindow: NSWindow?
-    
+
     var unknownPersonAvatar: NSImage!
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
@@ -165,9 +169,6 @@ extension AppDelegate {
                         
                         
                         issueItem.attributedTitle = issueItemTitle
-                        if issue.fields.summary.count > 50 {
-                            issueItem.toolTip = issue.fields.summary
-                        }
                         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
                         
                         self.jiraClient.getTransitionsByIssueKey(issueKey: issue.key) { transitions in
@@ -232,24 +233,13 @@ extension AppDelegate {
 
                             self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
                                 guard !prs.isEmpty else { return }
-                                issueMenu.addItem(.separator())
-                                for pr in prs {
-                                    let prItem = NSMenuItem(title: "", action: #selector(self.openLink), keyEquivalent: "")
-                                    let title = NSMutableAttributedString(string: "")
-                                        .appendString(string: pr.name.trunc(length: 50))
-                                        .appendNewLine()
-                                    let slug = pr.repoSlug.isEmpty ? "PR" : pr.repoSlug
-                                    title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: "#888888")
-                                    title.appendString(string: pr.status.lowercased(), color: AppDelegate.prStatusColorHex(pr.status))
-                                    prItem.attributedTitle = title
-                                    prItem.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
-                                    if pr.name.count > 50 {
-                                        prItem.toolTip = pr.name
+                                self.fetchGithubStatuses(for: prs) { statusByURL in
+                                    DispatchQueue.main.async {
+                                        issueMenu.addItem(.separator())
+                                        for pr in prs {
+                                            self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
+                                        }
                                     }
-                                    if let url = URL(string: pr.url) {
-                                        prItem.representedObject = url
-                                    }
-                                    issueMenu.addItem(prItem)
                                 }
                             }
                         }
@@ -271,17 +261,30 @@ extension AppDelegate {
             openSearchResultsItem.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
             self.menu.addItem(openSearchResultsItem)
 
-            if let url = self.resolvedDashboardURL() {
+            if !self.allIssuesJQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let openAllItem = NSMenuItem(title: "Open All Issues", action: #selector(self.openAllIssues), keyEquivalent: "")
+                openAllItem.image = NSImage(systemSymbolName: "tray.full", accessibilityDescription: nil)
+                self.menu.addItem(openAllItem)
+            }
+
+            if let url = self.resolveExternalURL(self.dashboardURL) {
                 let openDashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(self.openDashboard), keyEquivalent: "")
                 openDashboardItem.image = NSImage(systemSymbolName: "rectangle.3.group", accessibilityDescription: nil)
                 openDashboardItem.representedObject = url
                 self.menu.addItem(openDashboardItem)
             }
+
+            if let url = self.resolveExternalURL(self.myDashboardURL) {
+                let openMyDashboardItem = NSMenuItem(title: "Open My Dashboard", action: #selector(self.openDashboard), keyEquivalent: "")
+                openMyDashboardItem.image = NSImage(systemSymbolName: "person.crop.rectangle.stack", accessibilityDescription: nil)
+                openMyDashboardItem.representedObject = url
+                self.menu.addItem(openMyDashboardItem)
+            }
             
             let createNewItem = NSMenuItem(title: "Create issue", action: #selector(self.openCreateNewIssue), keyEquivalent: "")
             createNewItem.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
             self.menu.addItem(createNewItem)
-            
+
             self.menu.addItem(.separator())
             self.menu.addItem(withTitle: "Preferences...", action: #selector(self.openPrefecencesWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "About JiraBar", action: #selector(self.openAboutWindow), keyEquivalent: "")
@@ -609,15 +612,26 @@ extension AppDelegate {
         NSWorkspace.shared.open(URL(string: "\(baseUrl)/issues?jql=" + encodedPath!)!)
     }
 
-    /// Resolves the user's `dashboardURL` setting into an openable URL.
+    @objc
+    func openAllIssues() {
+        let trimmed = allIssuesJQL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseUrl)/issues?jql=" + encoded)
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Turns a user-supplied URL preference into an openable URL.
     /// Accepts an absolute `http(s)://…` URL, or a path that's appended to the Jira base URL.
-    private func resolvedDashboardURL() -> URL? {
-        let raw = dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return nil }
-        if raw.lowercased().hasPrefix("http://") || raw.lowercased().hasPrefix("https://") {
-            return URL(string: raw)
+    /// Empty / whitespace-only input returns nil so the corresponding menu entry can be skipped.
+    private func resolveExternalURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") {
+            return URL(string: trimmed)
         }
-        let path = raw.hasPrefix("/") ? raw : "/" + raw
+        let path = trimmed.hasPrefix("/") ? trimmed : "/" + trimmed
         return URL(string: baseUrl + path)
     }
 
@@ -714,6 +728,132 @@ extension AppDelegate {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         }
         return slug.isEmpty ? key : "\(key)-\(slug)"
+    }
+
+    /// Fires a GitHub GraphQL fetch per open PR (in parallel) when a token is configured.
+    /// Merges results into a [url: status] dict for the renderer. Empty result if no token
+    /// or the fetches all fail — callers still render the base 2-line row.
+    private func fetchGithubStatuses(
+        for prs: [JiraPullRequest],
+        completion: @escaping ([String: GithubPRStatus]) -> Void
+    ) {
+        let token = gitHubToken.trimmingCharacters(in: .whitespaces)
+        let candidates = prs.filter { $0.status.uppercased() == "OPEN" && $0.url.contains("github.com") }
+        guard !token.isEmpty, !candidates.isEmpty else {
+            completion([:])
+            return
+        }
+
+        let group = DispatchGroup()
+        let syncQueue = DispatchQueue(label: "githubStatus.sync")
+        var results: [String: GithubPRStatus] = [:]
+        let client = GithubClient()
+
+        for pr in candidates {
+            group.enter()
+            client.fetchPRStatus(url: pr.url, token: token) { status in
+                syncQueue.async {
+                    if let status { results[pr.url] = status }
+                    group.leave()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            completion(results)
+        }
+    }
+
+    /// Builds one PR row and appends it to the ticket's submenu. Renders 3 lines when GitHub
+    /// data is available (approval / unresolved / CI on line 3), otherwise 2 lines with the
+    /// legacy Jira-derived approved indicator.
+    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
+        let title = NSMutableAttributedString(string: "")
+            .appendString(string: pr.name.trunc(length: 50))
+            .appendNewLine()
+
+        let slug = pr.repoSlug.isEmpty ? "PR" : pr.repoSlug
+        title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: "#888888")
+
+        let ciFailed = AppDelegate.ciStateIsFailure(ghStatus?.ciState)
+        if pr.status.uppercased() == "OPEN" && ciFailed {
+            // Elevate the row's status word to "error" so the CI break is visible at a glance.
+            title.appendString(string: "error", color: "#CF222E")
+        } else {
+            title.appendString(string: pr.status.lowercased(), color: AppDelegate.prStatusColorHex(pr.status))
+        }
+
+        if let ghStatus, pr.status.uppercased() == "OPEN" {
+            appendLine3(status: ghStatus, into: title)
+        } else if pr.status.uppercased() == "OPEN" && pr.isApproved {
+            // Fallback when GitHub data isn't available but Jira has an approved flag.
+            title.appendString(string: " - ", color: "#888888")
+            title.appendString(string: "approved", color: "#2DA44E")
+        }
+
+        let urlString = pr.url
+        let prItem = NSMenuItem()
+        prItem.view = PRMenuItemView(
+            attributedTitle: title,
+            icon: NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil),
+            onLeftClick: {
+                if let url = URL(string: urlString) {
+                    NSWorkspace.shared.open(url)
+                }
+            },
+            onRightClick: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(urlString, forType: .string)
+                sendNotification(body: "Copied PR URL")
+            }
+        )
+        menu.addItem(prItem)
+    }
+
+    /// Adds "approved · N unresolved · CI ✓" (or a subset) as a third line. Elements without
+    /// signal are omitted along with their separator.
+    private func appendLine3(status: GithubPRStatus, into title: NSMutableAttributedString) {
+        var pieces: [(String, String)] = []  // (text, hex color)
+
+        switch status.reviewDecision {
+        case "APPROVED":
+            pieces.append(("approved", "#2DA44E"))
+        case "CHANGES_REQUESTED":
+            pieces.append(("changes requested", "#CF222E"))
+        default:
+            break // REVIEW_REQUIRED / nil — no signal worth showing
+        }
+
+        let unresolved = status.unresolvedThreads
+        let unresolvedColor = unresolved > 0 ? "#BF6900" : "#888888"
+        pieces.append(("\(unresolved) unresolved", unresolvedColor))
+
+        if let ci = status.ciState {
+            switch ci {
+            case "SUCCESS":
+                pieces.append(("CI ✓", "#2DA44E"))
+            case "FAILURE", "ERROR":
+                pieces.append(("CI ✗", "#CF222E"))
+            case "PENDING", "EXPECTED":
+                pieces.append(("CI …", "#888888"))
+            default:
+                break
+            }
+        }
+
+        guard !pieces.isEmpty else { return }
+        title.appendNewLine()
+        for (index, piece) in pieces.enumerated() {
+            if index > 0 {
+                title.appendString(string: " · ", color: "#888888")
+            }
+            title.appendString(string: piece.0, color: piece.1)
+        }
+    }
+
+    private static func ciStateIsFailure(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return state == "FAILURE" || state == "ERROR"
     }
 
     /// Color hex for a PR status badge in the menu. Falls back to a neutral gray for

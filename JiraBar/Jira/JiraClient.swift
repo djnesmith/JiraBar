@@ -651,7 +651,9 @@ public class JiraClient {
 
 func sendNotification(body: String = "") {
   let content = UNMutableNotificationContent()
-  content.title = "JiraBar Error"
+  // Neutral title — body text already conveys success vs failure (e.g. "Comment failed:" /
+  // "Copied PR URL"). Previously hardcoded as "JiraBar Error" which mislabeled success cases.
+  content.title = "JiraBar"
 
   if body.count > 0 {
     content.body = body

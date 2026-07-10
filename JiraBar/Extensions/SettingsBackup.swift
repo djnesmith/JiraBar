@@ -21,10 +21,12 @@ struct AppSettings: Codable {
     var maxResults: String?
     var refreshRate: Int?
     var dashboardURL: String?
+    var myDashboardURL: String?
 
     // Field ids
     var flagFieldId: String?
     var rankFieldId: String?
+    var allIssuesJQL: String?
 
     // Lists
     var statusOrder: [String]?
@@ -47,8 +49,10 @@ struct AppSettings: Codable {
             maxResults: Defaults[.maxResults],
             refreshRate: Defaults[.refreshRate],
             dashboardURL: Defaults[.dashboardURL],
+            myDashboardURL: Defaults[.myDashboardURL],
             flagFieldId: Defaults[.flagFieldId],
             rankFieldId: Defaults[.rankFieldId],
+            allIssuesJQL: Defaults[.allIssuesJQL],
             statusOrder: Defaults[.statusOrder],
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -69,8 +73,10 @@ struct AppSettings: Codable {
         if let value = maxResults { Defaults[.maxResults] = value }
         if let value = refreshRate { Defaults[.refreshRate] = value }
         if let value = dashboardURL { Defaults[.dashboardURL] = value }
+        if let value = myDashboardURL { Defaults[.myDashboardURL] = value }
         if let value = flagFieldId { Defaults[.flagFieldId] = value }
         if let value = rankFieldId { Defaults[.rankFieldId] = value }
+        if let value = allIssuesJQL { Defaults[.allIssuesJQL] = value }
         if let value = statusOrder { Defaults[.statusOrder] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         if let value = userFieldShortcuts { Defaults[.userFieldShortcuts] = value }

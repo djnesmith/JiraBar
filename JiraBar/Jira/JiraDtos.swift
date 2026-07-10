@@ -147,6 +147,9 @@ struct JiraPullRequest: Codable, Hashable {
     var url: String
     /// "OPEN" / "MERGED" / "DECLINED" — useful for filtering or coloring.
     var status: String
+    /// Per-reviewer approval flags reported by the source forge (present when the integration
+    /// includes reviews). Absent on branches / commits, and on integrations that don't surface it.
+    var reviewers: [JiraPRReviewer]?
 
     /// "owner/repo" parsed from the URL path, or empty if the URL doesn't look like a forge PR.
     var repoSlug: String {
@@ -161,4 +164,14 @@ struct JiraPullRequest: Codable, Hashable {
     var numberOnly: String {
         id.hasPrefix("#") ? String(id.dropFirst()) : id
     }
+
+    /// `true` when at least one reviewer has approved.
+    var isApproved: Bool {
+        (reviewers ?? []).contains { $0.approved == true }
+    }
+}
+
+struct JiraPRReviewer: Codable, Hashable {
+    var name: String?
+    var approved: Bool?
 }

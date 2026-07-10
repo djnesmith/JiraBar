@@ -41,6 +41,10 @@ extension Defaults.Keys {
     /// When non-empty, an "Open Dashboard" entry appears under "Open Search results" in the menu.
     static let dashboardURL = Key<String>("dashboardURL", default: "")
 
+    /// Optional second dashboard URL — e.g. a board view filtered to just the current user's work.
+    /// Same shape as `dashboardURL`; an "Open My Dashboard" entry appears below the first when set.
+    static let myDashboardURL = Key<String>("myDashboardURL", default: "")
+
     /// Jira custom field id for the Flagged field (varies by install — commonly customfield_10021 on Cloud).
     /// When non-empty, an "Add Flag" entry appears in the per-issue submenu.
     static let flagFieldId = Key<String>("flagFieldId", default: "")
@@ -49,6 +53,11 @@ extension Defaults.Keys {
     /// Commonly `customfield_10019` on Cloud. When set, issues inside each status group are sorted
     /// by rank ascending to match the board.
     static let rankFieldId = Key<String>("rankFieldId", default: "")
+
+    /// Optional secondary JQL. When non-empty, an "Open All Issues" menu entry appears beneath
+    /// "Open Search results" and opens Jira with this query. Intended for a broader "everything
+    /// I've worked on" view that ignores the main JQL's filters (e.g. closed issues).
+    static let allIssuesJQL = Key<String>("allIssuesJQL", default: "")
 }
 
 extension KeychainKeys {
@@ -56,4 +65,8 @@ extension KeychainKeys {
     static let jiraToken: KeychainAccessKey = KeychainAccessKey(key: "jiraToken")
     /// Password or PAT for self-hosted Jira Server / Data Center. Separate key to avoid clobbering the Cloud token.
     static let jiraServerToken: KeychainAccessKey = KeychainAccessKey(key: "jiraServerToken")
+    /// GitHub PAT (classic or fine-grained). Used to enrich PR rows with review decision,
+    /// unresolved review-thread count, and CI state via GitHub's GraphQL API. Optional —
+    /// when empty, PR rows fall back to whatever Jira's dev-status API returns.
+    static let gitHubToken: KeychainAccessKey = KeychainAccessKey(key: "gitHubToken")
 }

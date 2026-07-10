@@ -211,13 +211,20 @@ private struct QuerySection: View {
     @Binding var maxResults: String
     @Binding var refreshRate: Int
     @Default(.dashboardURL) var dashboardURL
+    @Default(.myDashboardURL) var myDashboardURL
     @Default(.flagFieldId) var flagFieldId
     @Default(.rankFieldId) var rankFieldId
+    @Default(.allIssuesJQL) var allIssuesJQL
+    @FromKeychain(.gitHubToken) var gitHubToken
 
     var body: some View {
         TextField("JQL Query:", text: $jql)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Use advanced search in Jira to create a JQL query and then paste it here.")
+            .font(.footnote)
+        TextField("All-Issues JQL:", text: $allIssuesJQL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Adds an Open All Issues menu entry under Open Search results. Use a broader query (e.g. include closed tickets) for an everything-I've-touched view.")
             .font(.footnote)
         TextField("Max Results:", text: $maxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -226,6 +233,10 @@ private struct QuerySection: View {
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Adds an Open Dashboard entry to the menu. Accepts a full URL or a path that's appended to your Jira base.")
             .font(.footnote)
+        TextField("My Dashboard URL:", text: $myDashboardURL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Adds an Open My Dashboard entry below the first dashboard — same format. Handy for a board view filtered to just your work.")
+            .font(.footnote)
         TextField("Flag field id:", text: $flagFieldId)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Field id for Jira's Flagged custom field (commonly customfield_10021 on Cloud). When set, an Add Flag entry appears in each ticket's submenu.")
@@ -233,6 +244,10 @@ private struct QuerySection: View {
         TextField("Rank field id:", text: $rankFieldId)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Lexorank field id (commonly customfield_10019 on Cloud). When set, tickets inside each status group are sorted to match your board order.")
+            .font(.footnote)
+        SecureField("GitHub Token:", text: $gitHubToken)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. GitHub PAT with pull-request read scope. When set, each linked PR gets a third line with review decision, unresolved-thread count, and CI state. Open PRs whose CI failed are labeled \"error\" in red.")
             .font(.footnote)
         Picker("Refresh Rate:", selection: $refreshRate) {
             Text("1 minute").tag(1)
