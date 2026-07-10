@@ -55,7 +55,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var userFieldWindow: NSWindow?
     var flagWindow: NSWindow?
     var uploadWindow: NSWindow?
+    var bulkMoveWindow: NSWindow?
 
+    /// Snapshot of the issues currently rendered in the menu. Captured at each refresh so the
+    /// bulk-move dialog has a list of candidates without a fresh API call.
+    private var lastIssues: [Issue] = []
+    
     var unknownPersonAvatar: NSImage!
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
@@ -114,6 +119,7 @@ extension AppDelegate {
         
         jiraClient.getIssuesByJql() { resp, ranks in
             if let issues = resp.issues {
+                self.lastIssues = issues
                 self.statusBarItem.button?.title = String(issues.count)
                 let display = self.statusDisplay
                 let positionFor: (String) -> Int = { name in
@@ -285,6 +291,12 @@ extension AppDelegate {
             createNewItem.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
             self.menu.addItem(createNewItem)
 
+            if !self.lastIssues.isEmpty {
+                let moveManyItem = NSMenuItem(title: "Move Multiple Issues…", action: #selector(self.openBulkMove), keyEquivalent: "")
+                moveManyItem.image = NSImage(systemSymbolName: "arrow.left.arrow.right.square", accessibilityDescription: nil)
+                self.menu.addItem(moveManyItem)
+            }
+
             self.menu.addItem(.separator())
             self.menu.addItem(withTitle: "Preferences...", action: #selector(self.openPrefecencesWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "About JiraBar", action: #selector(self.openAboutWindow), keyEquivalent: "")
@@ -313,6 +325,56 @@ extension AppDelegate {
         jiraClient.transitionIssue(issueKey: issueKey, to: transitionId) {
             self.refreshMenu()
         }
+    }
+
+    @objc
+    func openBulkMove(_ sender: NSMenuItem) {
+        presentBulkMoveDialog()
+    }
+
+    private func presentBulkMoveDialog() {
+        bulkMoveWindow?.close()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 700),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Move Multiple Issues"
+        window.isReleasedWhenClosed = false
+
+        let view = BulkMoveDialog(
+            issues: self.lastIssues,
+            transitionPrompts: self.transitionPrompts,
+            statusOrder: self.statusDisplay,
+            onSubmit: { [weak self] success, failure in
+                DispatchQueue.main.async {
+                    let message: String
+                    if failure == 0 {
+                        message = "Moved \(success) issue\(success == 1 ? "" : "s")"
+                    } else if success == 0 {
+                        message = "Move failed for all \(failure) issue\(failure == 1 ? "" : "s")"
+                    } else {
+                        message = "Moved \(success), failed \(failure)"
+                    }
+                    sendNotification(body: message)
+                    self?.bulkMoveWindow?.close()
+                    self?.bulkMoveWindow = nil
+                    self?.refreshMenu()
+                }
+            },
+            onCancel: { [weak self] in
+                self?.bulkMoveWindow?.close()
+                self?.bulkMoveWindow = nil
+            }
+        )
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
+
+        bulkMoveWindow = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc
