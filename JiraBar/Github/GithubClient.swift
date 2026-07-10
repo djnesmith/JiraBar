@@ -57,10 +57,13 @@ public class GithubClient {
             return
         }
 
+        // Parameterized query — passing owner/repo/number as variables (rather than interpolating
+        // into the query text) avoids any GraphQL-injection risk from a hostile PR URL that
+        // slipped through path validation.
         let query = """
-        query {
-          repository(owner: "\(owner)", name: "\(repo)") {
-            pullRequest(number: \(number)) {
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
               reviewDecision
               reviewThreads(first: 100) { nodes { isResolved } }
               commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -68,8 +71,14 @@ public class GithubClient {
           }
         }
         """
-
-        let body: [String: Any] = ["query": query]
+        let body: [String: Any] = [
+            "query": query,
+            "variables": [
+                "owner": owner,
+                "name": repo,
+                "number": number
+            ]
+        ]
         var headers: HTTPHeaders = [
             .authorization(bearerToken: token),
             .accept("application/json"),
