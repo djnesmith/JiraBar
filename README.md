@@ -58,6 +58,8 @@ Below each ticket, JiraBar shows any GitHub PRs Jira has linked to the ticket vi
 | ⇧ + Left-click | Copy just the PR number (e.g. `269`) |
 | Right-click | Copy the PR URL |
 
+Hovering over a PR row with any modifier held pops small accent-colored hint pills over the row so you don't have to memorize the table: the left pill spells out what a left-click will do, and the right pill reminds you that right-click copies the URL. Plain hover shows nothing, so casual mouse-over stays quiet.
+
 ## GitHub search fallback
 
 When Jira's dev-status API returns no PRs for a ticket — usually because the branch name doesn't include the ticket key and the org's Jira↔GitHub integration only matches on branch name — JiraBar can fall back to searching GitHub. Set a **GitHub Search Orgs** value in Preferences (comma-separated) and any PR whose title contains the ticket key inside those orgs is picked up. Results are deduped by URL against whatever Jira returned so a PR that later gets picked up by both sources renders once.
