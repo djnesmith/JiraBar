@@ -216,6 +216,7 @@ private struct QuerySection: View {
     @Default(.rankFieldId) var rankFieldId
     @Default(.allIssuesJQL) var allIssuesJQL
     @FromKeychain(.gitHubToken) var gitHubToken
+    @Default(.githubSearchOrgs) var githubSearchOrgs
 
     var body: some View {
         TextField("JQL Query:", text: $jql)
@@ -248,6 +249,10 @@ private struct QuerySection: View {
         SecureField("GitHub Token:", text: $gitHubToken)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. GitHub PAT with pull-request read scope. When set, each linked PR gets a third line with review decision, unresolved-thread count, and CI state. Open PRs whose CI failed are labeled \"error\" in red.")
+            .font(.footnote)
+        TextField("GitHub Search Orgs:", text: $githubSearchOrgs)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Comma-separated GitHub orgs (e.g. \"acme, acme-labs\"). When Jira's dev-status API returns no PRs for a ticket, JiraBar falls back to searching these orgs for PRs whose title contains the ticket key. Requires a GitHub Token.")
             .font(.footnote)
         Picker("Refresh Rate:", selection: $refreshRate) {
             Text("1 minute").tag(1)

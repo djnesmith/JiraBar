@@ -58,6 +58,11 @@ extension Defaults.Keys {
     /// "Open Search results" and opens Jira with this query. Intended for a broader "everything
     /// I've worked on" view that ignores the main JQL's filters (e.g. closed issues).
     static let allIssuesJQL = Key<String>("allIssuesJQL", default: "")
+
+    /// Comma-separated GitHub orgs to fall back to when Jira's dev-status API returns no PRs
+    /// for an issue. Requires a GitHub token. Searches GitHub for PRs whose title contains the
+    /// issue key inside those orgs. Empty disables the fallback.
+    static let githubSearchOrgs = Key<String>("githubSearchOrgs", default: "")
 }
 
 extension KeychainKeys {

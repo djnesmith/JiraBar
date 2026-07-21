@@ -30,6 +30,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.flagFieldId) var flagFieldId
     @Default(.allIssuesJQL) var allIssuesJQL
     @Default(.myDashboardURL) var myDashboardURL
+    @Default(.githubSearchOrgs) var githubSearchOrgs
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -238,12 +239,14 @@ extension AppDelegate {
                             }
 
                             self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
-                                guard !prs.isEmpty else { return }
-                                self.fetchGithubStatuses(for: prs) { statusByURL in
-                                    DispatchQueue.main.async {
-                                        issueMenu.addItem(.separator())
-                                        for pr in prs {
-                                            self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
+                                self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
+                                    guard !merged.isEmpty else { return }
+                                    self.fetchGithubStatuses(for: merged) { statusByURL in
+                                        DispatchQueue.main.async {
+                                            issueMenu.addItem(.separator())
+                                            for pr in merged {
+                                                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
+                                            }
                                         }
                                     }
                                 }
@@ -792,6 +795,36 @@ extension AppDelegate {
         return slug.isEmpty ? key : "\(key)-\(slug)"
     }
 
+    /// When Jira's dev-status API returns no PRs for an issue, fall back to searching GitHub
+    /// for PRs whose title contains the issue key (Jira only links PRs when the key is in the
+    /// branch name on some integration configs). Deduped by URL before returning so a PR that
+    /// somehow appeared in both sources renders once.
+    private func prsWithGithubFallback(
+        _ jiraPRs: [JiraPullRequest],
+        issueKey: String,
+        completion: @escaping ([JiraPullRequest]) -> Void
+    ) {
+        let dedup: ([JiraPullRequest]) -> [JiraPullRequest] = { prs in
+            var seen = Set<String>()
+            return prs.filter { seen.insert($0.url).inserted }
+        }
+
+        let orgs = self.githubSearchOrgs
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
+
+        guard jiraPRs.isEmpty, !orgs.isEmpty, !token.isEmpty else {
+            completion(dedup(jiraPRs))
+            return
+        }
+
+        GithubClient().searchPRsForIssueKey(issueKey, orgs: orgs, token: token) { fallbackPRs in
+            completion(dedup(jiraPRs + fallbackPRs))
+        }
+    }
+
     /// Fires a GitHub GraphQL fetch per open PR (in parallel) when a token is configured.
     /// Merges results into a [url: status] dict for the renderer. Empty result if no token
     /// or the fetches all fail — callers still render the base 2-line row.
@@ -800,7 +833,12 @@ extension AppDelegate {
         completion: @escaping ([String: GithubPRStatus]) -> Void
     ) {
         let token = gitHubToken.trimmingCharacters(in: .whitespaces)
-        let candidates = prs.filter { $0.status.uppercased() == "OPEN" && $0.url.contains("github.com") }
+        // Fetch for OPEN (review/CI info) and MERGED (release/releasing info) — the two states
+        // where the extra GitHub signals matter. DECLINED / DRAFT are ignored to save API calls.
+        let candidates = prs.filter {
+            let status = $0.status.uppercased()
+            return (status == "OPEN" || status == "MERGED") && $0.url.contains("github.com")
+        }
         guard !token.isEmpty, !candidates.isEmpty else {
             completion([:])
             return
@@ -845,8 +883,15 @@ extension AppDelegate {
             title.appendString(string: pr.status.lowercased(), color: AppDelegate.prStatusColorHex(pr.status))
         }
 
-        if let ghStatus, pr.status.uppercased() == "OPEN" {
-            appendLine3(status: ghStatus, into: title)
+        if let ghStatus {
+            switch pr.status.uppercased() {
+            case "OPEN":
+                appendLine3(status: ghStatus, into: title)
+            case "MERGED":
+                appendMergedRelease(status: ghStatus, into: title)
+            default:
+                break
+            }
         } else if pr.status.uppercased() == "OPEN" && pr.isApproved {
             // Fallback when GitHub data isn't available but Jira has an approved flag.
             title.appendString(string: " - ", color: "#888888")
@@ -858,8 +903,17 @@ extension AppDelegate {
         prItem.view = PRMenuItemView(
             attributedTitle: title,
             icon: NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil),
-            onLeftClick: {
-                if let url = URL(string: urlString) {
+            onLeftClick: { modifiers in
+                if modifiers.contains(.shift) {
+                    if let number = AppDelegate.prNumber(from: urlString) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(number, forType: .string)
+                        sendNotification(body: "Copied PR #\(number)")
+                    }
+                    return
+                }
+                let target = AppDelegate.targetURL(forPR: urlString, modifiers: modifiers)
+                if let url = URL(string: target) {
                     NSWorkspace.shared.open(url)
                 }
             },
@@ -870,6 +924,41 @@ extension AppDelegate {
             }
         )
         menu.addItem(prItem)
+    }
+
+    /// Chooses the URL to open for a modifier-click on a PR row.
+    /// - plain: the PR itself
+    /// - ⌘: Create Release page for the repo
+    /// - ⌥: Actions tab
+    /// - ⌃: repo homepage
+    /// Falls back to the PR URL if the repo base can't be parsed (non-standard host / path).
+    static func targetURL(forPR prURL: String, modifiers: NSEvent.ModifierFlags) -> String {
+        guard let base = repoBaseURL(from: prURL) else { return prURL }
+        if modifiers.contains(.command) { return "\(base)/releases/new" }
+        if modifiers.contains(.option)  { return "\(base)/actions" }
+        if modifiers.contains(.control) { return base }
+        return prURL
+    }
+
+    /// Extracts the PR number from a URL like https://github.com/owner/repo/pull/269.
+    /// Returns nil if the path isn't a /pull/<n> shape.
+    static func prNumber(from prURL: String) -> String? {
+        guard let u = URL(string: prURL) else { return nil }
+        let parts = u.pathComponents
+        // ["/", "owner", "repo", "pull", "<n>"]
+        guard parts.count >= 5, parts[3] == "pull", Int(parts[4]) != nil else { return nil }
+        return parts[4]
+    }
+
+    /// Turns a PR URL like https://github.com/owner/repo/pull/42 into
+    /// https://github.com/owner/repo — nil if the path isn't at least two segments deep.
+    private static func repoBaseURL(from prURL: String) -> String? {
+        guard let u = URL(string: prURL),
+              let scheme = u.scheme,
+              let host = u.host else { return nil }
+        let parts = u.pathComponents
+        guard parts.count >= 3 else { return nil }
+        return "\(scheme)://\(host)/\(parts[1])/\(parts[2])"
     }
 
     /// Adds "approved · N unresolved · CI ✓" (or a subset) as a third line. Elements without
@@ -910,6 +999,29 @@ extension AppDelegate {
                 title.appendString(string: " · ", color: "#888888")
             }
             title.appendString(string: piece.0, color: piece.1)
+        }
+    }
+
+    /// For merged PRs, appends a third line indicating whether the change has shipped
+    /// ("released" — a release was published after this PR merged) or is currently in flight
+    /// ("releasing" — the default branch's HEAD commit has checks in flight, i.e. actions running).
+    /// Both are heuristics; nothing rendered when neither signal is present.
+    private func appendMergedRelease(status: GithubPRStatus, into title: NSMutableAttributedString) {
+        guard status.isMerged else { return }
+
+        // "released" wins over "releasing" — if a release is already out, further running
+        // workflows are irrelevant to the display.
+        if let releasedAt = status.latestReleasePublishedAt,
+           let mergedAt = status.mergedAt,
+           releasedAt > mergedAt {
+            title.appendNewLine()
+            title.appendString(string: "released", color: "#2DA44E")
+            return
+        }
+
+        if let ci = status.defaultBranchCIState, ci == "PENDING" || ci == "EXPECTED" {
+            title.appendNewLine()
+            title.appendString(string: "releasing", color: "#DAA520")
         }
     }
 

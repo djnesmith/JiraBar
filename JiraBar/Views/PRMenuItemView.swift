@@ -6,7 +6,9 @@ import AppKit
 final class PRMenuItemView: NSView {
     private let attributedTitle: NSAttributedString
     private let icon: NSImage?
-    private let onLeftClick: () -> Void
+    /// Modifier flags (⌘/⌥/⌃) are passed through so callers can route to the PR itself
+    /// (no modifier), the repo homepage (⌃), the Actions tab (⌥), or Create Release (⌘).
+    private let onLeftClick: (NSEvent.ModifierFlags) -> Void
     private let onRightClick: () -> Void
 
     private let leftInset: CGFloat = 14
@@ -21,7 +23,7 @@ final class PRMenuItemView: NSView {
         attributedTitle: NSAttributedString,
         icon: NSImage?,
         width: CGFloat = 360,
-        onLeftClick: @escaping () -> Void,
+        onLeftClick: @escaping (NSEvent.ModifierFlags) -> Void,
         onRightClick: @escaping () -> Void
     ) {
         self.attributedTitle = attributedTitle
@@ -79,8 +81,9 @@ final class PRMenuItemView: NSView {
     override func mouseUp(with event: NSEvent) {
         isHighlighted = false
         needsDisplay = true
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         enclosingMenuItem?.menu?.cancelTracking()
-        onLeftClick()
+        onLeftClick(modifiers)
     }
 
     override func rightMouseUp(with event: NSEvent) {

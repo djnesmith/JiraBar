@@ -27,6 +27,7 @@ struct AppSettings: Codable {
     var flagFieldId: String?
     var rankFieldId: String?
     var allIssuesJQL: String?
+    var githubSearchOrgs: String?
 
     // Lists
     var statusOrder: [String]?
@@ -53,6 +54,7 @@ struct AppSettings: Codable {
             flagFieldId: Defaults[.flagFieldId],
             rankFieldId: Defaults[.rankFieldId],
             allIssuesJQL: Defaults[.allIssuesJQL],
+            githubSearchOrgs: Defaults[.githubSearchOrgs],
             statusOrder: Defaults[.statusOrder],
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -77,6 +79,7 @@ struct AppSettings: Codable {
         if let value = flagFieldId { Defaults[.flagFieldId] = value }
         if let value = rankFieldId { Defaults[.rankFieldId] = value }
         if let value = allIssuesJQL { Defaults[.allIssuesJQL] = value }
+        if let value = githubSearchOrgs { Defaults[.githubSearchOrgs] = value }
         if let value = statusOrder { Defaults[.statusOrder] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         if let value = userFieldShortcuts { Defaults[.userFieldShortcuts] = value }

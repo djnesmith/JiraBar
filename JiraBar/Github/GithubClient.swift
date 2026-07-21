@@ -18,6 +18,15 @@ struct GithubPRStatus {
     var totalThreads: Int
     /// "SUCCESS" / "FAILURE" / "PENDING" / "ERROR" / "EXPECTED" — nil if there are no checks.
     var ciState: String?
+    /// Whether the PR has been merged. Drives whether the merged-PR release indicators apply.
+    var isMerged: Bool
+    /// ISO-8601 timestamp of the merge. Compared lexicographically against release timestamps.
+    var mergedAt: String?
+    /// ISO-8601 timestamp of the repo's most recent published release, or nil if none.
+    var latestReleasePublishedAt: String?
+    /// Status of checks on the default branch's HEAD commit — proxy for "is a release workflow
+    /// currently running on main?" when the state is PENDING.
+    var defaultBranchCIState: String?
 }
 
 public class GithubClient {
@@ -65,8 +74,16 @@ public class GithubClient {
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
               reviewDecision
+              merged
+              mergedAt
               reviewThreads(first: 100) { nodes { isResolved } }
               commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+            }
+            latestRelease { publishedAt }
+            defaultBranchRef {
+              target {
+                ... on Commit { statusCheckRollup { state } }
+              }
             }
           }
         }
@@ -117,17 +134,104 @@ public class GithubClient {
                     let ciState = commitNodes.last
                         .flatMap { ($0["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any] }?["state"] as? String
 
+                    let isMerged = (prDict["merged"] as? Bool) ?? false
+                    let mergedAt = prDict["mergedAt"] as? String
+                    let latestReleasePublishedAt = (repoDict["latestRelease"] as? [String: Any])?["publishedAt"] as? String
+                    let defaultBranchCIState = ((repoDict["defaultBranchRef"] as? [String: Any])?["target"] as? [String: Any])
+                        .flatMap { $0["statusCheckRollup"] as? [String: Any] }?["state"] as? String
+
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
                         unresolvedThreads: unresolved,
                         totalThreads: threadNodes.count,
-                        ciState: ciState
+                        ciState: ciState,
+                        isMerged: isMerged,
+                        mergedAt: mergedAt,
+                        latestReleasePublishedAt: latestReleasePublishedAt,
+                        defaultBranchCIState: defaultBranchCIState
                     ))
                 case .failure(let error):
                     print("github graphql: \(error)")
                     completion(nil)
                 }
             }
+    }
+
+    /// Fallback lookup used when Jira's dev-status API returns no PRs for an issue — searches
+    /// GitHub for PRs whose title contains the exact issue key, scoped to the caller-supplied
+    /// orgs. Reconstructs `JiraPullRequest` values so the renderer path stays unchanged.
+    func searchPRsForIssueKey(
+        _ key: String,
+        orgs: [String],
+        token: String,
+        completion: @escaping ([JiraPullRequest]) -> Void
+    ) {
+        let trimmedOrgs = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !token.isEmpty, !trimmedOrgs.isEmpty, !key.isEmpty else {
+            completion([])
+            return
+        }
+
+        // Quote the key so GitHub's tokenizer treats "PROJ-42" as a single literal (the hyphen
+        // otherwise splits it into two terms and matches spuriously).
+        let orgTerms = trimmedOrgs.map { "org:\($0)" }.joined(separator: " ")
+        let q = "\"\(key)\" in:title is:pr \(orgTerms)"
+
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .userAgent("JiraBar")
+        ]
+
+        AF.request(
+            "https://api.github.com/search/issues",
+            method: .get,
+            parameters: ["q": q, "per_page": 20],
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .responseData { response in
+            switch response.result {
+            case .success(let data):
+                guard
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let items = json["items"] as? [[String: Any]]
+                else {
+                    completion([])
+                    return
+                }
+                let prs: [JiraPullRequest] = items.compactMap { item in
+                    guard
+                        let htmlURL = item["html_url"] as? String,
+                        let number = item["number"] as? Int,
+                        let title = item["title"] as? String
+                    else { return nil }
+                    let state = (item["state"] as? String)?.lowercased() ?? "open"
+                    let mergedAt = (item["pull_request"] as? [String: Any])?["merged_at"] as? String
+                    let status: String
+                    if state == "open" {
+                        status = "OPEN"
+                    } else if mergedAt != nil {
+                        status = "MERGED"
+                    } else {
+                        status = "DECLINED"
+                    }
+                    return JiraPullRequest(
+                        id: "#\(number)",
+                        name: title,
+                        url: htmlURL,
+                        status: status,
+                        reviewers: nil
+                    )
+                }
+                completion(prs)
+            case .failure(let error):
+                print("github search: \(error)")
+                completion([])
+            }
+        }
     }
 
     /// Extracts (owner, repo, number) from a github.com PR URL. Returns nil for anything else
