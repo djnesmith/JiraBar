@@ -18,6 +18,14 @@ final class PRMenuItemView: NSView {
     private let verticalInset: CGFloat = 4
 
     private var isHighlighted = false
+    /// Modifier flags currently held while the cursor is over this row. Drives the hint
+    /// overlay — the pill that says "Left Click to …" so the user learns what each modifier
+    /// does without leaving the menu. Only sampled while `pollTimer` is running.
+    private var hoverModifiers: NSEvent.ModifierFlags = []
+    /// Polls `NSEvent.modifierFlags` while the mouse is over the row. `.flagsChanged` events
+    /// aren't reliably dispatched inside NSMenu's modal tracking loop, so a short-interval
+    /// poll is the only way to notice a key press while the cursor is stationary.
+    private var pollTimer: Timer?
 
     init(
         attributedTitle: NSAttributedString,
@@ -61,11 +69,15 @@ final class PRMenuItemView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         isHighlighted = true
+        hoverModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        startModifierPolling()
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         isHighlighted = false
+        hoverModifiers = []
+        stopModifierPolling()
         needsDisplay = true
     }
 
@@ -75,7 +87,54 @@ final class PRMenuItemView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         isHighlighted = false
+        hoverModifiers = []
+        stopModifierPolling()
         needsDisplay = true
+    }
+
+    deinit {
+        stopModifierPolling()
+    }
+
+    /// Sample the global modifier state every 50ms while the mouse is over the row. Explicitly
+    /// added to `.eventTracking` mode so the timer keeps firing during NSMenu's modal loop —
+    /// `.common` alone would let it stall while a menu is open.
+    private func startModifierPolling() {
+        guard pollTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let mods = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if self.hoverModifiers != mods {
+                self.hoverModifiers = mods
+                self.needsDisplay = true
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        pollTimer = timer
+    }
+
+    private func stopModifierPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    /// Left-side hint: "Left Click to …" varying by the currently-held modifier. Nil when no
+    /// modifier is held so the plain left-click-opens-the-PR case doesn't need an explainer.
+    private var leftHintText: String? {
+        guard isHighlighted else { return nil }
+        if hoverModifiers.contains(.shift)   { return "Left Click to Copy PR #" }
+        if hoverModifiers.contains(.command) { return "Left Click to Create Release" }
+        if hoverModifiers.contains(.option)  { return "Left Click to open Actions" }
+        if hoverModifiers.contains(.control) { return "Left Click to open Repo" }
+        return nil
+    }
+
+    /// Right-side hint — the right-click affordance is only shown as a companion to the
+    /// modifier hint, not on plain hover, so casual mouse-over doesn't clutter every row.
+    private var rightHintText: String? {
+        guard leftHintText != nil else { return nil }
+        return "Right Click Copy URL"
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -136,5 +195,45 @@ final class PRMenuItemView: NSView {
             }
         }
         mutable.draw(with: textRect, options: [.usesLineFragmentOrigin])
+
+        if let hint = leftHintText {
+            drawHintPill(hint, alignment: .left)
+        }
+        if let hint = rightHintText {
+            drawHintPill(hint, alignment: .right)
+        }
+    }
+
+    private enum HintAlignment { case left, right }
+
+    /// Draws a small pill over the row explaining a click action. Aligned to the requested
+    /// side, vertically centered, using the system accent color so it reads on both light
+    /// and dark themes.
+    private func drawHintPill(_ text: String, alignment: HintAlignment) {
+        let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white
+        ]
+        let attributed = NSAttributedString(string: text, attributes: attrs)
+        let textSize = attributed.size()
+        let padH: CGFloat = 8
+        let padV: CGFloat = 2
+        let pillWidth = ceil(textSize.width + padH * 2)
+        let pillHeight = ceil(textSize.height + padV * 2)
+        // Left pill starts just inside the row's left edge (past the icon column) so it doesn't
+        // sit on the leading padding; right pill hugs the right inset. Both are vertically centered.
+        let x: CGFloat
+        switch alignment {
+        case .left:  x = leftInset + iconSize + iconTextSpacing
+        case .right: x = bounds.width - rightInset - pillWidth
+        }
+        let y = (bounds.height - pillHeight) / 2
+        let pillRect = NSRect(x: x, y: y, width: pillWidth, height: pillHeight)
+
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: pillRect, xRadius: 4, yRadius: 4).fill()
+
+        attributed.draw(at: NSPoint(x: x + padH, y: y + padV))
     }
 }
