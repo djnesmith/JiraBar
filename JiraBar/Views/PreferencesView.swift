@@ -217,6 +217,9 @@ private struct QuerySection: View {
     @Default(.allIssuesJQL) var allIssuesJQL
     @FromKeychain(.gitHubToken) var gitHubToken
     @Default(.githubSearchOrgs) var githubSearchOrgs
+    @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
+    @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
+    @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
 
     var body: some View {
         TextField("JQL Query:", text: $jql)
@@ -253,6 +256,38 @@ private struct QuerySection: View {
         TextField("GitHub Search Orgs:", text: $githubSearchOrgs)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Comma-separated GitHub orgs (e.g. \"acme, acme-labs\"). When Jira's dev-status API returns no PRs for a ticket, JiraBar falls back to searching these orgs for PRs whose title contains the ticket key. Requires a GitHub Token.")
+            .font(.footnote)
+        LabeledContent("Jira → GitHub Map:") {
+            HStack {
+                TextField("", text: $jiraGithubUserMapPath)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                Button("Browse…") {
+                    let panel = NSOpenPanel()
+                    panel.allowsMultipleSelection = false
+                    panel.canChooseDirectories = false
+                    panel.canChooseFiles = true
+                    panel.allowedContentTypes = [.json]
+                    if panel.runModal() == .OK, let url = panel.url {
+                        jiraGithubUserMapPath = url.path
+                        // Capture a security-scoped bookmark so a sandboxed launch can still
+                        // read the file next time. Silently keep the raw path only when the
+                        // bookmark can't be created (rare — usually a permission edge case).
+                        if let data = try? url.bookmarkData(
+                            options: [.withSecurityScope],
+                            includingResourceValuesForKeys: nil,
+                            relativeTo: nil
+                        ) {
+                            jiraGithubUserMapBookmark = data
+                        }
+                    }
+                }
+            }
+        }
+        Text("Optional. Path to a JSON file mapping Jira accountIds to GitHub logins. When set alongside a GitHub Token and the PR Reviewer field id below, the reviewer-picker dialogs offer a checkbox to also assign you and add the selected users as reviewers on any linked open PR.")
+            .font(.footnote)
+        TextField("PR Reviewer field id:", text: $githubPRReviewerJiraFieldId)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Jira custom-field id whose users mirror to GitHub PR reviewers — usually a per-install \"Reviewers\" user-picker field. Only dialogs editing this field show the GitHub mirror checkbox.")
             .font(.footnote)
         Picker("Refresh Rate:", selection: $refreshRate) {
             Text("1 minute").tag(1)

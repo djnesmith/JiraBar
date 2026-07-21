@@ -63,6 +63,22 @@ extension Defaults.Keys {
     /// for an issue. Requires a GitHub token. Searches GitHub for PRs whose title contains the
     /// issue key inside those orgs. Empty disables the fallback.
     static let githubSearchOrgs = Key<String>("githubSearchOrgs", default: "")
+
+    /// Path to the JSON file mapping Jira accountIds to GitHub logins. See JiraGithubUserMap
+    /// for the schema. Empty disables the GitHub PR reviewer/assignee integration entirely.
+    /// Stored for display only — actual reads use the security-scoped bookmark below so the
+    /// sandbox permits reading files outside the container across app launches.
+    static let jiraGithubUserMapPath = Key<String>("jiraGithubUserMapPath", default: "")
+
+    /// Security-scoped bookmark data for the same file. Populated when the user picks the file
+    /// via NSOpenPanel; empty otherwise. `JiraGithubUserMap.load` resolves this to a URL and
+    /// wraps the read in `startAccessingSecurityScopedResource` so the sandbox lets it through.
+    static let jiraGithubUserMapBookmark = Key<Data>("jiraGithubUserMapBookmark", default: Data())
+
+    /// The Jira custom-field id whose user value(s) should be mirrored as GitHub PR requested
+    /// reviewers. Empty disables the mirror. Configurable per install — most orgs use a custom
+    /// "Reviewers" user-picker field; the exact id varies per Jira instance.
+    static let githubPRReviewerJiraFieldId = Key<String>("githubPRReviewerJiraFieldId", default: "")
 }
 
 extension KeychainKeys {

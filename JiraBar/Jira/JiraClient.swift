@@ -548,6 +548,26 @@ public class JiraClient {
         return user
     }
 
+    /// Looks up the numeric issue id for a Jira key. Needed by `getIssuePullRequests`, whose
+    /// backing dev-status API takes an id rather than a key. Returns nil on any failure so
+    /// callers can degrade silently.
+    func getIssueId(byKey key: String, completion: @escaping (String?) -> Void) {
+        let url = "\(baseUrl)/rest/api/\(apiVersion)/issue/\(key)"
+        AF.request(url, method: .get, parameters: ["fields": "summary"], headers: authHeaders())
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                guard
+                    let data = response.data,
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let id = json["id"] as? String
+                else {
+                    completion(nil)
+                    return
+                }
+                completion(id)
+            }
+    }
+
     /// Returns the authenticated user (Cloud: accountId-bearing; Server: name-bearing). `nil` on failure.
     func getCurrentUser(completion: @escaping (JiraUser?) -> Void) {
         let url = "\(baseUrl)/rest/api/\(apiVersion)/myself"

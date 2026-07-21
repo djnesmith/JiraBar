@@ -31,6 +31,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.allIssuesJQL) var allIssuesJQL
     @Default(.myDashboardURL) var myDashboardURL
     @Default(.githubSearchOrgs) var githubSearchOrgs
+    @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
+    @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
+    @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -503,10 +506,12 @@ extension AppDelegate {
         window.title = "\(shortcut.label): \(issueKey)"
         window.isReleasedWhenClosed = false
 
+        let showMirror = shouldShowGithubMirrorCheckbox(forJiraFieldId: shortcut.fieldId)
         let view = UserFieldDialog(
             issueKey: issueKey,
             shortcut: shortcut,
-            onSubmit: { [weak self] users, done in
+            showGithubMirrorCheckbox: showMirror,
+            onSubmit: { [weak self] users, updateGithub, done in
                 self?.jiraClient.setIssueUsers(
                     issueKey: issueKey,
                     fieldId: shortcut.fieldId,
@@ -518,6 +523,9 @@ extension AppDelegate {
                             self?.userFieldWindow?.close()
                             self?.userFieldWindow = nil
                             self?.refreshMenu()
+                            if updateGithub {
+                                self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
+                            }
                         }
                         done(success)
                     }
@@ -592,11 +600,14 @@ extension AppDelegate {
         window.title = "Transition: \(transitionName)"
         window.isReleasedWhenClosed = false
 
+        let showMirror = config.hasUserField
+            && shouldShowGithubMirrorCheckbox(forJiraFieldId: config.userFieldId)
         let view = TransitionDialog(
             issueKey: issueKey,
             transitionName: transitionName,
             config: config,
-            onSubmit: { [weak self] comment, users, freeText, selectValue, done in
+            showGithubMirrorCheckbox: showMirror,
+            onSubmit: { [weak self] comment, users, freeText, selectValue, updateGithub, done in
                 self?.submitTransition(
                     issueKey: issueKey,
                     transitionId: transitionId,
@@ -605,6 +616,7 @@ extension AppDelegate {
                     users: users,
                     freeText: freeText,
                     selectValue: selectValue,
+                    updateGithub: updateGithub,
                     completion: done
                 )
             },
@@ -629,6 +641,7 @@ extension AppDelegate {
         users: [JiraUser],
         freeText: String,
         selectValue: String,
+        updateGithub: Bool,
         completion: @escaping (Bool) -> Void
     ) {
         var updates: [JiraClient.TransitionFieldUpdate] = []
@@ -665,6 +678,9 @@ extension AppDelegate {
                     self?.transitionWindow?.close()
                     self?.transitionWindow = nil
                     self?.refreshMenu()
+                    if updateGithub, config.hasUserField {
+                        self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
+                    }
                 }
                 completion(success)
             }
@@ -793,6 +809,178 @@ extension AppDelegate {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         }
         return slug.isEmpty ? key : "\(key)-\(slug)"
+    }
+
+    /// True when the mirror-to-GitHub checkbox should appear for a dialog editing this Jira
+    /// field. Requires: the field is the configured "PR reviewer" Jira field, a GitHub token,
+    /// and a mapping file path — the mirror can't do anything useful without all three.
+    private func shouldShowGithubMirrorCheckbox(forJiraFieldId fieldId: String) -> Bool {
+        let target = self.githubPRReviewerJiraFieldId.trimmingCharacters(in: .whitespaces)
+        let candidate = fieldId.trimmingCharacters(in: .whitespaces)
+        guard !target.isEmpty, target == candidate else { return false }
+        guard !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        guard !self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return true
+    }
+
+    /// Mirrors the Jira reviewer picker onto the linked GitHub PR(s): sets me (looked up in
+    /// the mapping file via my own Jira accountId) as the PR assignee, and adds the selected
+    /// Jira users as requested reviewers. Fire-and-forget with a notification summary — the
+    /// Jira update has already committed by the time this runs, so we degrade gracefully on
+    /// any failure. Only touches OPEN PRs on github.com.
+    private func mirrorReviewersToGithub(issueKey: String, jiraReviewers: [JiraUser]) {
+        let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
+        let mapPath = self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty,
+              let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
+        else {
+            sendNotification(body: "GitHub PR update skipped: mapping file not loaded.")
+            return
+        }
+
+        let reviewerLogins: [String] = jiraReviewers.compactMap { user in
+            guard let accountId = user.accountId, !accountId.isEmpty else { return nil }
+            return map.githubLogin(forJiraAccountId: accountId)
+        }
+        let unmappedReviewers = jiraReviewers.filter { user in
+            guard let accountId = user.accountId, !accountId.isEmpty else { return true }
+            return map.githubLogin(forJiraAccountId: accountId) == nil
+        }
+
+        // Resolve "me" via my own Jira accountId → GitHub login (same map).
+        jiraClient.getCurrentUser { [weak self] me in
+            guard let self else { return }
+            let myGithub: String? = {
+                guard let accountId = me?.accountId, !accountId.isEmpty else { return nil }
+                return map.githubLogin(forJiraAccountId: accountId)
+            }()
+
+            self.jiraClient.getIssueId(byKey: issueKey) { issueId in
+                guard let issueId else {
+                    sendNotification(body: "GitHub PR update skipped: could not look up \(issueKey).")
+                    return
+                }
+                self.jiraClient.getIssuePullRequests(issueId: issueId) { prs in
+                    self.prsWithGithubFallback(prs, issueKey: issueKey) { merged in
+                        let openGithubPRs = merged.filter {
+                            $0.status.uppercased() == "OPEN" && $0.url.contains("github.com")
+                        }
+                        guard !openGithubPRs.isEmpty else {
+                            sendNotification(body: "GitHub PR update skipped: no open PR linked to \(issueKey).")
+                            return
+                        }
+                        self.applyGithubMirror(
+                            prs: openGithubPRs,
+                            myGithubLogin: myGithub,
+                            desiredReviewerLogins: reviewerLogins,
+                            knownGithubLogins: map.knownGithubLogins,
+                            unmappedReviewerNames: unmappedReviewers.map(\.displayName),
+                            token: token,
+                            issueKey: issueKey
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Second half of the mirror flow — syncs each open PR to match the Jira reviewer set.
+    /// Reviewers already on the PR that aren't in the mapping file are left alone so
+    /// external contributors aren't accidentally removed. Posts one summary notification.
+    private func applyGithubMirror(
+        prs: [JiraPullRequest],
+        myGithubLogin: String?,
+        desiredReviewerLogins: [String],
+        knownGithubLogins: Set<String>,
+        unmappedReviewerNames: [String],
+        token: String,
+        issueKey: String
+    ) {
+        let client = GithubClient()
+        let group = DispatchGroup()
+        let syncQueue = DispatchQueue(label: "githubMirror.sync")
+        var assignFailures = 0
+        var addFailures = 0
+        var removeFailures = 0
+        // Reviewer changes are per-PR (they depend on that PR's current state), so use max
+        // (union of add+remove attempts) rather than assuming every PR has both.
+        var reviewerAttempted = 0
+
+        // Case-fold both sides — GitHub API comparisons are case-insensitive on logins.
+        let desiredSet = Set(desiredReviewerLogins.map { $0.lowercased() })
+
+        for pr in prs {
+            if let me = myGithubLogin {
+                group.enter()
+                client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                    syncQueue.async {
+                        if !ok { assignFailures += 1 }
+                        group.leave()
+                    }
+                }
+            }
+
+            group.enter()
+            client.getPRRequestedReviewers(url: pr.url, token: token) { current in
+                let currentSet = Set(current.map { $0.lowercased() })
+                // Add anyone in the ticket's list who isn't already requested on the PR.
+                let toAdd = desiredReviewerLogins.filter { !currentSet.contains($0.lowercased()) }
+                // Remove anyone requested on the PR who's in our mapping (i.e. "ours to touch")
+                // but isn't on the ticket right now. Anyone outside the map stays.
+                let toRemove = current.filter { login in
+                    let lc = login.lowercased()
+                    return knownGithubLogins.contains(lc) && !desiredSet.contains(lc)
+                }
+
+                var didAttempt = false
+
+                if !toAdd.isEmpty {
+                    didAttempt = true
+                    group.enter()
+                    client.requestPRReviewers(url: pr.url, reviewers: toAdd, token: token) { ok in
+                        syncQueue.async {
+                            if !ok { addFailures += 1 }
+                            group.leave()
+                        }
+                    }
+                }
+                if !toRemove.isEmpty {
+                    didAttempt = true
+                    group.enter()
+                    client.removePRReviewers(url: pr.url, reviewers: toRemove, token: token) { ok in
+                        syncQueue.async {
+                            if !ok { removeFailures += 1 }
+                            group.leave()
+                        }
+                    }
+                }
+
+                syncQueue.async {
+                    if didAttempt { reviewerAttempted += 1 }
+                    group.leave()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            var parts: [String] = []
+            if myGithubLogin != nil {
+                let ok = prs.count - assignFailures
+                parts.append("assigned \(ok)/\(prs.count)")
+            } else {
+                parts.append("no GitHub login for you in map — assignee skipped")
+            }
+            if reviewerAttempted > 0 {
+                let failures = addFailures + removeFailures
+                parts.append("reviewers synced on \(reviewerAttempted - min(failures, reviewerAttempted))/\(reviewerAttempted)")
+            } else if !prs.isEmpty {
+                parts.append("reviewers already in sync")
+            }
+            if !unmappedReviewerNames.isEmpty {
+                parts.append("unmapped: \(unmappedReviewerNames.joined(separator: ", "))")
+            }
+            sendNotification(body: "GitHub PR update for \(issueKey): \(parts.joined(separator: "; ")).")
+        }
     }
 
     /// When Jira's dev-status API returns no PRs for an issue, fall back to searching GitHub

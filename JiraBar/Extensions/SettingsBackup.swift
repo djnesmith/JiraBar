@@ -28,6 +28,8 @@ struct AppSettings: Codable {
     var rankFieldId: String?
     var allIssuesJQL: String?
     var githubSearchOrgs: String?
+    var jiraGithubUserMapPath: String?
+    var githubPRReviewerJiraFieldId: String?
 
     // Lists
     var statusOrder: [String]?
@@ -55,6 +57,8 @@ struct AppSettings: Codable {
             rankFieldId: Defaults[.rankFieldId],
             allIssuesJQL: Defaults[.allIssuesJQL],
             githubSearchOrgs: Defaults[.githubSearchOrgs],
+            jiraGithubUserMapPath: Defaults[.jiraGithubUserMapPath],
+            githubPRReviewerJiraFieldId: Defaults[.githubPRReviewerJiraFieldId],
             statusOrder: Defaults[.statusOrder],
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -80,6 +84,8 @@ struct AppSettings: Codable {
         if let value = rankFieldId { Defaults[.rankFieldId] = value }
         if let value = allIssuesJQL { Defaults[.allIssuesJQL] = value }
         if let value = githubSearchOrgs { Defaults[.githubSearchOrgs] = value }
+        if let value = jiraGithubUserMapPath { Defaults[.jiraGithubUserMapPath] = value }
+        if let value = githubPRReviewerJiraFieldId { Defaults[.githubPRReviewerJiraFieldId] = value }
         if let value = statusOrder { Defaults[.statusOrder] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         if let value = userFieldShortcuts { Defaults[.userFieldShortcuts] = value }

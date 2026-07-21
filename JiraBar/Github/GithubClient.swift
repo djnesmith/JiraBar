@@ -234,6 +234,174 @@ public class GithubClient {
         }
     }
 
+    /// Sets the "Assignees" list on a PR (a PR is an Issue under the hood, so the issues API
+    /// owns this field). Replaces whatever was there — GitHub's PATCH endpoint takes the full
+    /// desired list. Ignores non-github.com URLs.
+    func setPRAssignees(
+        url urlString: String,
+        assignees: [String],
+        token: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion(false)
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
+        let body: [String: Any] = ["assignees": assignees]
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)",
+            method: .patch,
+            parameters: body,
+            encoding: JSONEncoding.default,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .response { response in
+            switch response.result {
+            case .success:
+                completion(true)
+            case .failure(let error):
+                print("github setPRAssignees: \(error)")
+                completion(false)
+            }
+        }
+    }
+
+    /// Returns the current requested-reviewer logins on a PR. Empty list on failure / non-github URL.
+    func getPRRequestedReviewers(
+        url urlString: String,
+        token: String,
+        completion: @escaping ([String]) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion([])
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .userAgent("JiraBar")
+        ]
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
+            method: .get,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .responseData { response in
+            guard
+                let data = response.data,
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let users = json["users"] as? [[String: Any]]
+            else {
+                completion([])
+                return
+            }
+            completion(users.compactMap { $0["login"] as? String })
+        }
+    }
+
+    /// Removes the named users from a PR's requested-reviewers list. Empty input is a no-op success.
+    func removePRReviewers(
+        url urlString: String,
+        reviewers: [String],
+        token: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion(false)
+            return
+        }
+        guard !reviewers.isEmpty else {
+            completion(true)
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
+        let body: [String: Any] = ["reviewers": reviewers]
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
+            method: .delete,
+            parameters: body,
+            encoding: JSONEncoding.default,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .response { response in
+            switch response.result {
+            case .success:
+                completion(true)
+            case .failure(let error):
+                print("github removePRReviewers: \(error)")
+                completion(false)
+            }
+        }
+    }
+
+    /// Adds reviewers to a PR's requested-reviewers list. Additive — does not clear anyone
+    /// already requested. Empty list is a no-op success. Ignores non-github.com URLs.
+    func requestPRReviewers(
+        url urlString: String,
+        reviewers: [String],
+        token: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion(false)
+            return
+        }
+        guard !reviewers.isEmpty else {
+            completion(true)
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
+        let body: [String: Any] = ["reviewers": reviewers]
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
+            method: .post,
+            parameters: body,
+            encoding: JSONEncoding.default,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .response { response in
+            switch response.result {
+            case .success:
+                completion(true)
+            case .failure(let error):
+                print("github requestPRReviewers: \(error)")
+                completion(false)
+            }
+        }
+    }
+
     /// Extracts (owner, repo, number) from a github.com PR URL. Returns nil for anything else
     /// (e.g. Bitbucket, GitLab) so the caller can skip the GraphQL call.
     private static func parsePRURL(_ raw: String) -> (String, String, Int)? {

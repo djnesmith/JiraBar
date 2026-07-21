@@ -6,7 +6,10 @@ import SwiftUI
 struct UserFieldDialog: View {
     let issueKey: String
     let shortcut: UserFieldShortcut
-    let onSubmit: ([JiraUser], @escaping (Bool) -> Void) -> Void
+    /// When true, a "Also update GitHub PR" checkbox is shown; its state is passed through
+    /// to `onSubmit`. When false, the checkbox is hidden and the flag is always false.
+    let showGithubMirrorCheckbox: Bool
+    let onSubmit: ([JiraUser], Bool, @escaping (Bool) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var availableUsers: [JiraUser] = []
@@ -15,6 +18,7 @@ struct UserFieldDialog: View {
     @State private var loading: Bool = false
     @State private var loadError: String?
     @State private var submitting: Bool = false
+    @State private var updateGithub: Bool = true
 
     private let client = JiraClient()
 
@@ -93,6 +97,11 @@ struct UserFieldDialog: View {
                 }
             }
 
+            if showGithubMirrorCheckbox {
+                Toggle("Also update GitHub PR: assign me, add selected users as reviewers", isOn: $updateGithub)
+                    .font(.footnote)
+            }
+
             Spacer(minLength: 0)
 
             HStack {
@@ -112,7 +121,7 @@ struct UserFieldDialog: View {
             }
         }
         .padding(16)
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: showGithubMirrorCheckbox ? 470 : 440)
         .onAppear {
             DispatchQueue.main.async { loadUsers() }
         }
@@ -202,7 +211,8 @@ struct UserFieldDialog: View {
     private func submit() {
         guard !submitting else { return }
         submitting = true
-        onSubmit(Array(selectedUsers)) { success in
+        let flag = showGithubMirrorCheckbox && updateGithub
+        onSubmit(Array(selectedUsers), flag) { success in
             if !success { submitting = false }
         }
     }

@@ -6,7 +6,10 @@ struct TransitionDialog: View {
     let issueKey: String
     let transitionName: String
     let config: TransitionPromptConfig
-    let onSubmit: (String, [JiraUser], String, String, @escaping (Bool) -> Void) -> Void
+    /// When true, a "Also update GitHub PR" checkbox is shown alongside the user picker; its
+    /// state is passed through to `onSubmit`. Only meaningful when `config.hasUserField`.
+    let showGithubMirrorCheckbox: Bool
+    let onSubmit: (String, [JiraUser], String, String, Bool, @escaping (Bool) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var comment: String = ""
@@ -18,6 +21,7 @@ struct TransitionDialog: View {
     @State private var loadError: String?
     @State private var selectedOptionValue: String = ""
     @State private var submitting: Bool = false
+    @State private var updateGithub: Bool = true
 
     private var filteredUsers: [JiraUser] {
         let q = userFilter.trimmingCharacters(in: .whitespaces).lowercased()
@@ -138,6 +142,11 @@ struct TransitionDialog: View {
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
+
+            if showGithubMirrorCheckbox {
+                Toggle("Also update GitHub PR: assign me, add selected users as reviewers", isOn: $updateGithub)
+                    .font(.footnote)
+            }
         }
     }
 
@@ -229,7 +238,8 @@ struct TransitionDialog: View {
     private func submit() {
         guard !submitting else { return }
         submitting = true
-        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue) { success in
+        let flag = showGithubMirrorCheckbox && updateGithub
+        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag) { success in
             if !success { submitting = false }
         }
     }
@@ -324,6 +334,7 @@ struct TransitionDialog: View {
         if config.hasSelectField { h += 70 }
         if config.hasTextField { h += config.textFieldMultiline ? 130 : 70 }
         if config.includeComment { h += 150 }
+        if showGithubMirrorCheckbox { h += 24 }
         return max(h, 220)
     }
 }
