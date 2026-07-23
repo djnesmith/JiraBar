@@ -354,8 +354,12 @@ extension AppDelegate {
             issues: self.lastIssues,
             transitionPrompts: self.transitionPrompts,
             statusOrder: self.statusDisplay,
-            onSubmit: { [weak self] success, failure in
+            showMirrorFor: { [weak self] fieldId in
+                self?.shouldShowGithubMirrorCheckbox(forJiraFieldId: fieldId) ?? false
+            },
+            onSubmit: { [weak self] successfulKeys, users, failure, updateGithub in
                 DispatchQueue.main.async {
+                    let success = successfulKeys.count
                     let message: String
                     if failure == 0 {
                         message = "Moved \(success) issue\(success == 1 ? "" : "s")"
@@ -368,6 +372,16 @@ extension AppDelegate {
                     self?.bulkMoveWindow?.close()
                     self?.bulkMoveWindow = nil
                     self?.refreshMenu()
+
+                    if updateGithub, let self {
+                        // Fan out the GitHub mirror after the bulk move commits — one call per
+                        // successfully-transitioned issue, each posting its own summary
+                        // notification (issues without a linked PR are already handled gracefully
+                        // by `mirrorReviewersToGithub`).
+                        for key in successfulKeys {
+                            self.mirrorReviewersToGithub(issueKey: key, jiraReviewers: users)
+                        }
+                    }
                 }
             },
             onCancel: { [weak self] in

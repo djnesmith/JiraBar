@@ -11,7 +11,14 @@ struct BulkMoveDialog: View {
     let issues: [Issue]
     let transitionPrompts: [TransitionPromptConfig]
     let statusOrder: [StatusDisplay]
-    let onSubmit: (_ success: Int, _ failure: Int) -> Void
+    /// Returns true when the given Jira user-field id qualifies for the GitHub mirror
+    /// (correct field id, token present, mapping path set). Passed in as a closure so the
+    /// dialog stays ignorant of Defaults / Keychain plumbing.
+    let showMirrorFor: (String) -> Bool
+    /// Reports the per-key outcome so the caller can fan out the GitHub mirror when
+    /// `updateGithub` is true. `users` is the shared reviewer selection applied to every
+    /// successfully transitioned issue.
+    let onSubmit: (_ successfulKeys: [String], _ users: [JiraUser], _ failureCount: Int, _ updateGithub: Bool) -> Void
     let onCancel: () -> Void
 
     @State private var fromStatus: String = ""
@@ -31,6 +38,7 @@ struct BulkMoveDialog: View {
 
     @State private var submitting: Bool = false
     @State private var progress: String = ""
+    @State private var updateGithub: Bool = true
 
     private let client = JiraClient()
 
@@ -81,6 +89,13 @@ struct BulkMoveDialog: View {
         }
     }
 
+    /// True when the currently-selected transition edits the configured PR-reviewer field
+    /// and the app's mirror preconditions (token + map) are satisfied. Drives the checkbox.
+    private var showGithubMirrorCheckbox: Bool {
+        guard let config = matchingPromptConfig, config.hasUserField else { return false }
+        return showMirrorFor(config.userFieldId)
+    }
+
     private var filteredAssignableUsers: [JiraUser] {
         let q = userFilter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return assignableUsers }
@@ -121,6 +136,11 @@ struct BulkMoveDialog: View {
 
             if !selectedTransitionName.isEmpty {
                 commentSection
+            }
+
+            if showGithubMirrorCheckbox {
+                Toggle("Also update GitHub PRs for every moved issue: assign me, add selected users as reviewers", isOn: $updateGithub)
+                    .font(.footnote)
             }
 
             if submitting {
@@ -490,12 +510,16 @@ struct BulkMoveDialog: View {
             ? comment : nil
 
         var index = 0
-        var successCount = 0
+        var successfulKeys: [String] = []
         var failureCount = 0
+        // Snapshot the shared user list + mirror flag before submit — the dialog's @State
+        // could otherwise be reset by the time the last callback fires.
+        let sharedUsers = Array(pickedUsers)
+        let shouldMirror = showGithubMirrorCheckbox && updateGithub
 
         func processNext() {
             if index >= keys.count {
-                onSubmit(successCount, failureCount)
+                onSubmit(successfulKeys, sharedUsers, failureCount, shouldMirror)
                 return
             }
             let key = keys[index]
@@ -514,7 +538,11 @@ struct BulkMoveDialog: View {
                 fieldUpdates: updates
             ) { success in
                 DispatchQueue.main.async {
-                    if success { successCount += 1 } else { failureCount += 1 }
+                    if success {
+                        successfulKeys.append(key)
+                    } else {
+                        failureCount += 1
+                    }
                     index += 1
                     processNext()
                 }
