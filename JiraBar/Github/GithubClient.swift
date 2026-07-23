@@ -174,10 +174,14 @@ public class GithubClient {
             return
         }
 
-        // Quote the key so GitHub's tokenizer treats "PROJ-42" as a single literal (the hyphen
-        // otherwise splits it into two terms and matches spuriously).
+        // GitHub's search tokenizes on hyphen even inside quotes, so searching for a key like
+        // "PROJ-42" will happily return a PR titled "OTHER-42 …" — it matches on the numeric
+        // half. We still ask GitHub to narrow (quotes reduce false positives and cost quota)
+        // but the returned titles are re-verified below with an exact case-insensitive
+        // substring check on the full key.
         let orgTerms = trimmedOrgs.map { "org:\($0)" }.joined(separator: " ")
         let q = "\"\(key)\" in:title is:pr \(orgTerms)"
+        let normalizedKey = key.lowercased()
 
         let headers: HTTPHeaders = [
             .authorization(bearerToken: token),
@@ -208,6 +212,9 @@ public class GithubClient {
                         let number = item["number"] as? Int,
                         let title = item["title"] as? String
                     else { return nil }
+                    // Exact-key substring check — drops false positives that share the numeric
+                    // half of the key (see the tokenization note where the query is built).
+                    guard title.lowercased().contains(normalizedKey) else { return nil }
                     let state = (item["state"] as? String)?.lowercased() ?? "open"
                     let mergedAt = (item["pull_request"] as? [String: Any])?["merged_at"] as? String
                     let status: String
