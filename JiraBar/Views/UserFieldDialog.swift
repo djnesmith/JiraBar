@@ -105,12 +105,7 @@ struct UserFieldDialog: View {
             Spacer(minLength: 0)
 
             HStack {
-                Button("") { submit() }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .frame(width: 0, height: 0)
-                    .opacity(0)
-                    .accessibilityHidden(true)
-                    .disabled(submitting)
+                HiddenSubmitButton(disabled: submitting) { submit() }
 
                 Spacer()
                 Button("Cancel") { onCancel() }

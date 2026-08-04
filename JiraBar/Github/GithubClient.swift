@@ -45,6 +45,18 @@ struct GithubPRStatus {
 
 public class GithubClient {
 
+    /// Standard REST-API headers shared by every endpoint. `json: true` adds the JSON
+    /// content type for calls that send a body.
+    private func apiHeaders(token: String, json: Bool = false) -> HTTPHeaders {
+        var headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .userAgent("JiraBar")
+        ]
+        if json { headers.add(.contentType("application/json")) }
+        return headers
+    }
+
     func getLatestRelease(completion:@escaping (((LatestRelease?) -> Void))) -> Void {
              let headers: HTTPHeaders = [
                  .contentType("application/json"),
@@ -213,11 +225,7 @@ public class GithubClient {
         let q = "\"\(key)\" in:title is:pr \(orgTerms)"
         let normalizedKey = key.lowercased()
 
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token)
 
         AF.request(
             "https://api.github.com/search/issues",
@@ -289,11 +297,7 @@ public class GithubClient {
             "is:pr is:open review-requested:@me \(orgTerms)"
         ].map { $0.trimmingCharacters(in: .whitespaces) }
 
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token)
 
         let group = DispatchGroup()
         let syncQueue = DispatchQueue(label: "githubMyPRs.sync")
@@ -362,12 +366,7 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         var payload: [String: Any] = ["event": event]
         if !body.isEmpty { payload["body"] = body }
         AF.request(
@@ -406,12 +405,7 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let payload: [String: Any] = ["merge_method": method]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/merge",
@@ -448,12 +442,7 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["assignees": assignees]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)/assignees",
@@ -489,11 +478,7 @@ public class GithubClient {
             completion(nil)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token)
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
             method: .get,
@@ -538,12 +523,7 @@ public class GithubClient {
             completion(true)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["reviewers": reviewers]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
@@ -583,12 +563,7 @@ public class GithubClient {
             completion(true)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["reviewers": reviewers]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",

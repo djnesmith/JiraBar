@@ -506,18 +506,36 @@ extension AppDelegate {
         presentBulkMoveDialog()
     }
 
-    private func presentBulkMoveDialog() {
-        bulkMoveWindow?.close()
+    /// Shared presenter for the transient SwiftUI dialogs (bulk-move, upload, flag,
+    /// user-field, comment, transition): closes any previous instance, hosts the view in a
+    /// fresh non-released window stored at `keyPath`, and brings it frontmost. Preferences
+    /// and About keep their own presenters — different lifecycle (IUO windows, no onCancel
+    /// plumbing) and a documented CA-commit workaround.
+    private func presentDialog<V: View>(
+        _ view: V,
+        title: String,
+        size: NSSize,
+        window keyPath: ReferenceWritableKeyPath<AppDelegate, NSWindow?>
+    ) {
+        self[keyPath: keyPath]?.close()
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 700),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Move Multiple Issues"
+        window.title = title
         window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
 
+        self[keyPath: keyPath] = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func presentBulkMoveDialog() {
         let view = BulkMoveDialog(
             issues: self.lastIssues,
             transitionPrompts: self.transitionPrompts,
@@ -557,12 +575,7 @@ extension AppDelegate {
                 self?.bulkMoveWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        bulkMoveWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Move Multiple Issues", size: NSSize(width: 600, height: 700), window: \.bulkMoveWindow)
     }
 
     @objc
@@ -578,17 +591,6 @@ extension AppDelegate {
     }
 
     private func presentUploadDialog(issueKey: String) {
-        uploadWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Upload: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = UploadFilesDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] urls, comment, done in
@@ -612,12 +614,7 @@ extension AppDelegate {
                 self?.uploadWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        uploadWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Upload: \(issueKey)", size: NSSize(width: 520, height: 540), window: \.uploadWindow)
     }
 
     @objc
@@ -627,17 +624,6 @@ extension AppDelegate {
     }
 
     private func presentFlagDialog(issueKey: String) {
-        flagWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 260),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Flag: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = FlagDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] comment, done in
@@ -662,12 +648,7 @@ extension AppDelegate {
                 self?.flagWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        flagWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Flag: \(issueKey)", size: NSSize(width: 480, height: 260), window: \.flagWindow)
     }
 
     @objc
@@ -677,17 +658,6 @@ extension AppDelegate {
     }
 
     private func presentUserFieldDialog(issueKey: String, shortcut: UserFieldShortcut) {
-        userFieldWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "\(shortcut.label): \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let showMirror = shouldShowGithubMirrorCheckbox(forJiraFieldId: shortcut.fieldId)
         let view = UserFieldDialog(
             issueKey: issueKey,
@@ -718,26 +688,10 @@ extension AppDelegate {
                 self?.userFieldWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        userFieldWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "\(shortcut.label): \(issueKey)", size: NSSize(width: 520, height: 440), window: \.userFieldWindow)
     }
 
     private func presentCommentDialog(issueKey: String) {
-        commentWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 280),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Comment: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = CommentDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] comment, done in
@@ -757,12 +711,7 @@ extension AppDelegate {
                 self?.commentWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        commentWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Comment: \(issueKey)", size: NSSize(width: 520, height: 280), window: \.commentWindow)
     }
 
     private func presentTransitionDialog(
@@ -771,17 +720,6 @@ extension AppDelegate {
         transitionName: String,
         config: TransitionPromptConfig
     ) {
-        transitionWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Transition: \(transitionName)"
-        window.isReleasedWhenClosed = false
-
         let showMirror = config.hasUserField
             && shouldShowGithubMirrorCheckbox(forJiraFieldId: config.userFieldId)
         let prStatus = PRActionsStatus()
@@ -817,12 +755,7 @@ extension AppDelegate {
                 self?.transitionWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        transitionWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Transition: \(transitionName)", size: NSSize(width: 520, height: 480), window: \.transitionWindow)
     }
 
     private func submitTransition(
@@ -838,26 +771,7 @@ extension AppDelegate {
         prStatus: PRActionsStatus,
         completion: @escaping (Bool) -> Void
     ) {
-        var updates: [JiraClient.TransitionFieldUpdate] = []
-        if config.hasUserField, !users.isEmpty {
-            updates.append(.users(
-                fieldId: config.userFieldId.trimmingCharacters(in: .whitespaces),
-                users: users,
-                multi: config.userFieldAllowsMultiple
-            ))
-        }
-        if config.hasTextField, !freeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            updates.append(.text(
-                fieldId: config.textFieldId.trimmingCharacters(in: .whitespaces),
-                value: freeText
-            ))
-        }
-        if config.hasSelectField, !selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
-            updates.append(.select(
-                fieldId: config.selectFieldId.trimmingCharacters(in: .whitespaces),
-                value: selectValue
-            ))
-        }
+        let updates = config.fieldUpdates(users: users, freeText: freeText, selectValue: selectValue)
 
         let effectiveComment = config.includeComment ? comment : nil
 

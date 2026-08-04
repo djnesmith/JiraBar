@@ -346,12 +346,7 @@ struct TransitionDialog: View {
             // The visible Transition button keeps .defaultAction so Return still works when
             // no text field has focus, but a multi-line TextField swallows Return for newlines,
             // so we need ⌘-Return as an unambiguous submit path.
-            Button("") { submit() }
-                .keyboardShortcut(.return, modifiers: .command)
-                .frame(width: 0, height: 0)
-                .opacity(0)
-                .accessibilityHidden(true)
-                .disabled(submitting)
+            HiddenSubmitButton(disabled: submitting) { submit() }
 
             Spacer()
             Button("Cancel") { onCancel() }

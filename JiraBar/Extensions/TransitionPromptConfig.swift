@@ -52,8 +52,8 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// when `enablePRMerge` is true.
     var prMergeMethod: String = "rebase"
 
-    /// When true, on submit JiraBar patches PR assignees so the Jira Assignee becomes the PR
-    /// Assignee — only when the PR has no assignee yet (never overwrites an existing one).
+    /// When true, on submit JiraBar adds the ticket's Jira Assignee (mapped via the Jira →
+    /// GitHub file) as the PR assignee — only when the PR has no assignee yet.
     var enablePRAssigneeSync: Bool = false
 
     func matches(transitionName incoming: String) -> Bool {
@@ -66,6 +66,33 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     var hasTextField: Bool { !textFieldId.trimmingCharacters(in: .whitespaces).isEmpty }
     var hasSelectField: Bool {
         !selectFieldId.trimmingCharacters(in: .whitespaces).isEmpty && !selectOptions.isEmpty
+    }
+
+    /// Builds the transition field updates this config prescribes from a dialog's collected
+    /// values. Shared by the single-transition and bulk-move submit paths so the empty/trim
+    /// rules can't drift apart.
+    func fieldUpdates(users: [JiraUser], freeText: String, selectValue: String) -> [JiraClient.TransitionFieldUpdate] {
+        var updates: [JiraClient.TransitionFieldUpdate] = []
+        if hasUserField, !users.isEmpty {
+            updates.append(.users(
+                fieldId: userFieldId.trimmingCharacters(in: .whitespaces),
+                users: users,
+                multi: userFieldAllowsMultiple
+            ))
+        }
+        if hasTextField, !freeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updates.append(.text(
+                fieldId: textFieldId.trimmingCharacters(in: .whitespaces),
+                value: freeText
+            ))
+        }
+        if hasSelectField, !selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            updates.append(.select(
+                fieldId: selectFieldId.trimmingCharacters(in: .whitespaces),
+                value: selectValue
+            ))
+        }
+        return updates
     }
 
     /// Tolerant of older saved values that pre-date newer fields. Missing keys fall back to defaults

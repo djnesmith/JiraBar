@@ -69,12 +69,7 @@ struct UploadFilesDialog: View {
             Spacer(minLength: 0)
 
             HStack {
-                Button("") { submit() }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .frame(width: 0, height: 0)
-                    .opacity(0)
-                    .accessibilityHidden(true)
-                    .disabled(submitting || files.isEmpty)
+                HiddenSubmitButton(disabled: submitting || files.isEmpty) { submit() }
 
                 Spacer()
                 Button("Cancel") { onCancel() }
