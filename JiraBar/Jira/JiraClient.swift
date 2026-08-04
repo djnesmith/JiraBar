@@ -129,7 +129,7 @@ public class JiraClient {
     /// Parses just the rank field out of the search response. Returns [issueKey: rankString].
     /// The typed Issue/Fields struct can't decode a dynamic customfield_XXXXX key, so we do
     /// a second pass with JSONSerialization. Empty `fieldId` short-circuits to an empty dict.
-    private static func extractRanks(from data: Data, fieldId: String) -> [String: String] {
+    static func extractRanks(from data: Data, fieldId: String) -> [String: String] {
         guard !fieldId.isEmpty,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let issues = json["issues"] as? [[String: Any]] else {
@@ -306,7 +306,7 @@ public class JiraClient {
     }
 
     /// Pulls a human-readable message out of Jira's `{errorMessages: [...], errors: {field: msg}}` response shape.
-    private static func extractErrorMessage(from data: Data?) -> String? {
+    static func extractErrorMessage(from data: Data?) -> String? {
         guard
             let data,
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
