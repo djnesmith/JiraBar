@@ -75,7 +75,10 @@ private class ObservableString: ObservableObject {
                     try Keychain().set(currentValue!, key: key.keyName)
                 }
             } catch let error {
-                fatalError("\(error)")
+                // A locked or denied keychain must not take the app down mid-keystroke —
+                // keep the in-memory value for the session and surface the failure.
+                NSLog("Keychain write failed for \(key.keyName): \(error)")
+                sendNotification(body: "Couldn't save to Keychain: \(error.localizedDescription)")
             }
         }
     }

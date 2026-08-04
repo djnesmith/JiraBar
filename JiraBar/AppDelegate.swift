@@ -49,8 +49,9 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
         for target in targets {
             jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: target.fieldId) { [weak self] users in
                 DispatchQueue.main.async {
+                    // nil (failed read) renders the same as empty — no user lines, non-destructive.
                     guard let self, let item = target.item else { return }
-                    item.attributedTitle = self.buildTitle(label: target.label, users: users, color: target.color ?? self.fallbackColor)
+                    item.attributedTitle = self.buildTitle(label: target.label, users: users ?? [], color: target.color ?? self.fallbackColor)
                 }
             }
         }
@@ -130,9 +131,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// reference, so without this the delegate would be released the moment refreshMenu
     /// finished and the lazy user-field fetch would never fire. Cleared on each refresh.
     private var submenuDelegates: [IssueSubmenuDelegate] = []
-    
-    var unknownPersonAvatar: NSImage!
-    
+
+    /// Guards against overlapping menu rebuilds (timer fire racing a manual Refresh) — two
+    /// concurrent builds would interleave items on the same NSMenu.
+    private var isRefreshing = false
+
+    /// Set once by `checkForUpdates` when a newer release exists; `refreshMenu` re-appends the
+    /// "New version available" item on every rebuild (removeAllItems would otherwise eat it).
+    private var latestReleaseURL: URL?
+
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         migrateStatusOrderIfNeeded()
         NotificationCenter.default.addObserver(self, selector: #selector(AppDelegate.windowClosed), name: NSWindow.willCloseNotification, object: nil)
@@ -148,22 +155,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusButton.imageHugsTitle = true
         
         statusBarItem.menu = menu
-        
-        timer = Timer.scheduledTimer(
+
+        scheduleRefreshTimer()
+
+        NSApp.setActivationPolicy(.accessory)
+
+        checkForUpdates()
+    }
+
+    /// (Re)creates the refresh timer. Constructed unscheduled and added to the run loop exactly
+    /// once, in `.common` mode, so refreshes keep firing while a menu is held open — the old
+    /// scheduledTimer + add(.common) pair registered the timer twice at launch and the
+    /// post-Preferences reschedule dropped `.common` entirely.
+    private func scheduleRefreshTimer() {
+        timer?.invalidate()
+        let t = Timer(
             timeInterval: Double(refreshRate * 60),
             target: self,
             selector: #selector(refreshMenu),
             userInfo: nil,
             repeats: true
         )
-        timer?.fire()
-        RunLoop.main.add(timer!, forMode: .common)
-        
-        NSApp.setActivationPolicy(.accessory)
-        
-        let config = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-        unknownPersonAvatar = NSImage(systemSymbolName: "person.crop.circle.badge.questionmark", accessibilityDescription: nil)!.withSymbolConfiguration(config)!
-        checkForUpdates()
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        t.fire()
     }
 
     /// Moves any entries the user had under the legacy `statusOrder` [String] key into the
@@ -188,11 +203,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate {
     @objc
     func refreshMenu() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
         NSLog("Refreshing menu")
         self.menu.removeAllItems()
         self.submenuDelegates.removeAll()
-        
+
         jiraClient.getIssuesByJql() { resp, ranks in
+            self.isRefreshing = false
             if let issues = resp.issues {
                 self.lastIssues = issues
                 self.statusBarItem.button?.title = String(issues.count)
@@ -406,6 +424,7 @@ extension AppDelegate {
             self.menu.addItem(withTitle: "Preferences...", action: #selector(self.openPrefecencesWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "About JiraBar", action: #selector(self.openAboutWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "Quit", action: #selector(self.quit), keyEquivalent: "")
+            self.appendUpdateItemIfNeeded()
         }
     }
     
@@ -817,8 +836,10 @@ extension AppDelegate {
     
     @objc
     func openSearchResults() {
-        let encodedPath = jql.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-        NSWorkspace.shared.open(URL(string: "\(baseUrl)/issues?jql=" + encodedPath!)!)
+        guard let encoded = jql.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseUrl)/issues?jql=" + encoded)
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc
@@ -853,12 +874,14 @@ extension AppDelegate {
     
     @objc
     func openCreateNewIssue() {
-        NSWorkspace.shared.open(URL(string: "\(baseUrl)/secure/CreateIssue!default.jspa")!)
+        guard let url = URL(string: "\(baseUrl)/secure/CreateIssue!default.jspa") else { return }
+        NSWorkspace.shared.open(url)
     }
-    
+
     @objc
     func openLink(_ sender: NSMenuItem) {
-        NSWorkspace.shared.open(sender.representedObject as! URL)
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc
@@ -951,8 +974,8 @@ extension AppDelegate {
         return true
     }
 
-    /// Mirrors the Jira reviewer picker onto the linked GitHub PR(s): sets me (looked up in
-    /// the mapping file via my own Jira accountId) as the PR assignee, and adds the selected
+    /// Mirrors the Jira reviewer picker onto the linked GitHub PR(s): adds me (looked up in
+    /// the mapping file via my own Jira accountId) to the PR assignees, and adds the selected
     /// Jira users as requested reviewers. Fire-and-forget with a notification summary — the
     /// Jira update has already committed by the time this runs, so we degrade gracefully on
     /// any failure. Only touches OPEN PRs on github.com.
@@ -1033,6 +1056,10 @@ extension AppDelegate {
         // Reviewer changes are per-PR (they depend on that PR's current state), so use max
         // (union of add+remove attempts) rather than assuming every PR has both.
         var reviewerAttempted = 0
+        // PRs whose current reviewer list couldn't be read — sync is skipped for those
+        // entirely, because diffing against an unknown state would remove people on any
+        // auth/network failure.
+        var reviewerFetchFailures = 0
 
         // Case-fold both sides — GitHub API comparisons are case-insensitive on logins.
         let desiredSet = Set(desiredReviewerLogins.map { $0.lowercased() })
@@ -1040,7 +1067,7 @@ extension AppDelegate {
         for pr in prs {
             if let me = myGithubLogin {
                 group.enter()
-                client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                client.addPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
                     syncQueue.async {
                         if !ok { assignFailures += 1 }
                         group.leave()
@@ -1050,6 +1077,13 @@ extension AppDelegate {
 
             group.enter()
             client.getPRRequestedReviewers(url: pr.url, token: token) { current in
+                guard let current else {
+                    syncQueue.async {
+                        reviewerFetchFailures += 1
+                        group.leave()
+                    }
+                    return
+                }
                 let currentSet = Set(current.map { $0.lowercased() })
                 // Add anyone in the ticket's list who isn't already requested on the PR.
                 let toAdd = desiredReviewerLogins.filter { !currentSet.contains($0.lowercased()) }
@@ -1101,8 +1135,11 @@ extension AppDelegate {
             if reviewerAttempted > 0 {
                 let failures = addFailures + removeFailures
                 parts.append("reviewers synced on \(reviewerAttempted - min(failures, reviewerAttempted))/\(reviewerAttempted)")
-            } else if !prs.isEmpty {
+            } else if !prs.isEmpty && reviewerFetchFailures == 0 {
                 parts.append("reviewers already in sync")
+            }
+            if reviewerFetchFailures > 0 {
+                parts.append("couldn't read reviewers on \(reviewerFetchFailures) PR\(reviewerFetchFailures == 1 ? "" : "s") — sync skipped")
             }
             if !unmappedReviewerNames.isEmpty {
                 parts.append("unmapped: \(unmappedReviewerNames.joined(separator: ", "))")
@@ -1119,9 +1156,10 @@ extension AppDelegate {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
 
         // Jira side: assignee display + is-me check. Independent of GitHub, fires in parallel.
+        // A failed read (nil) renders the same as unassigned — display-only here.
         jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { [weak self] assignees in
             guard let self else { return }
-            let assignee = assignees.first
+            let assignee = assignees?.first
             self.jiraClient.getCurrentUser { me in
                 DispatchQueue.main.async {
                     status.jiraAssigneeName = assignee?.displayName
@@ -1209,7 +1247,11 @@ extension AppDelegate {
         let syncQueue = DispatchQueue(label: "prActions.apply")
         var approveOK = 0, approveFail = 0
         var mergeOK = 0, mergeFail = 0, mergeSkipped = 0
-        var assignSetCount = 0, assignSkipped = 0
+        var assignSetCount = 0, assignFail = 0, assignNotTouched = 0
+        var assigneeLookupFailed = false
+        // PRs the viewer hasn't approved yet — the denominator for the approve summary
+        // (already-approved PRs are never attempted).
+        let approveAttempted = actions.approve ? candidates.filter { !$0.viewerApproved }.count : 0
 
         // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
         // reuse across all PRs.
@@ -1237,10 +1279,15 @@ extension AppDelegate {
             // reuse the mapped GitHub login across all eligible PRs.
             secondPassGroup.enter()
             self.jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { assignees in
+                if assignees == nil && actions.syncAssignee {
+                    // Couldn't read the Jira assignee — sync degrades to a no-op, but the
+                    // summary must say so rather than claim "already assigned".
+                    assigneeLookupFailed = true
+                }
                 let mappedLogin: String? = {
                     guard actions.syncAssignee,
                           let map,
-                          let accountId = assignees.first?.accountId,
+                          let accountId = assignees?.first?.accountId,
                           !accountId.isEmpty
                     else { return nil }
                     return map.githubLogin(forJiraAccountId: accountId)
@@ -1250,16 +1297,16 @@ extension AppDelegate {
                     if actions.syncAssignee {
                         if pr.assignees.isEmpty, let me = mappedLogin {
                             secondPassGroup.enter()
-                            client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                            client.addPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
                                 syncQueue.async {
-                                    if ok { assignSetCount += 1 } else { assignSkipped += 1 }
+                                    if ok { assignSetCount += 1 } else { assignFail += 1 }
                                     secondPassGroup.leave()
                                 }
                             }
                         } else {
-                            // Either already assigned or we couldn't resolve a login for
-                            // the Jira Assignee — count as "not touched" either way.
-                            syncQueue.async { assignSkipped += 1 }
+                            // Already assigned, or no login could be resolved for the
+                            // Jira Assignee — nothing attempted.
+                            syncQueue.async { assignNotTouched += 1 }
                         }
                     }
 
@@ -1283,17 +1330,26 @@ extension AppDelegate {
             secondPassGroup.notify(queue: .main) {
                 var parts: [String] = []
                 if actions.approve {
-                    parts.append("approved \(approveOK)/\(candidates.count)")
-                    if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                    if approveAttempted > 0 {
+                        parts.append("approved \(approveOK)/\(approveAttempted)")
+                        if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                    }
+                    let alreadyApproved = candidates.count - approveAttempted
+                    if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
                 }
                 if actions.merge {
-                    parts.append("merged \(mergeOK)/\(candidates.count) via \(actions.mergeMethod)")
+                    let mergeAttempted = candidates.count - mergeSkipped
+                    if mergeAttempted > 0 {
+                        parts.append("merged \(mergeOK)/\(mergeAttempted) via \(actions.mergeMethod)")
+                        if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
+                    }
                     if mergeSkipped > 0 { parts.append("\(mergeSkipped) skipped (method not allowed)") }
-                    if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
                 }
                 if actions.syncAssignee {
                     parts.append("assignee set on \(assignSetCount) PR\(assignSetCount == 1 ? "" : "s")")
-                    if assignSkipped > 0 { parts.append("\(assignSkipped) already assigned") }
+                    if assignFail > 0 { parts.append("\(assignFail) assignee failed") }
+                    if assignNotTouched > 0 { parts.append("\(assignNotTouched) already assigned or unmapped") }
+                    if assigneeLookupFailed { parts.append("Jira assignee lookup failed") }
                 }
                 let summary = parts.isEmpty ? "no changes" : parts.joined(separator: "; ")
                 sendNotification(body: "PR actions for \(issueKey): \(summary).")
@@ -1559,31 +1615,35 @@ extension AppDelegate {
         let window = notification.object as? NSWindow
         if let windowTitle = window?.title {
             if (windowTitle == "Preferences") {
-                timer?.invalidate()
-                timer = Timer.scheduledTimer(
-                    timeInterval: Double(refreshRate * 60),
-                    target: self,
-                    selector: #selector(refreshMenu),
-                    userInfo: nil,
-                    repeats: true
-                )
-                timer?.fire()
+                // Recreate rather than just fire — the refresh rate may have changed.
+                scheduleRefreshTimer()
             }
         }
     }
-    
+
     @objc
     func checkForUpdates() {
-        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
+        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         GithubClient().getLatestRelease { latestRelease in
             if let latestRelease = latestRelease {
                 let versionComparison = currentVersion.compare(latestRelease.name.replacingOccurrences(of: "v", with: ""), options: .numeric)
                 if versionComparison == .orderedAscending {
-                    let newVersionItem = NSMenuItem(title: "New version available", action: #selector(self.openLink), keyEquivalent: "")
-                    newVersionItem.representedObject = URL(string: latestRelease.htmlUrl)
-                    self.menu.addItem(newVersionItem)
+                    self.latestReleaseURL = URL(string: latestRelease.htmlUrl)
+                    self.appendUpdateItemIfNeeded()
                 }
             }
         }
+    }
+
+    /// Appends the "New version available" item unless it's already present. Called from
+    /// `checkForUpdates` (so it shows even before the next refresh) and at the end of every
+    /// `refreshMenu` rebuild (which starts from removeAllItems).
+    private func appendUpdateItemIfNeeded() {
+        guard let url = latestReleaseURL,
+              !menu.items.contains(where: { $0.title == "New version available" })
+        else { return }
+        let newVersionItem = NSMenuItem(title: "New version available", action: #selector(openLink), keyEquivalent: "")
+        newVersionItem.representedObject = url
+        menu.addItem(newVersionItem)
     }
 }

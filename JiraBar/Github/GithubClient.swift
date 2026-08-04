@@ -58,9 +58,6 @@ public class GithubClient {
                          completion(latestRelease)
                      case .failure(let error):
                          completion(nil)
-                         if let data = response.data {
-                             let json = String(data: data, encoding: String.Encoding.utf8)
-                         }
                          sendNotification(body: error.localizedDescription)
                      }
                  }
@@ -355,10 +352,10 @@ public class GithubClient {
         }
     }
 
-    /// Sets the "Assignees" list on a PR (a PR is an Issue under the hood, so the issues API
-    /// owns this field). Replaces whatever was there — GitHub's PATCH endpoint takes the full
-    /// desired list. Ignores non-github.com URLs.
-    func setPRAssignees(
+    /// Adds to the "Assignees" list on a PR (a PR is an Issue under the hood, so the issues API
+    /// owns this field). Additive — anyone already assigned stays; the PATCH-with-full-list
+    /// variant this replaced silently dropped existing assignees. Ignores non-github.com URLs.
+    func addPRAssignees(
         url urlString: String,
         assignees: [String],
         token: String,
@@ -379,8 +376,8 @@ public class GithubClient {
         ]
         let body: [String: Any] = ["assignees": assignees]
         AF.request(
-            "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)",
-            method: .patch,
+            "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)/assignees",
+            method: .post,
             parameters: body,
             encoding: JSONEncoding.default,
             headers: headers
@@ -391,23 +388,25 @@ public class GithubClient {
             case .success:
                 completion(true)
             case .failure(let error):
-                print("github setPRAssignees: \(error)")
+                print("github addPRAssignees: \(error)")
                 completion(false)
             }
         }
     }
 
-    /// Returns the current requested-reviewer logins on a PR. Empty list on failure / non-github URL.
+    /// Returns the current requested-reviewer logins on a PR, or nil when the state couldn't
+    /// be read (auth/network failure, non-github URL). Callers must not treat nil as "no
+    /// reviewers" — the mirror flow diffs against this list and removes people.
     func getPRRequestedReviewers(
         url urlString: String,
         token: String,
-        completion: @escaping ([String]) -> Void
+        completion: @escaping ([String]?) -> Void
     ) {
         guard
             !token.isEmpty,
             let (owner, repo, number) = GithubClient.parsePRURL(urlString)
         else {
-            completion([])
+            completion(nil)
             return
         }
         let headers: HTTPHeaders = [
@@ -422,15 +421,22 @@ public class GithubClient {
         )
         .validate(statusCode: 200..<300)
         .responseData { response in
-            guard
-                let data = response.data,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let users = json["users"] as? [[String: Any]]
-            else {
-                completion([])
-                return
+            switch response.result {
+            case .success(let data):
+                guard
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let users = json["users"] as? [[String: Any]]
+                else {
+                    // 2xx but an unexpected shape — a genuinely empty reviewer list still
+                    // parses, so treat this as unreadable rather than empty.
+                    completion(nil)
+                    return
+                }
+                completion(users.compactMap { $0["login"] as? String })
+            case .failure(let error):
+                print("github getPRRequestedReviewers: \(error)")
+                completion(nil)
             }
-            completion(users.compactMap { $0["login"] as? String })
         }
     }
 

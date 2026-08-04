@@ -434,6 +434,12 @@ struct TransitionDialog: View {
         } else {
             client.getIssueFieldUsers(issueKey: issueKey, fieldId: config.userFieldId) { existing in
                 DispatchQueue.main.async {
+                    // A failed read must be surfaced — submitting an empty picker clears the
+                    // field, so silently presenting an empty selection would be destructive.
+                    guard let existing else {
+                        self.loadError = "Couldn't load the field's current users — submitting may clear it."
+                        return
+                    }
                     self.applyPrefill(existing)
                 }
             }

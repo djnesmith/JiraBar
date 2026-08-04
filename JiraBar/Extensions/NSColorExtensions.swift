@@ -26,6 +26,7 @@ extension NSColor {
 
         if ((cString.count) != 6) {
             self.init(.gray)
+            return
         }
 
         var rgbValue:UInt64 = 0

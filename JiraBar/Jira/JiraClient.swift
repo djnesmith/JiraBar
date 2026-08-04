@@ -489,29 +489,36 @@ public class JiraClient {
     }
 
     /// Fetches the current value(s) of a single user-picker field on an issue.
-    /// Returns an empty array if the field is null, missing, or fails to parse.
+    /// Returns an empty array when the field is genuinely null or missing, and nil when the
+    /// request itself failed (auth/network) — callers that pre-populate pickers or diff
+    /// against the current value must not mistake a failed read for an empty field.
     /// Works for both single-user fields (assignee) and multi-user custom fields.
-    func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]) -> Void) {
+    func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]?) -> Void) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)"
         let parameters: [String: Any] = ["fields": fieldId]
         AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
             .validate(statusCode: 200..<300)
             .responseData { response in
-                guard
-                    let data = response.data,
-                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let fields = json["fields"] as? [String: Any]
-                else {
-                    completion([])
-                    return
-                }
-                let raw = fields[fieldId]
-                if let arr = raw as? [[String: Any]] {
-                    completion(arr.compactMap(JiraClient.parseUser))
-                } else if let obj = raw as? [String: Any] {
-                    completion([JiraClient.parseUser(obj)].compactMap { $0 })
-                } else {
-                    completion([])
+                switch response.result {
+                case .success(let data):
+                    guard
+                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                        let fields = json["fields"] as? [String: Any]
+                    else {
+                        completion(nil)
+                        return
+                    }
+                    let raw = fields[fieldId]
+                    if let arr = raw as? [[String: Any]] {
+                        completion(arr.compactMap(JiraClient.parseUser))
+                    } else if let obj = raw as? [String: Any] {
+                        completion([JiraClient.parseUser(obj)].compactMap { $0 })
+                    } else {
+                        completion([])
+                    }
+                case .failure(let error):
+                    print("\(url):  \(error)")
+                    completion(nil)
                 }
             }
     }
