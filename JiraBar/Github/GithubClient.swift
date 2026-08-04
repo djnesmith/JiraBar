@@ -27,6 +27,17 @@ struct GithubPRStatus {
     /// Status of checks on the default branch's HEAD commit — proxy for "is a release workflow
     /// currently running on main?" when the state is PENDING.
     var defaultBranchCIState: String?
+    /// State of the viewer's latest review — "APPROVED" / "CHANGES_REQUESTED" / "COMMENTED" /
+    /// "DISMISSED" / "PENDING". Nil if the viewer hasn't reviewed. Used by the "you've already
+    /// approved" indicator in the transition dialog.
+    var viewerLatestReviewState: String?
+    /// GitHub logins currently assigned to the PR.
+    var assignees: [String]
+    /// Merge methods the repo permits. Used by the auto-merge flow to skip PRs whose repo
+    /// disallows the chosen method.
+    var mergeCommitAllowed: Bool
+    var squashMergeAllowed: Bool
+    var rebaseMergeAllowed: Bool
 }
 
 public class GithubClient {
@@ -72,10 +83,15 @@ public class GithubClient {
         let query = """
         query($owner: String!, $name: String!, $number: Int!) {
           repository(owner: $owner, name: $name) {
+            mergeCommitAllowed
+            squashMergeAllowed
+            rebaseMergeAllowed
             pullRequest(number: $number) {
               reviewDecision
               merged
               mergedAt
+              viewerLatestReview { state }
+              assignees(first: 10) { nodes { login } }
               reviewThreads(first: 100) { nodes { isResolved } }
               commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
             }
@@ -139,6 +155,12 @@ public class GithubClient {
                     let latestReleasePublishedAt = (repoDict["latestRelease"] as? [String: Any])?["publishedAt"] as? String
                     let defaultBranchCIState = ((repoDict["defaultBranchRef"] as? [String: Any])?["target"] as? [String: Any])
                         .flatMap { $0["statusCheckRollup"] as? [String: Any] }?["state"] as? String
+                    let viewerLatestReviewState = (prDict["viewerLatestReview"] as? [String: Any])?["state"] as? String
+                    let assigneeNodes = ((prDict["assignees"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
+                    let assignees = assigneeNodes.compactMap { $0["login"] as? String }
+                    let mergeCommitAllowed = (repoDict["mergeCommitAllowed"] as? Bool) ?? false
+                    let squashMergeAllowed = (repoDict["squashMergeAllowed"] as? Bool) ?? false
+                    let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
 
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
@@ -148,7 +170,12 @@ public class GithubClient {
                         isMerged: isMerged,
                         mergedAt: mergedAt,
                         latestReleasePublishedAt: latestReleasePublishedAt,
-                        defaultBranchCIState: defaultBranchCIState
+                        defaultBranchCIState: defaultBranchCIState,
+                        viewerLatestReviewState: viewerLatestReviewState,
+                        assignees: assignees,
+                        mergeCommitAllowed: mergeCommitAllowed,
+                        squashMergeAllowed: squashMergeAllowed,
+                        rebaseMergeAllowed: rebaseMergeAllowed
                     ))
                 case .failure(let error):
                     print("github graphql: \(error)")
@@ -237,6 +264,93 @@ public class GithubClient {
             case .failure(let error):
                 print("github search: \(error)")
                 completion([])
+            }
+        }
+    }
+
+    /// Submits a review on a PR — e.g. `event: "APPROVE"` with an optional body — via the
+    /// pull-request reviews endpoint. Empty `body` submits the review without a comment.
+    /// Ignores non-github.com URLs.
+    func submitPRReview(
+        url urlString: String,
+        event: String,
+        body: String,
+        token: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion(false)
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
+        var payload: [String: Any] = ["event": event]
+        if !body.isEmpty { payload["body"] = body }
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/reviews",
+            method: .post,
+            parameters: payload,
+            encoding: JSONEncoding.default,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .response { response in
+            switch response.result {
+            case .success:
+                completion(true)
+            case .failure(let error):
+                print("github submitPRReview: \(error)")
+                completion(false)
+            }
+        }
+    }
+
+    /// Merges a PR using the caller-chosen method ("merge", "squash", or "rebase"). GitHub
+    /// returns 405 when the method isn't allowed on that repo — the caller should have already
+    /// consulted `GithubPRStatus.{merge|squash|rebase}MergeAllowed` and skipped the call in
+    /// that case. Ignores non-github.com URLs.
+    func mergePR(
+        url urlString: String,
+        method: String,
+        token: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard
+            !token.isEmpty,
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+        else {
+            completion(false)
+            return
+        }
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
+        let payload: [String: Any] = ["merge_method": method]
+        AF.request(
+            "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/merge",
+            method: .put,
+            parameters: payload,
+            encoding: JSONEncoding.default,
+            headers: headers
+        )
+        .validate(statusCode: 200..<300)
+        .response { response in
+            switch response.result {
+            case .success:
+                completion(true)
+            case .failure(let error):
+                print("github mergePR: \(error)")
+                completion(false)
             }
         }
     }

@@ -1,5 +1,51 @@
 import SwiftUI
 
+/// Choices the user made in the PR-actions section of a transition dialog. Bundled into one
+/// struct so `onSubmit` doesn't grow every time we add a knob.
+struct PRActionChoices {
+    var approve: Bool
+    var approvalComment: String
+    var merge: Bool
+    var mergeMethod: String
+    var syncAssignee: Bool
+
+    static let disabled = PRActionChoices(
+        approve: false, approvalComment: "", merge: false, mergeMethod: "rebase", syncAssignee: false
+    )
+}
+
+/// Live view-model for the transition dialog's PR-actions section. AppDelegate populates it
+/// asynchronously (after enriching each linked open PR via GitHub GraphQL) so the dialog
+/// can show status indicators — "you've approved 2/3", etc. — without blocking on open.
+final class PRActionsStatus: ObservableObject {
+    struct LinkedPR: Identifiable {
+        var id: String { url }
+        let url: String
+        let label: String
+        let isMerged: Bool
+        let viewerApproved: Bool
+        let assignees: [String]
+        let mergeCommitAllowed: Bool
+        let squashMergeAllowed: Bool
+        let rebaseMergeAllowed: Bool
+    }
+    @Published var loading: Bool = true
+    @Published var openPRs: [LinkedPR] = []
+    /// Whether the Jira ticket's assignee is the currently-authenticated user.
+    @Published var jiraAssignedToMe: Bool = false
+    /// Display name of the Jira ticket's assignee (nil when unassigned).
+    @Published var jiraAssigneeName: String? = nil
+
+    func allowsMergeMethod(_ method: String, on pr: LinkedPR) -> Bool {
+        switch method {
+        case "merge":  return pr.mergeCommitAllowed
+        case "squash": return pr.squashMergeAllowed
+        case "rebase": return pr.rebaseMergeAllowed
+        default:       return false
+        }
+    }
+}
+
 /// Sheet shown before a transition is submitted. Renders only the fields that the configured
 /// prompt enables — comment, a user multi-picker, a free-text field, or any combination.
 struct TransitionDialog: View {
@@ -9,7 +55,10 @@ struct TransitionDialog: View {
     /// When true, a "Also update GitHub PR" checkbox is shown alongside the user picker; its
     /// state is passed through to `onSubmit`. Only meaningful when `config.hasUserField`.
     let showGithubMirrorCheckbox: Bool
-    let onSubmit: (String, [JiraUser], String, String, Bool, @escaping (Bool) -> Void) -> Void
+    /// Optional live status feed for the PR-actions section. Nil when the transition's
+    /// prompt config has no PR actions enabled.
+    @ObservedObject var prStatus: PRActionsStatus
+    let onSubmit: (String, [JiraUser], String, String, Bool, PRActionChoices, @escaping (Bool) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var comment: String = ""
@@ -22,6 +71,11 @@ struct TransitionDialog: View {
     @State private var selectedOptionValue: String = ""
     @State private var submitting: Bool = false
     @State private var updateGithub: Bool = true
+    @State private var prApprove: Bool = true
+    @State private var prApprovalComment: String = ""
+    @State private var prMerge: Bool = true
+    @State private var prMergeMethod: String = "rebase"
+    @State private var prSyncAssignee: Bool = true
 
     private var filteredUsers: [JiraUser] {
         let q = userFilter.trimmingCharacters(in: .whitespaces).lowercased()
@@ -56,6 +110,10 @@ struct TransitionDialog: View {
                 commentSection
             }
 
+            if hasPRActions {
+                prActionsSection
+            }
+
             Spacer(minLength: 0)
 
             footer
@@ -70,6 +128,75 @@ struct TransitionDialog: View {
                 DispatchQueue.main.async {
                     loadUsers()
                 }
+            }
+            // Seed the merge-method picker from the config-level default.
+            prMergeMethod = config.prMergeMethod
+        }
+    }
+
+    private var hasPRActions: Bool {
+        config.enablePRApprove || config.enablePRMerge || config.enablePRAssigneeSync
+    }
+
+    private var prActionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("PR actions").font(.headline)
+
+            // Status indicators fill in as the async PR enrichment lands.
+            prStatusSummary
+
+            if config.enablePRApprove {
+                Toggle("Approve linked open PRs", isOn: $prApprove)
+                if prApprove {
+                    TextField("Approval comment (optional)", text: $prApprovalComment, axis: .vertical)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .lineLimit(2...5)
+                        .padding(.leading, 20)
+                }
+            }
+            if config.enablePRMerge {
+                HStack {
+                    Toggle("Merge linked open PRs", isOn: $prMerge)
+                    Picker("Method:", selection: $prMergeMethod) {
+                        Text("Merge").tag("merge")
+                        Text("Squash").tag("squash")
+                        Text("Rebase").tag("rebase")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 180)
+                    .disabled(!prMerge)
+                }
+            }
+            if config.enablePRAssigneeSync {
+                Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var prStatusSummary: some View {
+        if prStatus.loading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking linked PRs…").font(.footnote).foregroundColor(.secondary)
+            }
+        } else if prStatus.openPRs.isEmpty {
+            Text("No open linked PRs.").font(.footnote).foregroundColor(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                if let name = prStatus.jiraAssigneeName {
+                    Text(prStatus.jiraAssignedToMe
+                         ? "Jira ticket is already assigned to you."
+                         : "Jira ticket assigned to \(name).")
+                        .font(.footnote).foregroundColor(.secondary)
+                } else {
+                    Text("Jira ticket is unassigned.").font(.footnote).foregroundColor(.secondary)
+                }
+                let total = prStatus.openPRs.count
+                let approved = prStatus.openPRs.filter(\.viewerApproved).count
+                let merged = prStatus.openPRs.filter(\.isMerged).count
+                Text("You've approved \(approved)/\(total) open PR\(total == 1 ? "" : "s")\(merged > 0 ? "; \(merged) already merged." : ".")")
+                    .font(.footnote).foregroundColor(.secondary)
             }
         }
     }
@@ -239,7 +366,19 @@ struct TransitionDialog: View {
         guard !submitting else { return }
         submitting = true
         let flag = showGithubMirrorCheckbox && updateGithub
-        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag) { success in
+        let choices: PRActionChoices
+        if hasPRActions {
+            choices = PRActionChoices(
+                approve: config.enablePRApprove && prApprove,
+                approvalComment: prApprovalComment,
+                merge: config.enablePRMerge && prMerge,
+                mergeMethod: prMergeMethod,
+                syncAssignee: config.enablePRAssigneeSync && prSyncAssignee
+            )
+        } else {
+            choices = .disabled
+        }
+        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag, choices) { success in
             if !success { submitting = false }
         }
     }
@@ -335,6 +474,13 @@ struct TransitionDialog: View {
         if config.hasTextField { h += config.textFieldMultiline ? 130 : 70 }
         if config.includeComment { h += 150 }
         if showGithubMirrorCheckbox { h += 24 }
+        if hasPRActions {
+            var pr: CGFloat = 60 // headline + status summary
+            if config.enablePRApprove { pr += (prApprove ? 90 : 24) }
+            if config.enablePRMerge { pr += 32 }
+            if config.enablePRAssigneeSync { pr += 24 }
+            h += pr
+        }
         return max(h, 220)
     }
 }

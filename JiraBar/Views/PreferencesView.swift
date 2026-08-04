@@ -601,6 +601,28 @@ private struct TransitionPromptRow: View {
                         .padding(.vertical, 4)
                     }
 
+                    GroupBox("PR actions (optional)") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("Auto-approve linked open PRs (with approval comment box)", isOn: $prompt.enablePRApprove)
+                            HStack {
+                                Toggle("Auto-merge linked open PRs", isOn: $prompt.enablePRMerge)
+                                Picker("Method:", selection: $prompt.prMergeMethod) {
+                                    Text("Merge").tag("merge")
+                                    Text("Squash").tag("squash")
+                                    Text("Rebase").tag("rebase")
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 180)
+                                .disabled(!prompt.enablePRMerge)
+                            }
+                            Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prompt.enablePRAssigneeSync)
+                            Text("Runs after the Jira transition succeeds. Requires a GitHub Token; PRs whose repos disallow the chosen merge method are skipped with a summary notification.")
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
                 .padding(.leading, 20)
             }

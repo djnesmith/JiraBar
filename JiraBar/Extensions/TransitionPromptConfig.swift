@@ -38,6 +38,24 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// Options the user can choose from. Each option's `value` is what the API receives.
     var selectOptions: [TransitionSelectOption] = []
 
+    /// When true, the dialog exposes an "Approve linked PRs" checkbox (default on) and an
+    /// approval-comment box. On submit, each linked open GitHub PR gets an APPROVE review.
+    /// Requires a GitHub token; no-op when missing.
+    var enablePRApprove: Bool = false
+
+    /// When true, the dialog exposes a "Merge linked PRs" checkbox (default on) and a merge
+    /// method picker (see `prMergeMethod`). PRs whose repos disallow the chosen method are
+    /// skipped with a summary notification. Requires a GitHub token.
+    var enablePRMerge: Bool = false
+
+    /// Default merge method for the picker: "merge", "squash", or "rebase". Only meaningful
+    /// when `enablePRMerge` is true.
+    var prMergeMethod: String = "rebase"
+
+    /// When true, on submit JiraBar patches PR assignees so the Jira Assignee becomes the PR
+    /// Assignee — only when the PR has no assignee yet (never overwrites an existing one).
+    var enablePRAssigneeSync: Bool = false
+
     func matches(transitionName incoming: String) -> Bool {
         let a = incoming.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let b = transitionName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -59,6 +77,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         case userFieldId, userFieldLabel, userFieldAllowsMultiple, userFieldDefaultsToCurrentUser
         case textFieldId, textFieldLabel, textFieldMultiline
         case selectFieldId, selectFieldLabel, selectOptions
+        case enablePRApprove, enablePRMerge, prMergeMethod, enablePRAssigneeSync
     }
 
     init(from decoder: Decoder) throws {
@@ -76,6 +95,10 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.selectFieldId = try c.decodeIfPresent(String.self, forKey: .selectFieldId) ?? ""
         self.selectFieldLabel = try c.decodeIfPresent(String.self, forKey: .selectFieldLabel) ?? "Select…"
         self.selectOptions = try c.decodeIfPresent([TransitionSelectOption].self, forKey: .selectOptions) ?? []
+        self.enablePRApprove = try c.decodeIfPresent(Bool.self, forKey: .enablePRApprove) ?? false
+        self.enablePRMerge = try c.decodeIfPresent(Bool.self, forKey: .enablePRMerge) ?? false
+        self.prMergeMethod = try c.decodeIfPresent(String.self, forKey: .prMergeMethod) ?? "rebase"
+        self.enablePRAssigneeSync = try c.decodeIfPresent(Bool.self, forKey: .enablePRAssigneeSync) ?? false
     }
 }
 

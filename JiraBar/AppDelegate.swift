@@ -715,12 +715,20 @@ extension AppDelegate {
 
         let showMirror = config.hasUserField
             && shouldShowGithubMirrorCheckbox(forJiraFieldId: config.userFieldId)
+        let prStatus = PRActionsStatus()
+        let hasPRActions = config.enablePRApprove || config.enablePRMerge || config.enablePRAssigneeSync
+        if hasPRActions {
+            populatePRActionsStatus(prStatus, issueKey: issueKey)
+        } else {
+            prStatus.loading = false
+        }
         let view = TransitionDialog(
             issueKey: issueKey,
             transitionName: transitionName,
             config: config,
             showGithubMirrorCheckbox: showMirror,
-            onSubmit: { [weak self] comment, users, freeText, selectValue, updateGithub, done in
+            prStatus: prStatus,
+            onSubmit: { [weak self] comment, users, freeText, selectValue, updateGithub, prActions, done in
                 self?.submitTransition(
                     issueKey: issueKey,
                     transitionId: transitionId,
@@ -730,6 +738,8 @@ extension AppDelegate {
                     freeText: freeText,
                     selectValue: selectValue,
                     updateGithub: updateGithub,
+                    prActions: prActions,
+                    prStatus: prStatus,
                     completion: done
                 )
             },
@@ -755,6 +765,8 @@ extension AppDelegate {
         freeText: String,
         selectValue: String,
         updateGithub: Bool,
+        prActions: PRActionChoices,
+        prStatus: PRActionsStatus,
         completion: @escaping (Bool) -> Void
     ) {
         var updates: [JiraClient.TransitionFieldUpdate] = []
@@ -793,6 +805,9 @@ extension AppDelegate {
                     self?.refreshMenu()
                     if updateGithub, config.hasUserField {
                         self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
+                    }
+                    if prActions.approve || prActions.merge || prActions.syncAssignee {
+                        self?.applyPRActions(issueKey: issueKey, actions: prActions, prStatus: prStatus)
                     }
                 }
                 completion(success)
@@ -1093,6 +1108,196 @@ extension AppDelegate {
                 parts.append("unmapped: \(unmappedReviewerNames.joined(separator: ", "))")
             }
             sendNotification(body: "GitHub PR update for \(issueKey): \(parts.joined(separator: "; ")).")
+        }
+    }
+
+    /// Populates the transition dialog's PR-actions status view-model: resolves the ticket's
+    /// linked open GitHub PRs, enriches each via GraphQL (approval state, current assignees,
+    /// repo merge-methods), and reports whether the Jira ticket's assignee is the current user.
+    /// All updates land on the main thread since `PRActionsStatus` drives SwiftUI.
+    private func populatePRActionsStatus(_ status: PRActionsStatus, issueKey: String) {
+        let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
+
+        // Jira side: assignee display + is-me check. Independent of GitHub, fires in parallel.
+        jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { [weak self] assignees in
+            guard let self else { return }
+            let assignee = assignees.first
+            self.jiraClient.getCurrentUser { me in
+                DispatchQueue.main.async {
+                    status.jiraAssigneeName = assignee?.displayName
+                    if let a = assignee?.accountId, let m = me?.accountId, !a.isEmpty, !m.isEmpty {
+                        status.jiraAssignedToMe = (a == m)
+                    } else if let a = assignee?.name, let m = me?.name, !a.isEmpty, !m.isEmpty {
+                        status.jiraAssignedToMe = (a == m)
+                    } else {
+                        status.jiraAssignedToMe = false
+                    }
+                }
+            }
+        }
+
+        // GitHub side: linked PRs + enrichment. Everything below no-ops without a token.
+        jiraClient.getIssueId(byKey: issueKey) { [weak self] issueId in
+            guard let self else { return }
+            guard let issueId else {
+                DispatchQueue.main.async { status.loading = false }
+                return
+            }
+            self.jiraClient.getIssuePullRequests(issueId: issueId) { prs in
+                self.prsWithGithubFallback(prs, issueKey: issueKey) { merged in
+                    let openGithub = merged.filter {
+                        $0.status.uppercased() == "OPEN" && $0.url.contains("github.com")
+                    }
+                    guard !token.isEmpty, !openGithub.isEmpty else {
+                        DispatchQueue.main.async {
+                            status.openPRs = []
+                            status.loading = false
+                        }
+                        return
+                    }
+                    let group = DispatchGroup()
+                    let syncQueue = DispatchQueue(label: "prActions.status")
+                    var results: [String: PRActionsStatus.LinkedPR] = [:]
+                    let client = GithubClient()
+                    for pr in openGithub {
+                        group.enter()
+                        client.fetchPRStatus(url: pr.url, token: token) { gh in
+                            let entry = PRActionsStatus.LinkedPR(
+                                url: pr.url,
+                                label: "\(pr.repoSlug) #\(pr.numberOnly)",
+                                isMerged: gh?.isMerged ?? false,
+                                viewerApproved: gh?.viewerLatestReviewState == "APPROVED",
+                                assignees: gh?.assignees ?? [],
+                                mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,
+                                squashMergeAllowed: gh?.squashMergeAllowed ?? false,
+                                rebaseMergeAllowed: gh?.rebaseMergeAllowed ?? false
+                            )
+                            syncQueue.async {
+                                results[pr.url] = entry
+                                group.leave()
+                            }
+                        }
+                    }
+                    group.notify(queue: .main) {
+                        status.openPRs = openGithub.compactMap { results[$0.url] }
+                        status.loading = false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs the transition dialog's PR-actions choices against every open linked PR: submits
+    /// an APPROVE review, merges using the chosen method (skipping any repo that disallows it),
+    /// and sets the Jira Assignee as PR Assignee when the PR has none. Uses the dialog's
+    /// already-enriched `PRActionsStatus` so we don't re-fetch per action. Posts a single
+    /// summary notification when the batch is done.
+    private func applyPRActions(issueKey: String, actions: PRActionChoices, prStatus: PRActionsStatus) {
+        let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty else {
+            sendNotification(body: "PR actions skipped for \(issueKey): no GitHub token set.")
+            return
+        }
+        let candidates = prStatus.openPRs.filter { !$0.isMerged }
+        guard !candidates.isEmpty else {
+            sendNotification(body: "PR actions skipped for \(issueKey): no open linked PRs.")
+            return
+        }
+
+        let client = GithubClient()
+        let group = DispatchGroup()
+        let syncQueue = DispatchQueue(label: "prActions.apply")
+        var approveOK = 0, approveFail = 0
+        var mergeOK = 0, mergeFail = 0, mergeSkipped = 0
+        var assignSetCount = 0, assignSkipped = 0
+
+        // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
+        // reuse across all PRs.
+        let mapPath = self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces)
+        let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
+
+        for pr in candidates {
+            if actions.approve && !pr.viewerApproved {
+                group.enter()
+                client.submitPRReview(url: pr.url, event: "APPROVE", body: actions.approvalComment, token: token) { ok in
+                    syncQueue.async {
+                        if ok { approveOK += 1 } else { approveFail += 1 }
+                        group.leave()
+                    }
+                }
+            }
+        }
+
+        // Approvals go out first; assignee sync + merges follow so they don't race a stale
+        // "you haven't approved" merge-eligibility check on the GitHub side.
+        group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+            let secondPassGroup = DispatchGroup()
+
+            // Look up the Jira Assignee once (fresh — avoids a stale prStatus snapshot) and
+            // reuse the mapped GitHub login across all eligible PRs.
+            secondPassGroup.enter()
+            self.jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { assignees in
+                let mappedLogin: String? = {
+                    guard actions.syncAssignee,
+                          let map,
+                          let accountId = assignees.first?.accountId,
+                          !accountId.isEmpty
+                    else { return nil }
+                    return map.githubLogin(forJiraAccountId: accountId)
+                }()
+
+                for pr in candidates {
+                    if actions.syncAssignee {
+                        if pr.assignees.isEmpty, let me = mappedLogin {
+                            secondPassGroup.enter()
+                            client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                                syncQueue.async {
+                                    if ok { assignSetCount += 1 } else { assignSkipped += 1 }
+                                    secondPassGroup.leave()
+                                }
+                            }
+                        } else {
+                            // Either already assigned or we couldn't resolve a login for
+                            // the Jira Assignee — count as "not touched" either way.
+                            syncQueue.async { assignSkipped += 1 }
+                        }
+                    }
+
+                    if actions.merge {
+                        if prStatus.allowsMergeMethod(actions.mergeMethod, on: pr) {
+                            secondPassGroup.enter()
+                            client.mergePR(url: pr.url, method: actions.mergeMethod, token: token) { ok in
+                                syncQueue.async {
+                                    if ok { mergeOK += 1 } else { mergeFail += 1 }
+                                    secondPassGroup.leave()
+                                }
+                            }
+                        } else {
+                            syncQueue.async { mergeSkipped += 1 }
+                        }
+                    }
+                }
+                secondPassGroup.leave()
+            }
+
+            secondPassGroup.notify(queue: .main) {
+                var parts: [String] = []
+                if actions.approve {
+                    parts.append("approved \(approveOK)/\(candidates.count)")
+                    if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                }
+                if actions.merge {
+                    parts.append("merged \(mergeOK)/\(candidates.count) via \(actions.mergeMethod)")
+                    if mergeSkipped > 0 { parts.append("\(mergeSkipped) skipped (method not allowed)") }
+                    if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
+                }
+                if actions.syncAssignee {
+                    parts.append("assignee set on \(assignSetCount) PR\(assignSetCount == 1 ? "" : "s")")
+                    if assignSkipped > 0 { parts.append("\(assignSkipped) already assigned") }
+                }
+                let summary = parts.isEmpty ? "no changes" : parts.joined(separator: "; ")
+                sendNotification(body: "PR actions for \(issueKey): \(summary).")
+            }
         }
     }
 
