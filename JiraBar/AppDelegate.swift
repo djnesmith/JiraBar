@@ -412,20 +412,23 @@ extension AppDelegate {
                 self.statusBarItem.button?.title = String(0)
             }
 
-            // My PRs header goes between the status groups and the utility items. Rows are
-            // inserted (or the header removed) once the searches and per-issue PR collection
-            // both finish; the header doubles as the staleness marker — if a newer refresh
-            // rebuilt the menu, it's gone and the late results are dropped.
+            // My PRs sits between the status groups and the utility items. Its submenu is
+            // attached (or the whole section removed) once the searches and the per-issue PR
+            // collection both finish; the item doubles as the staleness marker — if a newer
+            // refresh rebuilt the menu, it's gone and the late results are dropped. It has no
+            // action of its own: until the submenu lands it renders as an inert label, matching
+            // how the per-issue items get their submenus asynchronously.
             if myPRsEnabled {
                 let separator = NSMenuItem.separator()
-                let header = NSMenuItem(title: "My PRs", action: nil, keyEquivalent: "")
+                let myPRsItem = NSMenuItem(title: "My PRs", action: nil, keyEquivalent: "")
+                myPRsItem.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
                 self.menu.addItem(separator)
-                self.menu.addItem(header)
+                self.menu.addItem(myPRsItem)
                 myPRsGroup.notify(queue: .main) {
-                    self.insertMyPRs(
+                    self.populateMyPRsSubmenu(
                         results: myPRsResults,
                         excludedURLs: collectedPRURLs,
-                        header: header,
+                        item: myPRsItem,
                         separator: separator
                     )
                 }
@@ -1332,23 +1335,25 @@ extension AppDelegate {
         return AppDelegate.issueKeyRegex.firstMatch(in: s, options: [], range: range) != nil
     }
 
-    /// Fills the "My PRs" section once the search and the per-issue PR collection have both
-    /// finished. A PR counts as "ticketed" — and is dropped — when its URL already rendered
-    /// under a visible issue, or when a Jira issue key appears in its title or head branch
-    /// (the ticket may simply be outside the current JQL window). The branch check needs the
-    /// GraphQL enrichment, so it runs as a second pass. Removes the header when nothing
-    /// survives; drops stale results whose header a newer refresh already discarded.
-    private func insertMyPRs(
+    /// Hangs the surviving "My PRs" rows off the section item as a submenu, once the search
+    /// and the per-issue PR collection have both finished. A PR counts as "ticketed" — and is
+    /// dropped — when its URL already rendered under a visible issue, or when a Jira issue key
+    /// appears in its title or head branch (the ticket may simply be outside the current JQL
+    /// window). The branch check needs the GraphQL enrichment, so it runs as a second pass.
+    /// Removes the section when nothing survives, which is also what makes the item's presence
+    /// meaningful: it only appears when there's at least one PR behind it. Drops stale results
+    /// whose item a newer refresh already discarded.
+    private func populateMyPRsSubmenu(
         results: [JiraPullRequest],
         excludedURLs: Set<String>,
-        header: NSMenuItem,
+        item: NSMenuItem,
         separator: NSMenuItem
     ) {
         let removeSection = {
-            if self.menu.index(of: header) != -1 { self.menu.removeItem(header) }
+            if self.menu.index(of: item) != -1 { self.menu.removeItem(item) }
             if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
         }
-        guard menu.index(of: header) != -1 else { return }
+        guard menu.index(of: item) != -1 else { return }
 
         let candidates = results.filter { pr in
             !excludedURLs.contains(pr.url) && !AppDelegate.containsIssueKey(pr.name)
@@ -1359,8 +1364,7 @@ extension AppDelegate {
         }
 
         fetchGithubStatuses(for: candidates) { statusByURL in
-            let headerIndex = self.menu.index(of: header)
-            guard headerIndex != -1 else { return }
+            guard self.menu.index(of: item) != -1 else { return }
             let survivors = candidates.filter { pr in
                 guard let branch = statusByURL[pr.url]?.headRefName else { return true }
                 return !AppDelegate.containsIssueKey(branch)
@@ -1369,14 +1373,11 @@ extension AppDelegate {
                 removeSection()
                 return
             }
-            for (offset, pr) in survivors.enumerated() {
-                self.addPRMenuItem(
-                    pr: pr,
-                    ghStatus: statusByURL[pr.url],
-                    to: self.menu,
-                    at: headerIndex + 1 + offset
-                )
+            let submenu = NSMenu()
+            for pr in survivors {
+                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: submenu)
             }
+            item.submenu = submenu
         }
     }
 
@@ -1449,11 +1450,10 @@ extension AppDelegate {
         }
     }
 
-    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the main
-    /// menu's "My PRs" section when `index` is set. Renders 3 lines when GitHub data is
-    /// available (approval / unresolved / CI on line 3), otherwise 2 lines with the legacy
-    /// Jira-derived approved indicator.
-    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu, at index: Int? = nil) {
+    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the "My PRs"
+    /// submenu. Renders 3 lines when GitHub data is available (approval / unresolved / CI on
+    /// line 3), otherwise 2 lines with the legacy Jira-derived approved indicator.
+    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: pr.name.trunc(length: 50))
             .appendNewLine()
@@ -1509,11 +1509,7 @@ extension AppDelegate {
                 sendNotification(body: "Copied PR URL")
             }
         )
-        if let index {
-            menu.insertItem(prItem, at: index)
-        } else {
-            menu.addItem(prItem)
-        }
+        menu.addItem(prItem)
     }
 
     /// Chooses the URL to open for a modifier-click on a PR row.

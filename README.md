@@ -62,7 +62,7 @@ Hovering over a PR row with any modifier held pops small accent-colored hint pil
 
 ## My PRs section
 
-With a GitHub token set, a **My PRs** section appears between the ticket groups and the utility items, listing your open GitHub PRs — ones you're assigned to or whose review was requested from you — that **aren't** associated with any Jira ticket. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows look and click exactly like ticket PR rows (same third line, same modifier routing and hint pills), the section hides itself when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle the whole section off in Preferences with **Show My PRs section**.
+With a GitHub token set, a **My PRs** entry appears between the ticket groups and the utility items. Its submenu lists your open GitHub PRs — ones you're assigned to or whose review was requested from you — that **aren't** associated with any Jira ticket. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows look and click exactly like ticket PR rows (same third line, same modifier routing and hint pills), the entry hides itself entirely when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle it off in Preferences with **Show My PRs section**.
 
 ## GitHub search fallback
 
