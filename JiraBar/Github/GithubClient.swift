@@ -109,7 +109,7 @@ public class GithubClient {
                 "number": number
             ]
         ]
-        var headers: HTTPHeaders = [
+        let headers: HTTPHeaders = [
             .authorization(bearerToken: token),
             .accept("application/json"),
             .contentType("application/json"),
@@ -530,12 +530,9 @@ public class GithubClient {
     }
 
     /// Extracts (owner, repo, number) from a github.com PR URL. Returns nil for anything else
-    /// (e.g. Bitbucket, GitLab) so the caller can skip the GraphQL call.
+    /// (e.g. Bitbucket, GitLab) so the caller can skip the API call.
     private static func parsePRURL(_ raw: String) -> (String, String, Int)? {
-        guard let url = URL(string: raw), url.host?.contains("github.com") == true else { return nil }
-        let parts = url.pathComponents
-        // Expected: ["/", "owner", "repo", "pull", "<number>"]
-        guard parts.count >= 5, parts[3] == "pull", let number = Int(parts[4]) else { return nil }
-        return (parts[1], parts[2], number)
+        guard let parsed = ForgePRURL(raw), parsed.isGithub, let number = parsed.pullNumber else { return nil }
+        return (parsed.owner, parsed.repo, number)
     }
 }

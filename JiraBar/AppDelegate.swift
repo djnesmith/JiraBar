@@ -1505,22 +1505,14 @@ extension AppDelegate {
     /// Extracts the PR number from a URL like https://github.com/owner/repo/pull/269.
     /// Returns nil if the path isn't a /pull/<n> shape.
     static func prNumber(from prURL: String) -> String? {
-        guard let u = URL(string: prURL) else { return nil }
-        let parts = u.pathComponents
-        // ["/", "owner", "repo", "pull", "<n>"]
-        guard parts.count >= 5, parts[3] == "pull", Int(parts[4]) != nil else { return nil }
-        return parts[4]
+        guard let number = ForgePRURL(prURL)?.pullNumber else { return nil }
+        return String(number)
     }
 
     /// Turns a PR URL like https://github.com/owner/repo/pull/42 into
     /// https://github.com/owner/repo — nil if the path isn't at least two segments deep.
-    private static func repoBaseURL(from prURL: String) -> String? {
-        guard let u = URL(string: prURL),
-              let scheme = u.scheme,
-              let host = u.host else { return nil }
-        let parts = u.pathComponents
-        guard parts.count >= 3 else { return nil }
-        return "\(scheme)://\(host)/\(parts[1])/\(parts[2])"
+    static func repoBaseURL(from prURL: String) -> String? {
+        ForgePRURL(prURL)?.repoBase
     }
 
     /// Adds "approved · N unresolved · CI ✓" (or a subset) as a third line. Elements without
