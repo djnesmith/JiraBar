@@ -284,7 +284,6 @@ extension AppDelegate {
                             .appendIcon(iconName: "hash", color: NSColor.gray)
                             .appendString(string: issue.key, color: "#888888")
                             .appendSeparator()
-                            .appendIcon(iconName: "project", color: NSColor.gray)
                             .appendString(string: issue.fields.assignee?.displayName ?? "Unassign", color: "#888888")
                             .appendSeparator()
                             .appendString(string: issue.fields.issuetype.name, color: "#888888")

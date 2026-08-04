@@ -11,9 +11,12 @@ Practical guidance for AI agents working on JiraBar.
 
 ## High-Signal Files
 
-- `JiraBar/AppDelegate.swift`: status bar lifecycle, timer, menu rebuild, window hosting
+- `JiraBar/AppDelegate.swift`: status bar lifecycle, timer, menu rebuild, window hosting, My PRs section, GitHub mirror/PR-action orchestration
 - `JiraBar/Jira/JiraClient.swift`: Jira API calls, auth headers, credential validation
+- `JiraBar/Github/GithubClient.swift`: GraphQL PR enrichment, searches, reviews/merge/assignee/reviewer endpoints
+- `JiraBar/Github/ForgePRURL.swift`: the one PR/repo URL parser — don't re-implement path walking
 - `JiraBar/Views/PreferencesView.swift`: Cloud/Server settings UI and Test button behavior
+- `JiraBar/Views/`: the SwiftUI dialogs (Transition, BulkMove, UserField, Comment, Flag, Upload) and the custom PR row view
 - `JiraBar/Extensions/DefaultsExtensions.swift`: Defaults keys, enums, Keychain keys
 - `JiraBar/Keychain.swift`: `@FromKeychain` / `@KeychainStorage` wrappers
 
@@ -47,7 +50,9 @@ Practical guidance for AI agents working on JiraBar.
 
 - Build command:
   - `xcodebuild -project jiraBar.xcodeproj -scheme jiraBar -destination 'platform=macOS' build`
-- There are no tests. Manually verify:
+- Test command (unit tests in `jiraBarTests/`, hosted in the app):
+  - `xcodebuild -project jiraBar.xcodeproj -scheme jiraBar -destination 'platform=macOS' test`
+- New pure logic should get a unit test; UI/menu behavior still needs manual checks:
   1. Menu bar icon appears and refreshes on interval
   2. Preferences save and reload correctly for Cloud and Server modes
   3. Issue grouping and transitions still work
@@ -55,8 +60,12 @@ Practical guidance for AI agents working on JiraBar.
 
 ## Current Tech Debt
 
-- `sendNotification` exists in both `Notifications.swift` and `JiraClient.swift` (duplication)
-- `unknownPersonAvatar` in `AppDelegate` is unused
+- `Base.lproj/Main.storyboard` contains a dead scene referencing a deleted `ViewController`
+  class; the scene never instantiates (`visibleAtLaunch="NO"`), the storyboard itself is
+  still needed (`INFOPLIST_KEY_NSMainStoryboardFile` wires NSApplication/main menu)
+- The user-picker UI (filter/row/toggle/arrange/sameUser) is duplicated across
+  `TransitionDialog` and `UserFieldDialog`, with a diverging variant in `BulkMoveDialog` —
+  extraction deferred because it's SwiftUI with no test coverage possible
 
 ## Entitlements
 

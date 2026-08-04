@@ -420,7 +420,7 @@ private struct UserFieldShortcutsSection: View {
                 }
             }
 
-            Text("Each shortcut shows under \"Add Comment…\" in a ticket's submenu and opens a dialog pre-loaded with the current value. Submitting with no users selected clears the field.")
+            Text("Each shortcut shows under \"Add Comment\" in a ticket's submenu and opens a dialog pre-loaded with the current value. Submitting with no users selected clears the field.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
