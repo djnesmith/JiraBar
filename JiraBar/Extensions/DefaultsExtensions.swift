@@ -79,6 +79,12 @@ extension Defaults.Keys {
     /// reviewers. Empty disables the mirror. Configurable per install — most orgs use a custom
     /// "Reviewers" user-picker field; the exact id varies per Jira instance.
     static let githubPRReviewerJiraFieldId = Key<String>("githubPRReviewerJiraFieldId", default: "")
+
+    /// Shows a "My PRs" menu section with open GitHub PRs assigned to the user or awaiting
+    /// their review that aren't associated with any Jira ticket. Default on — the section is
+    /// already gated on a GitHub token and hides itself when empty, so it costs nothing for
+    /// users who haven't configured GitHub. Scoped by `githubSearchOrgs` when set.
+    static let showMyPRsSection = Key<Bool>("showMyPRsSection", default: true)
 }
 
 extension KeychainKeys {

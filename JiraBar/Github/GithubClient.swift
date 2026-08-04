@@ -38,6 +38,9 @@ struct GithubPRStatus {
     var mergeCommitAllowed: Bool
     var squashMergeAllowed: Bool
     var rebaseMergeAllowed: Bool
+    /// The PR's head branch name. Used by the "My PRs" section to detect a Jira issue key in
+    /// the branch when the title doesn't carry one.
+    var headRefName: String?
 }
 
 public class GithubClient {
@@ -87,6 +90,7 @@ public class GithubClient {
               reviewDecision
               merged
               mergedAt
+              headRefName
               viewerLatestReview { state }
               assignees(first: 10) { nodes { login } }
               reviewThreads(first: 100) { nodes { isResolved } }
@@ -158,6 +162,7 @@ public class GithubClient {
                     let mergeCommitAllowed = (repoDict["mergeCommitAllowed"] as? Bool) ?? false
                     let squashMergeAllowed = (repoDict["squashMergeAllowed"] as? Bool) ?? false
                     let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
+                    let headRefName = prDict["headRefName"] as? String
 
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
@@ -172,7 +177,8 @@ public class GithubClient {
                         assignees: assignees,
                         mergeCommitAllowed: mergeCommitAllowed,
                         squashMergeAllowed: squashMergeAllowed,
-                        rebaseMergeAllowed: rebaseMergeAllowed
+                        rebaseMergeAllowed: rebaseMergeAllowed,
+                        headRefName: headRefName
                     ))
                 case .failure(let error):
                     print("github graphql: \(error)")
@@ -262,6 +268,80 @@ public class GithubClient {
                 print("github search: \(error)")
                 completion([])
             }
+        }
+    }
+
+    /// Searches GitHub for open PRs relevant to the token's user — assigned to them, or with
+    /// their review requested — for the "My PRs" menu section. Two search calls (GitHub's
+    /// search has no OR across qualifiers), deduped by URL. Scoped to `orgs` when non-empty;
+    /// `@me` resolves server-side from the token, so no identity lookup is needed.
+    func searchMyPRs(orgs: [String], token: String, completion: @escaping ([JiraPullRequest]) -> Void) {
+        guard !token.isEmpty else {
+            completion([])
+            return
+        }
+        let trimmedOrgs = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let orgTerms = trimmedOrgs.map { "org:\($0)" }.joined(separator: " ")
+        let queries = [
+            "is:pr is:open assignee:@me \(orgTerms)",
+            "is:pr is:open review-requested:@me \(orgTerms)"
+        ].map { $0.trimmingCharacters(in: .whitespaces) }
+
+        let headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .userAgent("JiraBar")
+        ]
+
+        let group = DispatchGroup()
+        let syncQueue = DispatchQueue(label: "githubMyPRs.sync")
+        var collected: [JiraPullRequest] = []
+
+        for q in queries {
+            group.enter()
+            AF.request(
+                "https://api.github.com/search/issues",
+                method: .get,
+                parameters: ["q": q, "per_page": 50],
+                headers: headers
+            )
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                var prs: [JiraPullRequest] = []
+                switch response.result {
+                case .success(let data):
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let items = json["items"] as? [[String: Any]] {
+                        prs = items.compactMap { item in
+                            guard
+                                let htmlURL = item["html_url"] as? String,
+                                let number = item["number"] as? Int,
+                                let title = item["title"] as? String
+                            else { return nil }
+                            return JiraPullRequest(
+                                id: "#\(number)",
+                                name: title,
+                                url: htmlURL,
+                                status: "OPEN",
+                                reviewers: nil
+                            )
+                        }
+                    }
+                case .failure(let error):
+                    print("github searchMyPRs: \(error)")
+                }
+                syncQueue.async {
+                    collected.append(contentsOf: prs)
+                    group.leave()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            var seen = Set<String>()
+            completion(collected.filter { seen.insert($0.url).inserted })
         }
     }
 

@@ -60,6 +60,22 @@ final class AppDelegateHelpersTests: XCTestCase {
         XCTAssertEqual(AppDelegate.targetURL(forPR: "garbage", modifiers: .command), "garbage")
     }
 
+    // MARK: - containsIssueKey (My PRs exclusion)
+
+    func testContainsIssueKeyMatches() {
+        XCTAssertTrue(AppDelegate.containsIssueKey("[ABC-123] fix the thing"))
+        XCTAssertTrue(AppDelegate.containsIssueKey("ABC-123-fix-the-thing"))       // branch style
+        XCTAssertTrue(AppDelegate.containsIssueKey("feature/AB2-9-short"))
+    }
+
+    func testContainsIssueKeyRejects() {
+        XCTAssertFalse(AppDelegate.containsIssueKey("fix the thing"))
+        XCTAssertFalse(AppDelegate.containsIssueKey("abc-123 lowercase is not a jira key"))
+        XCTAssertFalse(AppDelegate.containsIssueKey("A-1 single-letter prefix"))
+        XCTAssertFalse(AppDelegate.containsIssueKey("v1-2 version-ish"))
+        XCTAssertFalse(AppDelegate.containsIssueKey(""))
+    }
+
     // MARK: - prStatusColorHex
 
     func testPRStatusColors() {

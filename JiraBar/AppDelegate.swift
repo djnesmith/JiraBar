@@ -96,6 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
     @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
     @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
+    @Default(.showMyPRsSection) var showMyPRsSection
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -209,6 +210,28 @@ extension AppDelegate {
         self.menu.removeAllItems()
         self.submenuDelegates.removeAll()
 
+        // My PRs section: the GitHub search runs in parallel with the Jira fetch, and the
+        // per-issue PR collection below feeds the exclusion set (a PR already rendered under
+        // a ticket must not repeat here). All of it joins on myPRsGroup.
+        let myPRsEnabled = self.showMyPRsSection
+            && !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty
+        let myPRsGroup = DispatchGroup()
+        let collectedURLsQueue = DispatchQueue(label: "myPRs.collectedURLs")
+        var collectedPRURLs = Set<String>()
+        var myPRsResults: [JiraPullRequest] = []
+
+        if myPRsEnabled {
+            let orgs = self.githubSearchOrgs
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            myPRsGroup.enter()
+            GithubClient().searchMyPRs(orgs: orgs, token: self.gitHubToken.trimmingCharacters(in: .whitespaces)) { prs in
+                myPRsResults = prs
+                myPRsGroup.leave()
+            }
+        }
+
         jiraClient.getIssuesByJql() { resp, ranks in
             self.isRefreshing = false
             if let issues = resp.issues {
@@ -269,7 +292,10 @@ extension AppDelegate {
                         
                         issueItem.attributedTitle = issueItemTitle
                         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
-                        
+
+                        // Balanced by the leave in the prsWithGithubFallback completion below —
+                        // every client completion fires on success and failure alike.
+                        if myPRsEnabled { myPRsGroup.enter() }
                         self.jiraClient.getTransitionsByIssueKey(issueKey: issue.key) { transitions in
                             let issueMenu = NSMenu()
                             issueItem.submenu = issueMenu
@@ -360,6 +386,12 @@ extension AppDelegate {
 
                             self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
                                 self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
+                                    if myPRsEnabled {
+                                        collectedURLsQueue.async {
+                                            collectedPRURLs.formUnion(merged.map(\.url))
+                                            myPRsGroup.leave()
+                                        }
+                                    }
                                     guard !merged.isEmpty else { return }
                                     self.fetchGithubStatuses(for: merged) { statusByURL in
                                         DispatchQueue.main.async {
@@ -380,7 +412,26 @@ extension AppDelegate {
             else {
                 self.statusBarItem.button?.title = String(0)
             }
-            
+
+            // My PRs header goes between the status groups and the utility items. Rows are
+            // inserted (or the header removed) once the searches and per-issue PR collection
+            // both finish; the header doubles as the staleness marker — if a newer refresh
+            // rebuilt the menu, it's gone and the late results are dropped.
+            if myPRsEnabled {
+                let separator = NSMenuItem.separator()
+                let header = NSMenuItem(title: "My PRs", action: nil, keyEquivalent: "")
+                self.menu.addItem(separator)
+                self.menu.addItem(header)
+                myPRsGroup.notify(queue: .main) {
+                    self.insertMyPRs(
+                        results: myPRsResults,
+                        excludedURLs: collectedPRURLs,
+                        header: header,
+                        separator: separator
+                    )
+                }
+            }
+
             self.menu.addItem(.separator())
             let refreshItem = NSMenuItem(title: "Refresh", action: #selector(self.refreshMenu), keyEquivalent: "")
             refreshItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
@@ -1357,6 +1408,65 @@ extension AppDelegate {
         }
     }
 
+    /// Generic Jira issue-key pattern (e.g. ABC-123). Deliberately not tied to any specific
+    /// project keys — configs are user-supplied, nothing org-specific lives in source. Matched
+    /// case-sensitively, mirroring how Jira's own integrations link branches/titles to tickets.
+    private static let issueKeyRegex = try! NSRegularExpression(pattern: #"\b[A-Z][A-Z0-9]+-[0-9]+\b"#)
+
+    /// True when the string contains something that looks like a Jira issue key.
+    static func containsIssueKey(_ s: String) -> Bool {
+        let range = NSRange(s.startIndex..., in: s)
+        return AppDelegate.issueKeyRegex.firstMatch(in: s, options: [], range: range) != nil
+    }
+
+    /// Fills the "My PRs" section once the search and the per-issue PR collection have both
+    /// finished. A PR counts as "ticketed" — and is dropped — when its URL already rendered
+    /// under a visible issue, or when a Jira issue key appears in its title or head branch
+    /// (the ticket may simply be outside the current JQL window). The branch check needs the
+    /// GraphQL enrichment, so it runs as a second pass. Removes the header when nothing
+    /// survives; drops stale results whose header a newer refresh already discarded.
+    private func insertMyPRs(
+        results: [JiraPullRequest],
+        excludedURLs: Set<String>,
+        header: NSMenuItem,
+        separator: NSMenuItem
+    ) {
+        let removeSection = {
+            if self.menu.index(of: header) != -1 { self.menu.removeItem(header) }
+            if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
+        }
+        guard menu.index(of: header) != -1 else { return }
+
+        let candidates = results.filter { pr in
+            !excludedURLs.contains(pr.url) && !AppDelegate.containsIssueKey(pr.name)
+        }
+        guard !candidates.isEmpty else {
+            removeSection()
+            return
+        }
+
+        fetchGithubStatuses(for: candidates) { statusByURL in
+            let headerIndex = self.menu.index(of: header)
+            guard headerIndex != -1 else { return }
+            let survivors = candidates.filter { pr in
+                guard let branch = statusByURL[pr.url]?.headRefName else { return true }
+                return !AppDelegate.containsIssueKey(branch)
+            }
+            guard !survivors.isEmpty else {
+                removeSection()
+                return
+            }
+            for (offset, pr) in survivors.enumerated() {
+                self.addPRMenuItem(
+                    pr: pr,
+                    ghStatus: statusByURL[pr.url],
+                    to: self.menu,
+                    at: headerIndex + 1 + offset
+                )
+            }
+        }
+    }
+
     /// When Jira's dev-status API returns no PRs for an issue, fall back to searching GitHub
     /// for PRs whose title contains the issue key (Jira only links PRs when the key is in the
     /// branch name on some integration configs). Deduped by URL before returning so a PR that
@@ -1426,10 +1536,11 @@ extension AppDelegate {
         }
     }
 
-    /// Builds one PR row and appends it to the ticket's submenu. Renders 3 lines when GitHub
-    /// data is available (approval / unresolved / CI on line 3), otherwise 2 lines with the
-    /// legacy Jira-derived approved indicator.
-    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
+    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the main
+    /// menu's "My PRs" section when `index` is set. Renders 3 lines when GitHub data is
+    /// available (approval / unresolved / CI on line 3), otherwise 2 lines with the legacy
+    /// Jira-derived approved indicator.
+    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu, at index: Int? = nil) {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: pr.name.trunc(length: 50))
             .appendNewLine()
@@ -1485,7 +1596,11 @@ extension AppDelegate {
                 sendNotification(body: "Copied PR URL")
             }
         )
-        menu.addItem(prItem)
+        if let index {
+            menu.insertItem(prItem, at: index)
+        } else {
+            menu.addItem(prItem)
+        }
     }
 
     /// Chooses the URL to open for a modifier-click on a PR row.
