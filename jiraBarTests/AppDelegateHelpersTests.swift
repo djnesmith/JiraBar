@@ -76,6 +76,49 @@ final class AppDelegateHelpersTests: XCTestCase {
         XCTAssertFalse(AppDelegate.containsIssueKey(""))
     }
 
+    // MARK: - prStateLabel (draft / CI-error precedence)
+
+    private func ghStatus(ciState: String? = nil, isDraft: Bool = false) -> GithubPRStatus {
+        GithubPRStatus(
+            reviewDecision: nil, unresolvedThreads: 0, totalThreads: 0, ciState: ciState,
+            isMerged: false, mergedAt: nil, latestReleasePublishedAt: nil,
+            defaultBranchCIState: nil, viewerLatestReviewState: nil, assignees: [],
+            mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true,
+            headRefName: nil, isDraft: isDraft
+        )
+    }
+
+    func testPRStateLabelPlainOpen() {
+        let state = AppDelegate.prStateLabel(status: "OPEN", ghStatus: ghStatus())
+        XCTAssertEqual(state.text, "open")
+        XCTAssertEqual(state.colorHex, "#DAA520")
+    }
+
+    func testPRStateLabelMarksDraft() {
+        let state = AppDelegate.prStateLabel(status: "OPEN", ghStatus: ghStatus(isDraft: true))
+        XCTAssertEqual(state.text, "draft")
+        XCTAssertEqual(state.colorHex, "#DAA520")
+    }
+
+    func testPRStateLabelCIFailureOutranksDraft() {
+        let state = AppDelegate.prStateLabel(status: "OPEN", ghStatus: ghStatus(ciState: "FAILURE", isDraft: true))
+        XCTAssertEqual(state.text, "error")
+        XCTAssertEqual(state.colorHex, "#CF222E")
+    }
+
+    /// Jira's dev-status can report DRAFT directly, with no GitHub enrichment available.
+    func testPRStateLabelJiraReportedDraftWithoutEnrichment() {
+        let state = AppDelegate.prStateLabel(status: "DRAFT", ghStatus: nil)
+        XCTAssertEqual(state.text, "draft")
+        XCTAssertEqual(state.colorHex, "#DAA520")
+    }
+
+    func testPRStateLabelMergedIgnoresDraftFlag() {
+        let state = AppDelegate.prStateLabel(status: "MERGED", ghStatus: ghStatus(isDraft: true))
+        XCTAssertEqual(state.text, "merged")
+        XCTAssertEqual(state.colorHex, "#2DA44E")
+    }
+
     // MARK: - prStatusColorHex
 
     func testPRStatusColors() {

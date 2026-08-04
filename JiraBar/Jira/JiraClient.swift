@@ -85,7 +85,13 @@ public class JiraClient {
 
     // MARK: - API calls
 
-    func getIssuesByJql(completion: @escaping ((JiraResponse, [String: String]) -> Void)) {
+    /// Runs a JQL search. Defaults to the user's configured query and result cap; callers can
+    /// override both to run a secondary search (e.g. the TODO backlog section).
+    func getIssuesByJql(
+        jql overrideJQL: String? = nil,
+        maxResults overrideMaxResults: String? = nil,
+        completion: @escaping ((JiraResponse, [String: String]) -> Void)
+    ) {
         // Cloud introduced the /search/jql endpoint; Server only supports /search
         let searchPath = instanceType == .cloud ? "search/jql" : "search"
         let url = "\(baseUrl)/rest/api/\(apiVersion)/\(searchPath)"
@@ -97,9 +103,9 @@ public class JiraClient {
         }
 
         let parameters: [String: Any] = [
-            "jql": jql,
+            "jql": overrideJQL ?? jql,
             "fields": fieldList,
-            "maxResults": maxResults
+            "maxResults": overrideMaxResults ?? maxResults
         ]
 
         AF.request(url, method: .get, parameters: parameters, headers: authHeaders())

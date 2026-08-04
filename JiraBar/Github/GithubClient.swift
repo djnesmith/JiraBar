@@ -41,6 +41,9 @@ struct GithubPRStatus {
     /// The PR's head branch name. Used by the "My PRs" section to detect a Jira issue key in
     /// the branch when the title doesn't carry one.
     var headRefName: String?
+    /// Whether the PR is a draft. GitHub treats drafts as open, so they arrive through the
+    /// normal open-PR paths with nothing to distinguish them — this is what marks the row.
+    var isDraft: Bool
 }
 
 public class GithubClient {
@@ -103,6 +106,7 @@ public class GithubClient {
               merged
               mergedAt
               headRefName
+              isDraft
               viewerLatestReview { state }
               assignees(first: 10) { nodes { login } }
               reviewThreads(first: 100) { nodes { isResolved } }
@@ -175,6 +179,7 @@ public class GithubClient {
                     let squashMergeAllowed = (repoDict["squashMergeAllowed"] as? Bool) ?? false
                     let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
                     let headRefName = prDict["headRefName"] as? String
+                    let isDraft = (prDict["isDraft"] as? Bool) ?? false
 
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
@@ -190,7 +195,8 @@ public class GithubClient {
                         mergeCommitAllowed: mergeCommitAllowed,
                         squashMergeAllowed: squashMergeAllowed,
                         rebaseMergeAllowed: rebaseMergeAllowed,
-                        headRefName: headRefName
+                        headRefName: headRefName,
+                        isDraft: isDraft
                     ))
                 case .failure(let error):
                     print("github graphql: \(error)")

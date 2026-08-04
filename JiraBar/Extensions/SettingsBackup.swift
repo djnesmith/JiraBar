@@ -31,6 +31,8 @@ struct AppSettings: Codable {
     var jiraGithubUserMapPath: String?
     var githubPRReviewerJiraFieldId: String?
     var showMyPRsSection: Bool?
+    var todoJQL: String?
+    var todoMaxResults: String?
 
     // Lists
     /// Legacy pre-statusDisplay key. Kept so older backup files still decode; no longer
@@ -64,6 +66,8 @@ struct AppSettings: Codable {
             jiraGithubUserMapPath: Defaults[.jiraGithubUserMapPath],
             githubPRReviewerJiraFieldId: Defaults[.githubPRReviewerJiraFieldId],
             showMyPRsSection: Defaults[.showMyPRsSection],
+            todoJQL: Defaults[.todoJQL],
+            todoMaxResults: Defaults[.todoMaxResults],
             statusOrder: nil,
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -92,6 +96,8 @@ struct AppSettings: Codable {
         if let value = jiraGithubUserMapPath { Defaults[.jiraGithubUserMapPath] = value }
         if let value = githubPRReviewerJiraFieldId { Defaults[.githubPRReviewerJiraFieldId] = value }
         if let value = showMyPRsSection { Defaults[.showMyPRsSection] = value }
+        if let value = todoJQL { Defaults[.todoJQL] = value }
+        if let value = todoMaxResults { Defaults[.todoMaxResults] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         // Older backup files carry the legacy statusOrder list — convert it the same way the
         // launch migration does, and only when the file didn't bring its own statusDisplay.
