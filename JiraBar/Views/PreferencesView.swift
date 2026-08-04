@@ -23,39 +23,45 @@ struct PreferencesView: View {
                 VStack(spacing: 0) {
                     if instanceType == .cloud {
                         CloudPreferencesView()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         ServerPreferencesView()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     Divider()
 
                     StatusOrderSection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                         .padding(.vertical, 12)
 
                     Divider()
 
                     UserFieldShortcutsSection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                         .padding(.vertical, 12)
 
                     Divider()
 
                     TransitionPromptsSection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                         .padding(.vertical, 12)
 
                     Divider()
 
                     SettingsBackupSection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
                         .padding(.vertical, 12)
                 }
-                // Extra trailing inset so the macOS scrollbar doesn't sit on top of section content.
+                // Small trailing inset keeps the macOS scrollbar off the section content.
                 .padding(.trailing, 12)
             }
         }
-        .frame(width: 700, height: 720)
+        .frame(width: 950, height: 760)
     }
 }
 
@@ -421,13 +427,20 @@ private struct UserFieldShortcutsSection: View {
                     .foregroundColor(.secondary)
                     .padding(.vertical, 4)
             } else {
+                Text("Color = status whose color tints the assigned-user lines under this shortcut. Blank = use the ticket's own status color.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(Array(shortcuts.enumerated()), id: \.offset) { index, _ in
                     HStack(spacing: 6) {
                         TextField("Menu label (e.g. \"Change Assignee\")", text: $shortcuts[index].label)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
                         TextField("Field id", text: $shortcuts[index].fieldId)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .frame(width: 160)
+                            .frame(width: 140)
+                        TextField("Color from status", text: $shortcuts[index].colorFromStatus)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .frame(width: 130)
                         Toggle("Multi", isOn: $shortcuts[index].allowsMultiple)
                         Button(role: .destructive) {
                             shortcuts.remove(at: index)
@@ -587,6 +600,7 @@ private struct TransitionPromptRow: View {
                         }
                         .padding(.vertical, 4)
                     }
+
                 }
                 .padding(.leading, 20)
             }

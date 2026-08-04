@@ -14,6 +14,67 @@ private final class IssueShortcutTarget {
     }
 }
 
+/// Menu delegate that lazy-fetches the current value(s) of the user-picker fields exposed as
+/// per-issue shortcuts and updates each shortcut item to render as
+/// `<label>\n<user 1>\n<user 2>…`. Deferred until first hover so a menu refresh doesn't pay
+/// for a per-shortcut REST call on every visible ticket up front.
+private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
+    struct Target {
+        let fieldId: String
+        let label: String
+        /// Color used for the assigned-user lines under this shortcut. When nil the delegate
+        /// falls back to the ticket-status color passed in at construction time.
+        let color: NSColor?
+        weak var item: NSMenuItem?
+    }
+    let issueKey: String
+    let targets: [Target]
+    let fallbackColor: NSColor?
+    private let jiraClient: JiraClient
+    private var fetched = false
+
+    init(issueKey: String, targets: [Target], fallbackColor: NSColor?, jiraClient: JiraClient) {
+        self.issueKey = issueKey
+        self.targets = targets
+        self.fallbackColor = fallbackColor
+        self.jiraClient = jiraClient
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        // Only fire once per menu lifetime — the fetched values are still fresh next time this
+        // submenu is opened, and the enclosing menu triggers a full refreshMenu on any change
+        // that would invalidate them.
+        guard !fetched else { return }
+        fetched = true
+        for target in targets {
+            jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: target.fieldId) { [weak self] users in
+                DispatchQueue.main.async {
+                    guard let self, let item = target.item else { return }
+                    item.attributedTitle = self.buildTitle(label: target.label, users: users, color: target.color ?? self.fallbackColor)
+                }
+            }
+        }
+    }
+
+    /// Builds an attributed title: label on the first line, one user per subsequent line in the
+    /// resolved color (per-shortcut override, else the ticket status color; falls back to the
+    /// secondary label color when neither is set). Users get a slightly smaller font so the
+    /// label remains the anchor.
+    private func buildTitle(label: String, users: [JiraUser], color: NSColor?) -> NSAttributedString {
+        let attr = NSMutableAttributedString(string: label)
+        guard !users.isEmpty else { return attr }
+        // Two-space indent per line so the user names visually nest under the label rather
+        // than aligning flush with it — reads as a sublist.
+        let names = users.map { "  " + $0.displayName }.joined(separator: "\n")
+        let addition = NSMutableAttributedString(string: "\n" + names)
+        let range = NSRange(location: 0, length: addition.length)
+        addition.addAttribute(.foregroundColor, value: color ?? NSColor.secondaryLabelColor, range: range)
+        addition.addAttribute(.font, value: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), range: range)
+        attr.append(addition)
+        return attr
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -64,6 +125,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Snapshot of the issues currently rendered in the menu. Captured at each refresh so the
     /// bulk-move dialog has a list of candidates without a fresh API call.
     private var lastIssues: [Issue] = []
+
+    /// Strong references to the per-issue submenu delegates. `NSMenu.delegate` is a weak
+    /// reference, so without this the delegate would be released the moment refreshMenu
+    /// finished and the lazy user-field fetch would never fire. Cleared on each refresh.
+    private var submenuDelegates: [IssueSubmenuDelegate] = []
     
     var unknownPersonAvatar: NSImage!
     
@@ -72,10 +138,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(AppDelegate.windowClosed), name: NSWindow.willCloseNotification, object: nil)
         guard let statusButton = statusBarItem.button else { return }
         let icon = NSImage(named: "mark-gradient-white-jira")
-        icon?.size = NSSize(width: 18, height: 18)
+        // 16pt matches Apple's menu-bar-extras guidance and keeps the icon+count pair narrow.
+        icon?.size = NSSize(width: 16, height: 16)
         icon?.isTemplate = true
         statusButton.image = icon
         statusButton.imagePosition = NSControl.ImagePosition.imageLeft
+        // Snug the image and title together — the default 5pt gap between imageLeft and title
+        // eats visible menu-bar real estate for no visual benefit.
+        statusButton.imageHugsTitle = true
         
         statusBarItem.menu = menu
         
@@ -120,6 +190,7 @@ extension AppDelegate {
     func refreshMenu() {
         NSLog("Refreshing menu")
         self.menu.removeAllItems()
+        self.submenuDelegates.removeAll()
         
         jiraClient.getIssuesByJql() { resp, ranks in
             if let issues = resp.issues {
@@ -235,10 +306,38 @@ extension AppDelegate {
                                 !$0.label.trimmingCharacters(in: .whitespaces).isEmpty &&
                                 !$0.fieldId.trimmingCharacters(in: .whitespaces).isEmpty
                             }
+                            let colorForStatus: (String) -> NSColor? = { [weak self] name in
+                                self?.statusDisplay.first {
+                                    $0.name.caseInsensitiveCompare(name) == .orderedSame
+                                }?.nsColor
+                            }
+                            var shortcutTargets: [IssueSubmenuDelegate.Target] = []
                             for shortcut in shortcuts {
                                 let item = NSMenuItem(title: shortcut.label, action: #selector(self.openUserFieldChange), keyEquivalent: "")
                                 item.representedObject = IssueShortcutTarget(issueKey: issue.key, shortcut: shortcut)
                                 issueMenu.addItem(item)
+                                // Per-shortcut override — e.g. always show "Change Reviewer" users
+                                // in the Review status color regardless of what status the ticket
+                                // is currently in.
+                                let overrideName = shortcut.colorFromStatus.trimmingCharacters(in: .whitespaces)
+                                let overrideColor = overrideName.isEmpty ? nil : colorForStatus(overrideName)
+                                shortcutTargets.append(.init(
+                                    fieldId: shortcut.fieldId,
+                                    label: shortcut.label,
+                                    color: overrideColor,
+                                    item: item
+                                ))
+                            }
+                            if !shortcutTargets.isEmpty {
+                                let fallbackColor = colorForStatus(issue.fields.status.name)
+                                let delegate = IssueSubmenuDelegate(
+                                    issueKey: issue.key,
+                                    targets: shortcutTargets,
+                                    fallbackColor: fallbackColor,
+                                    jiraClient: self.jiraClient
+                                )
+                                issueMenu.delegate = delegate
+                                self.submenuDelegates.append(delegate)
                             }
 
                             self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
@@ -763,7 +862,7 @@ extension AppDelegate {
         // Size the window up-front to match PreferencesView's frame; otherwise the hosting view
         // resizes the window mid-layout and AppKit logs a layout-recursion warning.
         preferencesWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 950, height: 760),
             styleMask: [.closable, .titled],
             backing: .buffered,
             defer: false

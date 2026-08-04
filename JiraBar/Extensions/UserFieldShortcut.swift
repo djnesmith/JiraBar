@@ -12,17 +12,24 @@ struct UserFieldShortcut: Codable, Defaults.Serializable, Identifiable, Hashable
     var fieldId: String = ""
     /// `true` posts the field as a JSON array; `false` as a single object (or null when empty).
     var allowsMultiple: Bool = false
+    /// Optional: name of a status whose color (from Status Order & Colors) tints this
+    /// shortcut's assigned-user lines regardless of the ticket's actual status. Handy for
+    /// "role"-style fields — e.g. show Reviewer users in the Review status color on every
+    /// ticket, so a glance identifies which lane they belong to. Empty = fall back to the
+    /// ticket's own status color.
+    var colorFromStatus: String = ""
 
     init() {}
 
-    init(label: String, fieldId: String, allowsMultiple: Bool) {
+    init(label: String, fieldId: String, allowsMultiple: Bool, colorFromStatus: String = "") {
         self.label = label
         self.fieldId = fieldId
         self.allowsMultiple = allowsMultiple
+        self.colorFromStatus = colorFromStatus
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, fieldId, allowsMultiple
+        case id, label, fieldId, allowsMultiple, colorFromStatus
     }
 
     init(from decoder: Decoder) throws {
@@ -31,6 +38,7 @@ struct UserFieldShortcut: Codable, Defaults.Serializable, Identifiable, Hashable
         self.label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
         self.fieldId = try c.decodeIfPresent(String.self, forKey: .fieldId) ?? ""
         self.allowsMultiple = try c.decodeIfPresent(Bool.self, forKey: .allowsMultiple) ?? false
+        self.colorFromStatus = try c.decodeIfPresent(String.self, forKey: .colorFromStatus) ?? ""
     }
 }
 
