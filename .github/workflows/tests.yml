@@ -1,27 +1,44 @@
-name: Tests
+name: CI
 
-# Runs the unit suite on every push and PR. Before this existed the tests only
-# ran when someone remembered to run them locally.
+# Runs on every push and PR. Before this existed the suite only ran when
+# someone remembered to run it locally.
 on:
   push:
     branches: ['**']
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same ref makes the older run irrelevant — don't burn a
+# macOS runner finishing it. Never cancels on the default branch, where each
+# commit's result is a record worth keeping.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
-    name: xcodebuild test (macOS)
+    name: Tests
     # Pinned rather than macos-latest: the project file is objectVersion 70 and
     # uses PBXFileSystemSynchronizedRootGroup, which needs Xcode 16+.
     runs-on: macos-15
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Show toolchain
         run: |
           xcodebuild -version
           swift --version
+
+      # Keyed on Package.resolved, so the cache is only reused while the pinned
+      # dependency versions are unchanged.
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
 
       - name: Resolve SPM dependencies
         run: |
@@ -33,7 +50,7 @@ jobs:
       # unit tests are pure functions that need no entitlements. This flag must
       # NEVER be used for a Release build you intend to ship: it skips the
       # entitlements step, so the app runs unsandboxed and its Preferences read
-      # as wiped.
+      # as wiped. The release-config job below guards that wiring separately.
       - name: Run tests
         run: |
           set -o pipefail
@@ -45,4 +62,89 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            | tee /tmp/test.log
+
+      - name: Summarize results
+        if: always()
+        run: |
+          {
+            echo "### Test results"
+            echo ''
+            echo '```'
+            grep -E 'Executed [0-9]+ tests' /tmp/test.log | tail -1 || echo 'no test summary found'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: /tmp/test.log
+          retention-days: 7
+
+  release-config:
+    name: Release build + sandbox wiring
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      # The Release configuration compiles differently from Debug (whole-module
+      # optimization, NS_BLOCK_ASSERTIONS), so a Debug-only gate can still let a
+      # Release break through to the moment you try to ship.
+      - name: Build Release
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project jiraBar.xcodeproj \
+            -scheme jiraBar \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM=""
+
+      # Signing is what actually applies entitlements, and CI can't sign — so
+      # instead of inspecting a binary, assert the project still *wires* the
+      # sandbox up. Losing this wiring is what makes a shipped build come up with
+      # Preferences apparently wiped, which is hard to attribute after the fact
+      # and cheap to catch here.
+      - name: Assert sandbox and hardened runtime are still configured
+        run: |
+          settings=$(xcodebuild -project jiraBar.xcodeproj -scheme jiraBar \
+            -configuration Release -showBuildSettings 2>/dev/null)
+
+          fail=0
+          check() {
+            if echo "$settings" | grep -qE "^ +$1 = $2$"; then
+              echo "ok: $1 = $2"
+            else
+              echo "FAIL: expected '$1 = $2', got: $(echo "$settings" | grep -E "^ +$1 =" || echo '<unset>')"
+              fail=1
+            fi
+          }
+
+          check CODE_SIGN_ENTITLEMENTS 'JiraBar/JiraBar.entitlements'
+          check ENABLE_HARDENED_RUNTIME 'YES'
+
+          # The entitlements file itself must still request the sandbox.
+          if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' \
+               JiraBar/JiraBar.entitlements | grep -q true; then
+            echo 'ok: entitlements request app-sandbox'
+          else
+            echo 'FAIL: app-sandbox missing from JiraBar/JiraBar.entitlements'
+            fail=1
+          fi
+
+          exit $fail
