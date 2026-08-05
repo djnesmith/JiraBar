@@ -69,7 +69,8 @@ final class MyPRsQueryTests: XCTestCase {
     /// request went to them — it's no longer mine to act on, so it must not be listed.
     func testDropsHandedOffPRAuthoredByMeAndAssignedToSomeoneElse() {
         let hits = [hit("https://github.com/o/r/pull/1", ownedByMe: false, assignees: ["colleague"])]
-        XCTAssertTrue(GithubClient.retainingOwnPRs(hits).isEmpty)
+        // TEMPORARY: inverted on purpose to prove CI can fail. Reverted immediately after.
+        XCTAssertFalse(GithubClient.retainingOwnPRs(hits).isEmpty)
     }
 
     /// Authored by me and never handed to anyone — still mine.
