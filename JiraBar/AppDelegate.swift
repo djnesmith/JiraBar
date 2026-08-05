@@ -232,7 +232,7 @@ extension AppDelegate {
         self.menu.removeAllItems()
         self.submenuDelegates.removeAll()
 
-        // My PRs section: the GitHub search runs in parallel with the Jira fetch, and the
+        // PRs Without Tickets section: the GitHub search runs in parallel with the Jira fetch, and the
         // per-issue PR collection below feeds the exclusion set (a PR already rendered under
         // a ticket must not repeat here). All of it joins on myPRsGroup.
         let myPRsEnabled = self.showMyPRsSection
@@ -320,7 +320,7 @@ extension AppDelegate {
 
             self.appendTodoSection()
 
-            // My PRs sits between the status groups and the utility items. Its submenu is
+            // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
             // attached (or the whole section removed) once the searches and the per-issue PR
             // collection both finish; the item doubles as the staleness marker — if a newer
             // refresh rebuilt the menu, it's gone and the late results are dropped. It has no
@@ -328,7 +328,7 @@ extension AppDelegate {
             // how the per-issue items get their submenus asynchronously.
             if myPRsEnabled {
                 let separator = NSMenuItem.separator()
-                let myPRsItem = NSMenuItem(title: "My PRs", action: nil, keyEquivalent: "")
+                let myPRsItem = NSMenuItem(title: "PRs Without Tickets", action: nil, keyEquivalent: "")
                 myPRsItem.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
                 self.menu.addItem(separator)
                 self.menu.addItem(myPRsItem)
@@ -460,9 +460,9 @@ extension AppDelegate {
     /// off `item`: transitions, the copy shortcuts, comment/flag/upload, the configured
     /// user-field shortcuts (whose current values load lazily on hover), and PR rows.
     ///
-    /// `onPRsCollected` receives the merged PR list so the main-menu path can feed the My PRs
-    /// exclusion set. It's nil for TODO rows, which are built lazily and may never be opened —
-    /// the My PRs section can't wait on work that might not happen.
+    /// `onPRsCollected` receives the merged PR list so the main-menu path can feed the
+    /// PRs Without Tickets exclusion set. It's nil for TODO rows, which are built lazily and
+    /// may never be opened — that section can't wait on work that might not happen.
     private func attachIssueSubmenu(
         to item: NSMenuItem,
         issue: Issue,
@@ -1441,7 +1441,7 @@ extension AppDelegate {
         return AppDelegate.issueKeyRegex.firstMatch(in: s, options: [], range: range) != nil
     }
 
-    /// Hangs the surviving "My PRs" rows off the section item as a submenu, once the search
+    /// Hangs the surviving "PRs Without Tickets" rows off the section item as a submenu, once the search
     /// and the per-issue PR collection have both finished. A PR counts as "ticketed" — and is
     /// dropped — when its URL already rendered under a visible issue, or when a Jira issue key
     /// appears in its title or head branch (the ticket may simply be outside the current JQL
@@ -1557,9 +1557,9 @@ extension AppDelegate {
         }
     }
 
-    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the "My PRs"
-    /// submenu. Renders 3 lines when GitHub data is available (approval / unresolved / CI on
-    /// line 3), otherwise 2 lines with the legacy Jira-derived approved indicator.
+    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the
+    /// "PRs Without Tickets" submenu. Renders 3 lines when GitHub data is available (approval /
+    /// unresolved / CI on line 3), otherwise 2 lines with the legacy Jira-derived indicator.
     private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: pr.name.trunc(length: 50))

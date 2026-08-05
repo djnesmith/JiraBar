@@ -1,10 +1,10 @@
 import XCTest
 @testable import jiraBar
 
-/// Guards the "My PRs" search qualifiers and the handed-off filter. A missing qualifier hides
-/// an entire category of PRs with no error anywhere — which is exactly how authored PRs went
-/// missing: opening a PR neither assigns it to you nor requests your review, so it matched
-/// only `author:@me`.
+/// Guards the "PRs Without Tickets" search qualifiers and the handed-off filter. A missing
+/// qualifier hides an entire category of PRs with no error anywhere — which is exactly how
+/// authored PRs went missing: opening a PR neither assigns it to you nor requests your
+/// review, so it matched only `author:@me`.
 final class MyPRsQueryTests: XCTestCase {
 
     private func queries(_ orgs: [String] = []) -> [String] {

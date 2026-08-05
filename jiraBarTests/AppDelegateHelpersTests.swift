@@ -60,7 +60,7 @@ final class AppDelegateHelpersTests: XCTestCase {
         XCTAssertEqual(AppDelegate.targetURL(forPR: "garbage", modifiers: .command), "garbage")
     }
 
-    // MARK: - containsIssueKey (My PRs exclusion)
+    // MARK: - containsIssueKey (PRs Without Tickets exclusion)
 
     func testContainsIssueKeyMatches() {
         XCTAssertTrue(AppDelegate.containsIssueKey("[ABC-123] fix the thing"))

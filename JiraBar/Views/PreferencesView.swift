@@ -273,7 +273,7 @@ private struct QuerySection: View {
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Comma-separated GitHub orgs (e.g. \"acme, acme-labs\"). When Jira's dev-status API returns no PRs for a ticket, JiraBar falls back to searching these orgs for PRs whose title contains the ticket key. Requires a GitHub Token.")
             .font(.footnote)
-        Toggle("Show My PRs section", isOn: $showMyPRsSection)
+        Toggle("Show PRs Without Tickets section", isOn: $showMyPRsSection)
         Text("Shows your open GitHub PRs — assigned to you or awaiting your review — that aren't tied to any Jira ticket (no issue key in the title or branch, and not linked to a visible ticket). Requires a GitHub Token; scoped by GitHub Search Orgs when set.")
             .font(.footnote)
         LabeledContent("Jira → GitHub Map:") {

@@ -38,7 +38,7 @@ struct GithubPRStatus {
     var mergeCommitAllowed: Bool
     var squashMergeAllowed: Bool
     var rebaseMergeAllowed: Bool
-    /// The PR's head branch name. Used by the "My PRs" section to detect a Jira issue key in
+    /// The PR's head branch name. Used by the "PRs Without Tickets" section to detect a Jira issue key in
     /// the branch when the title doesn't carry one.
     var headRefName: String?
     /// Whether the PR is a draft. GitHub treats drafts as open, so they arrive through the
@@ -286,7 +286,8 @@ public class GithubClient {
     }
 
     /// Searches GitHub for open PRs relevant to the token's user — ones they authored, ones
-    /// assigned to them, and ones with their review requested — for the "My PRs" menu section.
+    /// assigned to them, and ones with their review requested — the candidate pool that the
+    /// "PRs Without Tickets" menu section then filters down.
     ///
     /// Three search calls, because GitHub's search has no OR across qualifiers, deduped by URL.
     /// `author:@me` is not redundant with the other two: opening a PR does not assign it to you
@@ -374,7 +375,7 @@ public class GithubClient {
         }
     }
 
-    /// How a PR came to be in the "My PRs" search results. GitHub's search can't OR these
+    /// How a PR came to be in the search results. GitHub's search can't OR these
     /// together, so each is its own query.
     enum MyPRsRelation: String, CaseIterable {
         case author = "author:@me"
@@ -387,7 +388,7 @@ public class GithubClient {
         var impliesOwnership: Bool { self != .author }
     }
 
-    /// The search queries behind the "My PRs" section, one per relation. Extracted so the set
+    /// The search queries behind the "PRs Without Tickets" section, one per relation. Extracted so the set
     /// of qualifiers is under test — dropping one silently hides a whole category of PRs
     /// rather than failing loudly.
     static func myPRsQueries(orgs: [String]) -> [(relation: MyPRsRelation, query: String)] {
@@ -401,7 +402,7 @@ public class GithubClient {
         }
     }
 
-    /// A deduped "My PRs" search hit, carrying the provenance needed to spot handed-off work.
+    /// A deduped search hit, carrying the provenance needed to spot handed-off work.
     struct MyPRHit {
         let pr: JiraPullRequest
         /// True when at least one query that claims ownership (assignee / review-requested)

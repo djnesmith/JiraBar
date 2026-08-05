@@ -90,10 +90,14 @@ extension Defaults.Keys {
     /// view usually wants a different depth than the main ticket list.
     static let todoMaxResults = Key<String>("todoMaxResults", default: "15")
 
-    /// Shows a "My PRs" menu section with open GitHub PRs assigned to the user or awaiting
-    /// their review that aren't associated with any Jira ticket. Default on — the section is
-    /// already gated on a GitHub token and hides itself when empty, so it costs nothing for
-    /// users who haven't configured GitHub. Scoped by `githubSearchOrgs` when set.
+    /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is
+    /// assigned to, or has been asked to review, minus any associated with a Jira ticket.
+    /// Default on — the section is already gated on a GitHub token and hides itself when empty,
+    /// so it costs nothing for users who haven't configured GitHub. Scoped by
+    /// `githubSearchOrgs` when set.
+    ///
+    /// The key name predates the section's rename from "My PRs" and is deliberately unchanged:
+    /// renaming it would orphan the stored value and silently reset the user's preference.
     static let showMyPRsSection = Key<Bool>("showMyPRsSection", default: true)
 }
 

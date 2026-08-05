@@ -43,7 +43,7 @@ Native MacOS menubar application to show Jira issues in your menu bar:
 Below each ticket, JiraBar shows any GitHub PRs Jira has linked to the ticket via its dev-status API. Rows are enriched from GitHub when a token is set:
 
 - **Line 1** — PR title (truncated).
-- **Line 2** — `owner/repo #NNN · <state>` where state is `open` / `merged` / `declined` / `draft` (color-coded). Drafts are detected from GitHub even though it reports them as open, so they're marked wherever they appear, including in My PRs. If a token is set and CI failed on an open PR, the state word becomes `error` in red — that outranks the draft marker, being the more actionable signal.
+- **Line 2** — `owner/repo #NNN · <state>` where state is `open` / `merged` / `declined` / `draft` (color-coded). Drafts are detected from GitHub even though it reports them as open, so they're marked wherever they appear, including in PRs Without Tickets. If a token is set and CI failed on an open PR, the state word becomes `error` in red — that outranks the draft marker, being the more actionable signal.
 - **Line 3 (OPEN PRs)** — review decision (`approved` / `changes requested`; nothing is shown while review is still required), unresolved-thread count, and CI outcome, whichever the token can see.
 - **Line 3 (MERGED PRs)** — `released` (green) once the repo's most recent release was published *after* the merge, or `releasing` (yellow) while the default branch's checks are still `PENDING`/`EXPECTED`.
 
@@ -62,7 +62,7 @@ Hovering over a PR row with any modifier held pops small accent-colored hint pil
 
 ## TODO section
 
-Set a **TODO JQL** in Preferences and a `TODO` entry appears above My PRs, whose submenu lists the matching tickets — each carrying the same submenu it gets in the main list (transitions, copy shortcuts, comment/flag/upload, user-field shortcuts, PR rows). It's meant for the backlog your main JQL can't show: the main query is usually scoped to you, so the column you'd *pick from* is invisible. A query like `project = ABC AND status = "To Do" ORDER BY Rank ASC` gives you that.
+Set a **TODO JQL** in Preferences and a `TODO` entry appears above PRs Without Tickets, whose submenu lists the matching tickets — each carrying the same submenu it gets in the main list (transitions, copy shortcuts, comment/flag/upload, user-field shortcuts, PR rows). It's meant for the backlog your main JQL can't show: the main query is usually scoped to you, so the column you'd *pick from* is invisible. A query like `project = ABC AND status = "To Do" ORDER BY Rank ASC` gives you that.
 
 Ordering follows the **Rank field id** when one is configured, which is what makes the submenu match board order. Without it, the order Jira returned is preserved untouched, so any `ORDER BY` in your query still applies. **TODO Max Results** caps the list separately from the main one, since a backlog usually wants a different depth.
 
@@ -70,9 +70,9 @@ The per-ticket submenus are built the first time you open TODO, not on every ref
 
 There's deliberately no default query. `status = "To Do"` with no project or board scope doesn't mean "my To Do column" — it means every To Do ticket in every project you can see, which after the result cap is a near-random sample. The query has to name your project or board to be meaningful, so it's yours to write.
 
-## My PRs section
+## PRs Without Tickets section
 
-With a GitHub token set, a **My PRs** entry appears between the ticket groups and the utility items. Its submenu lists your open GitHub PRs — ones you authored, ones assigned to you, and ones whose review was requested from you — that **aren't** associated with any Jira ticket. All three matter: opening a PR doesn't assign it to you or request your review, and a PR assigned to you may well have been written by someone else. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows look and click exactly like ticket PR rows (same third line, same modifier routing and hint pills), the entry hides itself entirely when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle it off in Preferences with **Show My PRs section**.
+With a GitHub token set, a **PRs Without Tickets** entry appears between the ticket groups and the utility items. Its submenu lists your open GitHub PRs — ones you authored, ones assigned to you, and ones whose review was requested from you — that **aren't** associated with any Jira ticket. All three matter: opening a PR doesn't assign it to you or request your review, and a PR assigned to you may well have been written by someone else. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows look and click exactly like ticket PR rows (same third line, same modifier routing and hint pills), the entry hides itself entirely when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle it off in Preferences with **Show PRs Without Tickets section**.
 
 ## GitHub search fallback
 
