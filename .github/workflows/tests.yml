@@ -1,0 +1,48 @@
+name: Tests
+
+# Runs the unit suite on every push and PR. Before this existed the tests only
+# ran when someone remembered to run them locally.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: xcodebuild test (macOS)
+    # Pinned rather than macos-latest: the project file is objectVersion 70 and
+    # uses PBXFileSystemSynchronizedRootGroup, which needs Xcode 16+.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Resolve SPM dependencies
+        run: |
+          xcodebuild -project jiraBar.xcodeproj \
+            -scheme jiraBar \
+            -resolvePackageDependencies
+
+      # Signing is disabled because CI runners hold no Developer ID, and the
+      # unit tests are pure functions that need no entitlements. This flag must
+      # NEVER be used for a Release build you intend to ship: it skips the
+      # entitlements step, so the app runs unsandboxed and its Preferences read
+      # as wiped.
+      - name: Run tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project jiraBar.xcodeproj \
+            -scheme jiraBar \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
