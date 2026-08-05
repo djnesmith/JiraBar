@@ -226,6 +226,9 @@ private struct QuerySection: View {
     @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
     @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
     @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
+    @Default(.showMyPRsSection) var showMyPRsSection
+    @Default(.todoJQL) var todoJQL
+    @Default(.todoMaxResults) var todoMaxResults
 
     var body: some View {
         TextField("JQL Query:", text: $jql)
@@ -236,6 +239,13 @@ private struct QuerySection: View {
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Adds an Open All Issues menu entry under Open Search results. Use a broader query (e.g. include closed tickets) for an everything-I've-touched view.")
             .font(.footnote)
+        TextField("TODO JQL:", text: $todoJQL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Adds a TODO entry whose submenu lists these tickets, each with the same submenu it gets in the main list. Meant for a backlog view your main JQL can't show — e.g. status = \"To Do\" ORDER BY Rank ASC for the whole column, not just your own tickets. Set the Rank field id below and the submenu follows board order.")
+            .font(.footnote)
+        TextField("TODO Max Results:", text: $todoMaxResults)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+            .frame(width: 120)
         TextField("Max Results:", text: $maxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
             .frame(width: 120)
@@ -262,6 +272,9 @@ private struct QuerySection: View {
         TextField("GitHub Search Orgs:", text: $githubSearchOrgs)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Comma-separated GitHub orgs (e.g. \"acme, acme-labs\"). When Jira's dev-status API returns no PRs for a ticket, JiraBar falls back to searching these orgs for PRs whose title contains the ticket key. Requires a GitHub Token.")
+            .font(.footnote)
+        Toggle("Show PRs Without Tickets section", isOn: $showMyPRsSection)
+        Text("Shows your open GitHub PRs — assigned to you or awaiting your review — that aren't tied to any Jira ticket (no issue key in the title or branch, and not linked to a visible ticket). Requires a GitHub Token; scoped by GitHub Search Orgs when set.")
             .font(.footnote)
         LabeledContent("Jira → GitHub Map:") {
             HStack {
@@ -416,7 +429,7 @@ private struct UserFieldShortcutsSection: View {
                 }
             }
 
-            Text("Each shortcut shows under \"Add Comment…\" in a ticket's submenu and opens a dialog pre-loaded with the current value. Submitting with no users selected clears the field.")
+            Text("Each shortcut shows under \"Add Comment\" in a ticket's submenu and opens a dialog pre-loaded with the current value. Submitting with no users selected clears the field.")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

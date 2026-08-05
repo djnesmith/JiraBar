@@ -85,7 +85,13 @@ public class JiraClient {
 
     // MARK: - API calls
 
-    func getIssuesByJql(completion: @escaping ((JiraResponse, [String: String]) -> Void)) {
+    /// Runs a JQL search. Defaults to the user's configured query and result cap; callers can
+    /// override both to run a secondary search (e.g. the TODO backlog section).
+    func getIssuesByJql(
+        jql overrideJQL: String? = nil,
+        maxResults overrideMaxResults: String? = nil,
+        completion: @escaping ((JiraResponse, [String: String]) -> Void)
+    ) {
         // Cloud introduced the /search/jql endpoint; Server only supports /search
         let searchPath = instanceType == .cloud ? "search/jql" : "search"
         let url = "\(baseUrl)/rest/api/\(apiVersion)/\(searchPath)"
@@ -97,9 +103,9 @@ public class JiraClient {
         }
 
         let parameters: [String: Any] = [
-            "jql": jql,
+            "jql": overrideJQL ?? jql,
             "fields": fieldList,
-            "maxResults": maxResults
+            "maxResults": overrideMaxResults ?? maxResults
         ]
 
         AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
@@ -129,7 +135,7 @@ public class JiraClient {
     /// Parses just the rank field out of the search response. Returns [issueKey: rankString].
     /// The typed Issue/Fields struct can't decode a dynamic customfield_XXXXX key, so we do
     /// a second pass with JSONSerialization. Empty `fieldId` short-circuits to an empty dict.
-    private static func extractRanks(from data: Data, fieldId: String) -> [String: String] {
+    static func extractRanks(from data: Data, fieldId: String) -> [String: String] {
         guard !fieldId.isEmpty,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let issues = json["issues"] as? [[String: Any]] else {
@@ -306,7 +312,7 @@ public class JiraClient {
     }
 
     /// Pulls a human-readable message out of Jira's `{errorMessages: [...], errors: {field: msg}}` response shape.
-    private static func extractErrorMessage(from data: Data?) -> String? {
+    static func extractErrorMessage(from data: Data?) -> String? {
         guard
             let data,
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -489,29 +495,36 @@ public class JiraClient {
     }
 
     /// Fetches the current value(s) of a single user-picker field on an issue.
-    /// Returns an empty array if the field is null, missing, or fails to parse.
+    /// Returns an empty array when the field is genuinely null or missing, and nil when the
+    /// request itself failed (auth/network) — callers that pre-populate pickers or diff
+    /// against the current value must not mistake a failed read for an empty field.
     /// Works for both single-user fields (assignee) and multi-user custom fields.
-    func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]) -> Void) {
+    func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]?) -> Void) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)"
         let parameters: [String: Any] = ["fields": fieldId]
         AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
             .validate(statusCode: 200..<300)
             .responseData { response in
-                guard
-                    let data = response.data,
-                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let fields = json["fields"] as? [String: Any]
-                else {
-                    completion([])
-                    return
-                }
-                let raw = fields[fieldId]
-                if let arr = raw as? [[String: Any]] {
-                    completion(arr.compactMap(JiraClient.parseUser))
-                } else if let obj = raw as? [String: Any] {
-                    completion([JiraClient.parseUser(obj)].compactMap { $0 })
-                } else {
-                    completion([])
+                switch response.result {
+                case .success(let data):
+                    guard
+                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                        let fields = json["fields"] as? [String: Any]
+                    else {
+                        completion(nil)
+                        return
+                    }
+                    let raw = fields[fieldId]
+                    if let arr = raw as? [[String: Any]] {
+                        completion(arr.compactMap(JiraClient.parseUser))
+                    } else if let obj = raw as? [String: Any] {
+                        completion([JiraClient.parseUser(obj)].compactMap { $0 })
+                    } else {
+                        completion([])
+                    }
+                case .failure(let error):
+                    print("\(url):  \(error)")
+                    completion(nil)
                 }
             }
     }

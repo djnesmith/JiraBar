@@ -34,17 +34,17 @@ Native MacOS menubar application to show Jira issues in your menu bar:
 
 - **Copy Key / Copy URL / Copy Title / Copy Branch Name / Copy PR Name** — the branch name uses `KEY-slugified-title` (max 50-char slug, git-safe).
 - **Add Comment / Add Flag / Upload Files** — the upload dialog supports drag-and-drop. Add Flag only appears when a Flagged custom-field id is configured.
-- **Change Assignee / Change Reviewer / Change Tester** (and any other user-picker fields you add) — configured per install as "User Field Shortcuts" so it works against whatever your custom-field ids are.
+- **Change Assignee / Change Reviewer / Change Tester** (and any other user-picker fields you add) — configured per install as "User Field Shortcuts" so it works against whatever your custom-field ids are. Opening a ticket's submenu lazily fetches each shortcut field's current users and renders them under the shortcut label, colored by the ticket's status color (or a per-shortcut status-color override).
 - **Transitions** — every available Jira transition. Configure per-transition prompts to require a comment, a user picker, a text field, or a select field before submitting.
-- **Move Multiple Issues…** — bulk-transition several tickets at once with an optional shared comment.
+- **Move Multiple Issues…** — bulk-transition several tickets at once. The dialog carries the same prompt fields as single transitions (user picker / text / select, plus a shared comment), and — when the reviewer mirror is configured — an "also update GitHub PRs" checkbox that mirrors reviewers onto every successfully-moved issue's linked PRs.
 
 ## Pull-request rows
 
 Below each ticket, JiraBar shows any GitHub PRs Jira has linked to the ticket via its dev-status API. Rows are enriched from GitHub when a token is set:
 
 - **Line 1** — PR title (truncated).
-- **Line 2** — `owner/repo #NNN · <state>` where state is `open` / `merged` / `declined` / `draft` (color-coded). If a token is set and CI failed on an OPEN PR, state is replaced with `error` in red.
-- **Line 3 (OPEN PRs)** — review decision (`approved` / `changes requested` / `review required`), unresolved-thread count, and CI outcome, whichever the token can see.
+- **Line 2** — `owner/repo #NNN · <state>` where state is `open` / `merged` / `declined` / `draft` (color-coded). Drafts are detected from GitHub even though it reports them as open, so they're marked wherever they appear, including in PRs Without Tickets. If a token is set and CI failed on an open PR, the state word becomes `error` in red — that outranks the draft marker, being the more actionable signal.
+- **Line 3 (OPEN PRs)** — review decision (`approved` / `changes requested`; nothing is shown while review is still required), unresolved-thread count, and CI outcome, whichever the token can see.
 - **Line 3 (MERGED PRs)** — `released` (green) once the repo's most recent release was published *after* the merge, or `releasing` (yellow) while the default branch's checks are still `PENDING`/`EXPECTED`.
 
 **Click routing on a PR row:**
@@ -60,6 +60,20 @@ Below each ticket, JiraBar shows any GitHub PRs Jira has linked to the ticket vi
 
 Hovering over a PR row with any modifier held pops small accent-colored hint pills over the row so you don't have to memorize the table: the left pill spells out what a left-click will do, and the right pill reminds you that right-click copies the URL. Plain hover shows nothing, so casual mouse-over stays quiet.
 
+## TODO section
+
+Set a **TODO JQL** in Preferences and a `TODO` entry appears above PRs Without Tickets, whose submenu lists the matching tickets — each carrying the same submenu it gets in the main list (transitions, copy shortcuts, comment/flag/upload, user-field shortcuts, PR rows). It's meant for the backlog your main JQL can't show: the main query is usually scoped to you, so the column you'd *pick from* is invisible. A query like `project = ABC AND status = "To Do" ORDER BY Rank ASC` gives you that.
+
+Ordering follows the **Rank field id** when one is configured, which is what makes the submenu match board order. Without it, the order Jira returned is preserved untouched, so any `ORDER BY` in your query still applies. **TODO Max Results** caps the list separately from the main one, since a backlog usually wants a different depth.
+
+The per-ticket submenus are built the first time you open TODO, not on every refresh — each one costs a transitions call plus a dev-status call, so a 15-ticket backlog would otherwise multiply JiraBar's request volume for a menu you may never open. The section hides itself entirely when the query returns nothing.
+
+There's deliberately no default query. `status = "To Do"` with no project or board scope doesn't mean "my To Do column" — it means every To Do ticket in every project you can see, which after the result cap is a near-random sample. The query has to name your project or board to be meaningful, so it's yours to write.
+
+## PRs Without Tickets section
+
+With a GitHub token set, a **PRs Without Tickets** entry appears between the ticket groups and the utility items. Its submenu lists your open GitHub PRs — ones you authored, ones assigned to you, and ones whose review was requested from you — that **aren't** associated with any Jira ticket. All three matter: opening a PR doesn't assign it to you or request your review, and a PR assigned to you may well have been written by someone else. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows look and click exactly like ticket PR rows (same third line, same modifier routing and hint pills), the entry hides itself entirely when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle it off in Preferences with **Show PRs Without Tickets section**.
+
 ## GitHub search fallback
 
 When Jira's dev-status API returns no PRs for a ticket — usually because the branch name doesn't include the ticket key and the org's Jira↔GitHub integration only matches on branch name — JiraBar can fall back to searching GitHub. Set a **GitHub Search Orgs** value in Preferences (comma-separated) and any PR whose title contains the ticket key inside those orgs is picked up. Results are deduped by URL against whatever Jira returned so a PR that later gets picked up by both sources renders once.
@@ -74,10 +88,20 @@ Enable this by setting three things in Preferences:
 
 With all three set, the "Ready for Review" transition dialog and the "Change Reviewer" shortcut show a checkbox — **Also update GitHub PR: assign me, add selected users as reviewers** — default on. Submitting will:
 
-- Set you (looked up via your own Jira accountId in the map) as the PR **Assignee** on every linked open GitHub PR.
-- Sync the PR's **Requested reviewers** list to match the Jira reviewers: add anyone missing, remove anyone the map knows about who's no longer in the Jira list. Requested reviewers not in the map (external contributors, ad-hoc adds) are left alone.
+- Add you (looked up via your own Jira accountId in the map) to the PR **Assignees** on every linked open GitHub PR — additive, existing assignees are kept.
+- Sync the PR's **Requested reviewers** list to match the Jira reviewers: add anyone missing, remove anyone the map knows about who's no longer in the Jira list. Requested reviewers not in the map (external contributors, ad-hoc adds) are left alone. If the PR's current reviewer list can't be read (auth/network failure), the sync for that PR is skipped entirely rather than diffing against an unknown state.
 
 A notification summarizes what happened per PR, and lists any Jira users that don't have a mapping.
+
+## PR actions from a transition
+
+Each transition prompt can additionally enable **PR actions** that run against every open linked GitHub PR after the transition commits:
+
+- **Approve** — submits an APPROVE review (with an optional comment); PRs you've already approved are skipped. The dialog pre-fetches state and shows "You've approved N/M open PRs" so you know before submitting.
+- **Merge** — merges with a configurable method (merge / squash / rebase); PRs whose repo disallows the chosen method are skipped and counted in the summary.
+- **Sync Jira Assignee** — sets the ticket's Jira Assignee (mapped via the Jira → GitHub file) as the PR assignee, only when the PR has no assignee yet.
+
+Approvals go out first, then assignee-sync and merges, so GitHub's merge-eligibility check never races a just-submitted approval. One summary notification reports counts per action.
 
 ### Mapping file format
 

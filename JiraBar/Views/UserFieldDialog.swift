@@ -105,12 +105,7 @@ struct UserFieldDialog: View {
             Spacer(minLength: 0)
 
             HStack {
-                Button("") { submit() }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .frame(width: 0, height: 0)
-                    .opacity(0)
-                    .accessibilityHidden(true)
-                    .disabled(submitting)
+                HiddenSubmitButton(disabled: submitting) { submit() }
 
                 Spacer()
                 Button("Cancel") { onCancel() }
@@ -181,6 +176,12 @@ struct UserFieldDialog: View {
         guard selectedUsers.isEmpty else { return }
         client.getIssueFieldUsers(issueKey: issueKey, fieldId: shortcut.fieldId) { existing in
             DispatchQueue.main.async {
+                // A failed read must be surfaced — submitting an empty picker clears the
+                // field, so silently presenting an empty selection would be destructive.
+                guard let existing else {
+                    loadError = "Couldn't load the field's current users — submitting may clear it."
+                    return
+                }
                 guard !existing.isEmpty else { return }
                 let matched: [JiraUser] = existing.map { candidate in
                     availableUsers.first(where: { Self.sameUser($0, candidate) }) ?? candidate

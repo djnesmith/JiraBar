@@ -10,12 +10,8 @@ import SwiftUI
 
 class JiraTokenValidator: ObservableObject {
     
-    @Published var iconName: String!;
-    @Published var iconColor: Color!;
-    
-    init() {
-        setLoading()
-    }
+    @Published var iconName: String = "clock.fill"
+    @Published var iconColor: Color = Color(.systemGray)
     
     func setLoading() {
         

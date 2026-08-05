@@ -36,7 +36,8 @@ struct StatusDisplay: Codable, Defaults.Serializable, Identifiable, Hashable {
         return NSColor(hex: colorHex)
     }
 
-    /// `NSColor(hex:)` in this codebase returns gray for invalid strings, so we validate before calling.
+    /// Distinguishes "no color configured" (nil from `nsColor`) from `NSColor(hex:)`'s gray
+    /// fallback for invalid strings.
     static func isValidHex(_ raw: String) -> Bool {
         var s = raw.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("#") { s.removeFirst() }

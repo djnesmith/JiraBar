@@ -49,8 +49,9 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
         for target in targets {
             jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: target.fieldId) { [weak self] users in
                 DispatchQueue.main.async {
+                    // nil (failed read) renders the same as empty — no user lines, non-destructive.
                     guard let self, let item = target.item else { return }
-                    item.attributedTitle = self.buildTitle(label: target.label, users: users, color: target.color ?? self.fallbackColor)
+                    item.attributedTitle = self.buildTitle(label: target.label, users: users ?? [], color: target.color ?? self.fallbackColor)
                 }
             }
         }
@@ -75,6 +76,25 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
+/// Defers work until a menu is first opened, then runs it once. Used by the TODO section,
+/// whose per-ticket submenus each cost a transitions call plus a dev-status call: paying that
+/// for a whole backlog on every refresh — for a section that often goes unopened — would
+/// multiply the app's request volume for nothing.
+private final class LazyMenuDelegate: NSObject, NSMenuDelegate {
+    private let populate: () -> Void
+    private var populated = false
+
+    init(populate: @escaping () -> Void) {
+        self.populate = populate
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard !populated else { return }
+        populated = true
+        populate()
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -95,6 +115,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
     @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
     @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
+    @Default(.showMyPRsSection) var showMyPRsSection
+    @Default(.todoJQL) var todoJQL
+    @Default(.todoMaxResults) var todoMaxResults
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -126,13 +149,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// bulk-move dialog has a list of candidates without a fresh API call.
     private var lastIssues: [Issue] = []
 
-    /// Strong references to the per-issue submenu delegates. `NSMenu.delegate` is a weak
-    /// reference, so without this the delegate would be released the moment refreshMenu
-    /// finished and the lazy user-field fetch would never fire. Cleared on each refresh.
-    private var submenuDelegates: [IssueSubmenuDelegate] = []
-    
-    var unknownPersonAvatar: NSImage!
-    
+    /// Strong references to the submenu delegates (per-issue field-value loaders and the TODO
+    /// section's lazy builder). `NSMenu.delegate` is a weak reference, so without this they'd
+    /// be released the moment refreshMenu finished and their deferred work would never fire.
+    /// Cleared on each refresh.
+    private var submenuDelegates: [any NSMenuDelegate] = []
+
+    /// Guards against overlapping menu rebuilds (timer fire racing a manual Refresh) — two
+    /// concurrent builds would interleave items on the same NSMenu.
+    private var isRefreshing = false
+
+    /// Set once by `checkForUpdates` when a newer release exists; `refreshMenu` re-appends the
+    /// "New version available" item on every rebuild (removeAllItems would otherwise eat it).
+    private var latestReleaseURL: URL?
+
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         migrateStatusOrderIfNeeded()
         NotificationCenter.default.addObserver(self, selector: #selector(AppDelegate.windowClosed), name: NSWindow.willCloseNotification, object: nil)
@@ -148,22 +178,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusButton.imageHugsTitle = true
         
         statusBarItem.menu = menu
-        
-        timer = Timer.scheduledTimer(
+
+        scheduleRefreshTimer()
+
+        NSApp.setActivationPolicy(.accessory)
+
+        checkForUpdates()
+    }
+
+    /// (Re)creates the refresh timer. Constructed unscheduled and added to the run loop exactly
+    /// once, in `.common` mode, so refreshes keep firing while a menu is held open — the old
+    /// scheduledTimer + add(.common) pair registered the timer twice at launch and the
+    /// post-Preferences reschedule dropped `.common` entirely.
+    private func scheduleRefreshTimer() {
+        timer?.invalidate()
+        let t = Timer(
             timeInterval: Double(refreshRate * 60),
             target: self,
             selector: #selector(refreshMenu),
             userInfo: nil,
             repeats: true
         )
-        timer?.fire()
-        RunLoop.main.add(timer!, forMode: .common)
-        
-        NSApp.setActivationPolicy(.accessory)
-        
-        let config = NSImage.SymbolConfiguration(pointSize: 24, weight: .regular)
-        unknownPersonAvatar = NSImage(systemSymbolName: "person.crop.circle.badge.questionmark", accessibilityDescription: nil)!.withSymbolConfiguration(config)!
-        checkForUpdates()
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        t.fire()
     }
 
     /// Moves any entries the user had under the legacy `statusOrder` [String] key into the
@@ -188,11 +226,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate {
     @objc
     func refreshMenu() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
         NSLog("Refreshing menu")
         self.menu.removeAllItems()
         self.submenuDelegates.removeAll()
-        
+
+        // PRs Without Tickets section: the GitHub search runs in parallel with the Jira fetch, and the
+        // per-issue PR collection below feeds the exclusion set (a PR already rendered under
+        // a ticket must not repeat here). All of it joins on myPRsGroup.
+        let myPRsEnabled = self.showMyPRsSection
+            && !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty
+        let myPRsGroup = DispatchGroup()
+        let collectedURLsQueue = DispatchQueue(label: "myPRs.collectedURLs")
+        var collectedPRURLs = Set<String>()
+        var myPRsResults: [JiraPullRequest] = []
+
+        if myPRsEnabled {
+            let orgs = self.githubSearchOrgs
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            myPRsGroup.enter()
+            GithubClient().searchMyPRs(orgs: orgs, token: self.gitHubToken.trimmingCharacters(in: .whitespaces)) { prs in
+                myPRsResults = prs
+                myPRsGroup.leave()
+            }
+        }
+
         jiraClient.getIssuesByJql() { resp, ranks in
+            self.isRefreshing = false
             if let issues = resp.issues {
                 self.lastIssues = issues
                 self.statusBarItem.button?.title = String(issues.count)
@@ -235,126 +298,18 @@ extension AppDelegate {
                     }
 
                     for issue in sortedIssues {
-                        let issueItem = NSMenuItem(title: "", action: #selector(self.openLink), keyEquivalent: "")
-                        
-                        let issueItemTitle = NSMutableAttributedString(string: "")
-                            .appendString(string: issue.fields.summary.trunc(length: 50))
-                            .appendNewLine()
-                            .appendIcon(iconName: "hash", color: NSColor.gray)
-                            .appendString(string: issue.key, color: "#888888")
-                            .appendSeparator()
-                            .appendIcon(iconName: "project", color: NSColor.gray)
-                            .appendString(string: issue.fields.assignee?.displayName ?? "Unassign", color: "#888888")
-                            .appendSeparator()
-                            .appendString(string: issue.fields.issuetype.name, color: "#888888")
-                        
-                        
-                        issueItem.attributedTitle = issueItemTitle
-                        issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
-                        
-                        self.jiraClient.getTransitionsByIssueKey(issueKey: issue.key) { transitions in
-                            let issueMenu = NSMenu()
-                            issueItem.submenu = issueMenu
-                            if !transitions.isEmpty {
-                                let header = NSMenuItem(title: "Transition to...", action: nil, keyEquivalent: "")
-                                issueMenu.addItem(header)
-                                for transition in transitions {
-                                    let transitionItem = NSMenuItem(title: transition.name, action: #selector(self.transitionIssue), keyEquivalent: "")
-                                    transitionItem.representedObject = [issue.key, transition.id, transition.name]
-                                    issueMenu.addItem(transitionItem)
-                                }
-                                issueMenu.addItem(.separator())
+                        let issueItem = self.makeIssueRow(for: issue)
+
+                        // Balanced by the leave in onPRsCollected — every client completion
+                        // fires on success and failure alike.
+                        if myPRsEnabled { myPRsGroup.enter() }
+                        self.attachIssueSubmenu(to: issueItem, issue: issue, onPRsCollected: myPRsEnabled ? { merged in
+                            collectedURLsQueue.async {
+                                collectedPRURLs.formUnion(merged.map(\.url))
+                                myPRsGroup.leave()
                             }
+                        } : nil)
 
-                            let copyKeyItem = NSMenuItem(title: "Copy Key", action: #selector(self.copyToClipboard), keyEquivalent: "")
-                            copyKeyItem.representedObject = issue.key
-                            issueMenu.addItem(copyKeyItem)
-
-                            let copyURLItem = NSMenuItem(title: "Copy URL", action: #selector(self.copyToClipboard), keyEquivalent: "")
-                            copyURLItem.representedObject = "\(self.baseUrl)/browse/\(issue.key)"
-                            issueMenu.addItem(copyURLItem)
-
-                            let copyTitleItem = NSMenuItem(title: "Copy Title", action: #selector(self.copyToClipboard), keyEquivalent: "")
-                            copyTitleItem.representedObject = issue.fields.summary
-                            issueMenu.addItem(copyTitleItem)
-
-                            let copyBranchItem = NSMenuItem(title: "Copy Branch Name", action: #selector(self.copyToClipboard), keyEquivalent: "")
-                            copyBranchItem.representedObject = AppDelegate.branchName(forKey: issue.key, title: issue.fields.summary)
-                            issueMenu.addItem(copyBranchItem)
-
-                            let copyPRItem = NSMenuItem(title: "Copy PR Name", action: #selector(self.copyToClipboard), keyEquivalent: "")
-                            copyPRItem.representedObject = "[\(issue.key)] \(issue.fields.summary)"
-                            issueMenu.addItem(copyPRItem)
-
-                            issueMenu.addItem(.separator())
-
-                            let addCommentItem = NSMenuItem(title: "Add Comment", action: #selector(self.addCommentToIssue), keyEquivalent: "")
-                            addCommentItem.representedObject = issue.key
-                            issueMenu.addItem(addCommentItem)
-
-                            if !self.flagFieldId.trimmingCharacters(in: .whitespaces).isEmpty {
-                                let addFlagItem = NSMenuItem(title: "Add Flag", action: #selector(self.addFlagToIssue), keyEquivalent: "")
-                                addFlagItem.representedObject = issue.key
-                                issueMenu.addItem(addFlagItem)
-                            }
-
-                            let uploadItem = NSMenuItem(title: "Upload Files", action: #selector(self.openUploadFiles), keyEquivalent: "")
-                            uploadItem.representedObject = issue.key
-                            issueMenu.addItem(uploadItem)
-
-                            let shortcuts = self.userFieldShortcuts.filter {
-                                !$0.label.trimmingCharacters(in: .whitespaces).isEmpty &&
-                                !$0.fieldId.trimmingCharacters(in: .whitespaces).isEmpty
-                            }
-                            let colorForStatus: (String) -> NSColor? = { [weak self] name in
-                                self?.statusDisplay.first {
-                                    $0.name.caseInsensitiveCompare(name) == .orderedSame
-                                }?.nsColor
-                            }
-                            var shortcutTargets: [IssueSubmenuDelegate.Target] = []
-                            for shortcut in shortcuts {
-                                let item = NSMenuItem(title: shortcut.label, action: #selector(self.openUserFieldChange), keyEquivalent: "")
-                                item.representedObject = IssueShortcutTarget(issueKey: issue.key, shortcut: shortcut)
-                                issueMenu.addItem(item)
-                                // Per-shortcut override — e.g. always show "Change Reviewer" users
-                                // in the Review status color regardless of what status the ticket
-                                // is currently in.
-                                let overrideName = shortcut.colorFromStatus.trimmingCharacters(in: .whitespaces)
-                                let overrideColor = overrideName.isEmpty ? nil : colorForStatus(overrideName)
-                                shortcutTargets.append(.init(
-                                    fieldId: shortcut.fieldId,
-                                    label: shortcut.label,
-                                    color: overrideColor,
-                                    item: item
-                                ))
-                            }
-                            if !shortcutTargets.isEmpty {
-                                let fallbackColor = colorForStatus(issue.fields.status.name)
-                                let delegate = IssueSubmenuDelegate(
-                                    issueKey: issue.key,
-                                    targets: shortcutTargets,
-                                    fallbackColor: fallbackColor,
-                                    jiraClient: self.jiraClient
-                                )
-                                issueMenu.delegate = delegate
-                                self.submenuDelegates.append(delegate)
-                            }
-
-                            self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
-                                self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
-                                    guard !merged.isEmpty else { return }
-                                    self.fetchGithubStatuses(for: merged) { statusByURL in
-                                        DispatchQueue.main.async {
-                                            issueMenu.addItem(.separator())
-                                            for pr in merged {
-                                                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
                         self.menu.addItem(issueItem)
                     }
                 }
@@ -362,7 +317,31 @@ extension AppDelegate {
             else {
                 self.statusBarItem.button?.title = String(0)
             }
-            
+
+            self.appendTodoSection()
+
+            // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
+            // attached (or the whole section removed) once the searches and the per-issue PR
+            // collection both finish; the item doubles as the staleness marker — if a newer
+            // refresh rebuilt the menu, it's gone and the late results are dropped. It has no
+            // action of its own: until the submenu lands it renders as an inert label, matching
+            // how the per-issue items get their submenus asynchronously.
+            if myPRsEnabled {
+                let separator = NSMenuItem.separator()
+                let myPRsItem = NSMenuItem(title: "PRs Without Tickets", action: nil, keyEquivalent: "")
+                myPRsItem.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
+                self.menu.addItem(separator)
+                self.menu.addItem(myPRsItem)
+                myPRsGroup.notify(queue: .main) {
+                    self.populateMyPRsSubmenu(
+                        results: myPRsResults,
+                        excludedURLs: collectedPRURLs,
+                        item: myPRsItem,
+                        separator: separator
+                    )
+                }
+            }
+
             self.menu.addItem(.separator())
             let refreshItem = NSMenuItem(title: "Refresh", action: #selector(self.refreshMenu), keyEquivalent: "")
             refreshItem.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
@@ -406,10 +385,209 @@ extension AppDelegate {
             self.menu.addItem(withTitle: "Preferences...", action: #selector(self.openPrefecencesWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "About JiraBar", action: #selector(self.openAboutWindow), keyEquivalent: "")
             self.menu.addItem(withTitle: "Quit", action: #selector(self.quit), keyEquivalent: "")
+            self.appendUpdateItemIfNeeded()
         }
     }
     
     
+    /// Adds the TODO section — a backlog rollup whose submenu lists the tickets matching the
+    /// user's TODO JQL in board order, each carrying the same submenu it would have in the main
+    /// ticket list. No-op when no TODO JQL is configured.
+    ///
+    /// Only the ticket rows are built up front; their submenus are populated the first time the
+    /// TODO menu is opened (see `LazyMenuDelegate`). Removes the section when the query comes
+    /// back empty, and drops results whose item a newer refresh already discarded.
+    private func appendTodoSection() {
+        let query = todoJQL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+
+        let separator = NSMenuItem.separator()
+        let todoItem = NSMenuItem(title: "TODO", action: nil, keyEquivalent: "")
+        todoItem.image = NSImage(systemSymbolName: "checklist.unchecked", accessibilityDescription: nil)
+        menu.addItem(separator)
+        menu.addItem(todoItem)
+
+        jiraClient.getIssuesByJql(jql: query, maxResults: todoMaxResults) { [weak self] resp, ranks in
+            guard let self else { return }
+            let removeSection = {
+                if self.menu.index(of: todoItem) != -1 { self.menu.removeItem(todoItem) }
+                if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
+            }
+            guard self.menu.index(of: todoItem) != -1 else { return }
+            let issues = AppDelegate.orderedByRank(resp.issues ?? [], ranks: ranks)
+            guard !issues.isEmpty else {
+                removeSection()
+                return
+            }
+
+            let todoMenu = NSMenu()
+            var rows: [(NSMenuItem, Issue)] = []
+            for issue in issues {
+                let row = self.makeIssueRow(for: issue)
+                todoMenu.addItem(row)
+                rows.append((row, issue))
+            }
+            let delegate = LazyMenuDelegate {
+                for (row, issue) in rows {
+                    self.attachIssueSubmenu(to: row, issue: issue, onPRsCollected: nil)
+                }
+            }
+            todoMenu.delegate = delegate
+            self.submenuDelegates.append(delegate)
+            todoItem.submenu = todoMenu
+        }
+    }
+
+    /// Builds the two-line ticket row: truncated summary, then `#KEY · assignee · type`.
+    /// Clicking opens the ticket in the browser. The submenu is attached separately by
+    /// `attachIssueSubmenu` so callers can decide when to pay for it.
+    private func makeIssueRow(for issue: Issue) -> NSMenuItem {
+        let issueItem = NSMenuItem(title: "", action: #selector(self.openLink), keyEquivalent: "")
+        issueItem.attributedTitle = NSMutableAttributedString(string: "")
+            .appendString(string: issue.fields.summary.trunc(length: 50))
+            .appendNewLine()
+            .appendIcon(iconName: "hash", color: NSColor.gray)
+            .appendString(string: issue.key, color: "#888888")
+            .appendSeparator()
+            .appendString(string: issue.fields.assignee?.displayName ?? "Unassign", color: "#888888")
+            .appendSeparator()
+            .appendString(string: issue.fields.issuetype.name, color: "#888888")
+        issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
+        return issueItem
+    }
+
+    /// Fetches the ticket's transitions and linked PRs, then hangs the full per-issue submenu
+    /// off `item`: transitions, the copy shortcuts, comment/flag/upload, the configured
+    /// user-field shortcuts (whose current values load lazily on hover), and PR rows.
+    ///
+    /// `onPRsCollected` receives the merged PR list so the main-menu path can feed the
+    /// PRs Without Tickets exclusion set. It's nil for TODO rows, which are built lazily and
+    /// may never be opened — that section can't wait on work that might not happen.
+    private func attachIssueSubmenu(
+        to item: NSMenuItem,
+        issue: Issue,
+        onPRsCollected: (([JiraPullRequest]) -> Void)?
+    ) {
+        jiraClient.getTransitionsByIssueKey(issueKey: issue.key) { transitions in
+            let issueMenu = NSMenu()
+            item.submenu = issueMenu
+            if !transitions.isEmpty {
+                let header = NSMenuItem(title: "Transition to...", action: nil, keyEquivalent: "")
+                issueMenu.addItem(header)
+                for transition in transitions {
+                    let transitionItem = NSMenuItem(title: transition.name, action: #selector(self.transitionIssue), keyEquivalent: "")
+                    transitionItem.representedObject = [issue.key, transition.id, transition.name]
+                    issueMenu.addItem(transitionItem)
+                }
+                issueMenu.addItem(.separator())
+            }
+
+            let copyKeyItem = NSMenuItem(title: "Copy Key", action: #selector(self.copyToClipboard), keyEquivalent: "")
+            copyKeyItem.representedObject = issue.key
+            issueMenu.addItem(copyKeyItem)
+
+            let copyURLItem = NSMenuItem(title: "Copy URL", action: #selector(self.copyToClipboard), keyEquivalent: "")
+            copyURLItem.representedObject = "\(self.baseUrl)/browse/\(issue.key)"
+            issueMenu.addItem(copyURLItem)
+
+            let copyTitleItem = NSMenuItem(title: "Copy Title", action: #selector(self.copyToClipboard), keyEquivalent: "")
+            copyTitleItem.representedObject = issue.fields.summary
+            issueMenu.addItem(copyTitleItem)
+
+            let copyBranchItem = NSMenuItem(title: "Copy Branch Name", action: #selector(self.copyToClipboard), keyEquivalent: "")
+            copyBranchItem.representedObject = AppDelegate.branchName(forKey: issue.key, title: issue.fields.summary)
+            issueMenu.addItem(copyBranchItem)
+
+            let copyPRItem = NSMenuItem(title: "Copy PR Name", action: #selector(self.copyToClipboard), keyEquivalent: "")
+            copyPRItem.representedObject = "[\(issue.key)] \(issue.fields.summary)"
+            issueMenu.addItem(copyPRItem)
+
+            issueMenu.addItem(.separator())
+
+            let addCommentItem = NSMenuItem(title: "Add Comment", action: #selector(self.addCommentToIssue), keyEquivalent: "")
+            addCommentItem.representedObject = issue.key
+            issueMenu.addItem(addCommentItem)
+
+            if !self.flagFieldId.trimmingCharacters(in: .whitespaces).isEmpty {
+                let addFlagItem = NSMenuItem(title: "Add Flag", action: #selector(self.addFlagToIssue), keyEquivalent: "")
+                addFlagItem.representedObject = issue.key
+                issueMenu.addItem(addFlagItem)
+            }
+
+            let uploadItem = NSMenuItem(title: "Upload Files", action: #selector(self.openUploadFiles), keyEquivalent: "")
+            uploadItem.representedObject = issue.key
+            issueMenu.addItem(uploadItem)
+
+            let shortcuts = self.userFieldShortcuts.filter {
+                !$0.label.trimmingCharacters(in: .whitespaces).isEmpty &&
+                !$0.fieldId.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+            let colorForStatus: (String) -> NSColor? = { [weak self] name in
+                self?.statusDisplay.first {
+                    $0.name.caseInsensitiveCompare(name) == .orderedSame
+                }?.nsColor
+            }
+            var shortcutTargets: [IssueSubmenuDelegate.Target] = []
+            for shortcut in shortcuts {
+                let shortcutItem = NSMenuItem(title: shortcut.label, action: #selector(self.openUserFieldChange), keyEquivalent: "")
+                shortcutItem.representedObject = IssueShortcutTarget(issueKey: issue.key, shortcut: shortcut)
+                issueMenu.addItem(shortcutItem)
+                // Per-shortcut override — e.g. always show "Change Reviewer" users
+                // in the Review status color regardless of what status the ticket
+                // is currently in.
+                let overrideName = shortcut.colorFromStatus.trimmingCharacters(in: .whitespaces)
+                let overrideColor = overrideName.isEmpty ? nil : colorForStatus(overrideName)
+                shortcutTargets.append(.init(
+                    fieldId: shortcut.fieldId,
+                    label: shortcut.label,
+                    color: overrideColor,
+                    item: shortcutItem
+                ))
+            }
+            if !shortcutTargets.isEmpty {
+                let fallbackColor = colorForStatus(issue.fields.status.name)
+                let delegate = IssueSubmenuDelegate(
+                    issueKey: issue.key,
+                    targets: shortcutTargets,
+                    fallbackColor: fallbackColor,
+                    jiraClient: self.jiraClient
+                )
+                issueMenu.delegate = delegate
+                self.submenuDelegates.append(delegate)
+            }
+
+            self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
+                self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
+                    onPRsCollected?(merged)
+                    guard !merged.isEmpty else { return }
+                    self.fetchGithubStatuses(for: merged) { statusByURL in
+                        DispatchQueue.main.async {
+                            issueMenu.addItem(.separator())
+                            for pr in merged {
+                                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Orders backlog tickets the way the board does: by Lexorank ascending when a rank field
+    /// is configured. Unranked tickets sink below ranked ones, and ties keep the order Jira
+    /// returned — so with no rank field set at all, any `ORDER BY` in the user's TODO JQL
+    /// survives untouched.
+    static func orderedByRank(_ issues: [Issue], ranks: [String: String]) -> [Issue] {
+        issues.enumerated().sorted { lhs, rhs in
+            let lr = ranks[lhs.element.key] ?? ""
+            let rr = ranks[rhs.element.key] ?? ""
+            if lr.isEmpty != rr.isEmpty { return !lr.isEmpty }
+            if !lr.isEmpty && lr != rr { return lr < rr }
+            return lhs.offset < rhs.offset
+        }
+        .map(\.element)
+    }
+
     @objc
     func transitionIssue(_ sender: NSMenuItem) {
         guard let parts = sender.representedObject as? [String], parts.count >= 2 else { return }
@@ -437,18 +615,36 @@ extension AppDelegate {
         presentBulkMoveDialog()
     }
 
-    private func presentBulkMoveDialog() {
-        bulkMoveWindow?.close()
+    /// Shared presenter for the transient SwiftUI dialogs (bulk-move, upload, flag,
+    /// user-field, comment, transition): closes any previous instance, hosts the view in a
+    /// fresh non-released window stored at `keyPath`, and brings it frontmost. Preferences
+    /// and About keep their own presenters — different lifecycle (IUO windows, no onCancel
+    /// plumbing) and a documented CA-commit workaround.
+    private func presentDialog<V: View>(
+        _ view: V,
+        title: String,
+        size: NSSize,
+        window keyPath: ReferenceWritableKeyPath<AppDelegate, NSWindow?>
+    ) {
+        self[keyPath: keyPath]?.close()
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 700),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Move Multiple Issues"
+        window.title = title
         window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view)
+        window.center()
 
+        self[keyPath: keyPath] = window
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func presentBulkMoveDialog() {
         let view = BulkMoveDialog(
             issues: self.lastIssues,
             transitionPrompts: self.transitionPrompts,
@@ -488,12 +684,7 @@ extension AppDelegate {
                 self?.bulkMoveWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        bulkMoveWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Move Multiple Issues", size: NSSize(width: 600, height: 700), window: \.bulkMoveWindow)
     }
 
     @objc
@@ -509,17 +700,6 @@ extension AppDelegate {
     }
 
     private func presentUploadDialog(issueKey: String) {
-        uploadWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 540),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Upload: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = UploadFilesDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] urls, comment, done in
@@ -543,12 +723,7 @@ extension AppDelegate {
                 self?.uploadWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        uploadWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Upload: \(issueKey)", size: NSSize(width: 520, height: 540), window: \.uploadWindow)
     }
 
     @objc
@@ -558,17 +733,6 @@ extension AppDelegate {
     }
 
     private func presentFlagDialog(issueKey: String) {
-        flagWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 260),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Flag: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = FlagDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] comment, done in
@@ -593,12 +757,7 @@ extension AppDelegate {
                 self?.flagWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        flagWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Flag: \(issueKey)", size: NSSize(width: 480, height: 260), window: \.flagWindow)
     }
 
     @objc
@@ -608,17 +767,6 @@ extension AppDelegate {
     }
 
     private func presentUserFieldDialog(issueKey: String, shortcut: UserFieldShortcut) {
-        userFieldWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "\(shortcut.label): \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let showMirror = shouldShowGithubMirrorCheckbox(forJiraFieldId: shortcut.fieldId)
         let view = UserFieldDialog(
             issueKey: issueKey,
@@ -649,26 +797,10 @@ extension AppDelegate {
                 self?.userFieldWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        userFieldWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "\(shortcut.label): \(issueKey)", size: NSSize(width: 520, height: 440), window: \.userFieldWindow)
     }
 
     private func presentCommentDialog(issueKey: String) {
-        commentWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 280),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Comment: \(issueKey)"
-        window.isReleasedWhenClosed = false
-
         let view = CommentDialog(
             issueKey: issueKey,
             onSubmit: { [weak self] comment, done in
@@ -688,12 +820,7 @@ extension AppDelegate {
                 self?.commentWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        commentWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Comment: \(issueKey)", size: NSSize(width: 520, height: 280), window: \.commentWindow)
     }
 
     private func presentTransitionDialog(
@@ -702,17 +829,6 @@ extension AppDelegate {
         transitionName: String,
         config: TransitionPromptConfig
     ) {
-        transitionWindow?.close()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Transition: \(transitionName)"
-        window.isReleasedWhenClosed = false
-
         let showMirror = config.hasUserField
             && shouldShowGithubMirrorCheckbox(forJiraFieldId: config.userFieldId)
         let prStatus = PRActionsStatus()
@@ -748,12 +864,7 @@ extension AppDelegate {
                 self?.transitionWindow = nil
             }
         )
-        window.contentView = NSHostingView(rootView: view)
-        window.center()
-
-        transitionWindow = window
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        presentDialog(view, title: "Transition: \(transitionName)", size: NSSize(width: 520, height: 480), window: \.transitionWindow)
     }
 
     private func submitTransition(
@@ -769,26 +880,7 @@ extension AppDelegate {
         prStatus: PRActionsStatus,
         completion: @escaping (Bool) -> Void
     ) {
-        var updates: [JiraClient.TransitionFieldUpdate] = []
-        if config.hasUserField, !users.isEmpty {
-            updates.append(.users(
-                fieldId: config.userFieldId.trimmingCharacters(in: .whitespaces),
-                users: users,
-                multi: config.userFieldAllowsMultiple
-            ))
-        }
-        if config.hasTextField, !freeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            updates.append(.text(
-                fieldId: config.textFieldId.trimmingCharacters(in: .whitespaces),
-                value: freeText
-            ))
-        }
-        if config.hasSelectField, !selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
-            updates.append(.select(
-                fieldId: config.selectFieldId.trimmingCharacters(in: .whitespaces),
-                value: selectValue
-            ))
-        }
+        let updates = config.fieldUpdates(users: users, freeText: freeText, selectValue: selectValue)
 
         let effectiveComment = config.includeComment ? comment : nil
 
@@ -817,8 +909,10 @@ extension AppDelegate {
     
     @objc
     func openSearchResults() {
-        let encodedPath = jql.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-        NSWorkspace.shared.open(URL(string: "\(baseUrl)/issues?jql=" + encodedPath!)!)
+        guard let encoded = jql.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseUrl)/issues?jql=" + encoded)
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc
@@ -853,12 +947,14 @@ extension AppDelegate {
     
     @objc
     func openCreateNewIssue() {
-        NSWorkspace.shared.open(URL(string: "\(baseUrl)/secure/CreateIssue!default.jspa")!)
+        guard let url = URL(string: "\(baseUrl)/secure/CreateIssue!default.jspa") else { return }
+        NSWorkspace.shared.open(url)
     }
-    
+
     @objc
     func openLink(_ sender: NSMenuItem) {
-        NSWorkspace.shared.open(sender.representedObject as! URL)
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc
@@ -951,8 +1047,8 @@ extension AppDelegate {
         return true
     }
 
-    /// Mirrors the Jira reviewer picker onto the linked GitHub PR(s): sets me (looked up in
-    /// the mapping file via my own Jira accountId) as the PR assignee, and adds the selected
+    /// Mirrors the Jira reviewer picker onto the linked GitHub PR(s): adds me (looked up in
+    /// the mapping file via my own Jira accountId) to the PR assignees, and adds the selected
     /// Jira users as requested reviewers. Fire-and-forget with a notification summary — the
     /// Jira update has already committed by the time this runs, so we degrade gracefully on
     /// any failure. Only touches OPEN PRs on github.com.
@@ -1033,6 +1129,10 @@ extension AppDelegate {
         // Reviewer changes are per-PR (they depend on that PR's current state), so use max
         // (union of add+remove attempts) rather than assuming every PR has both.
         var reviewerAttempted = 0
+        // PRs whose current reviewer list couldn't be read — sync is skipped for those
+        // entirely, because diffing against an unknown state would remove people on any
+        // auth/network failure.
+        var reviewerFetchFailures = 0
 
         // Case-fold both sides — GitHub API comparisons are case-insensitive on logins.
         let desiredSet = Set(desiredReviewerLogins.map { $0.lowercased() })
@@ -1040,7 +1140,7 @@ extension AppDelegate {
         for pr in prs {
             if let me = myGithubLogin {
                 group.enter()
-                client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                client.addPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
                     syncQueue.async {
                         if !ok { assignFailures += 1 }
                         group.leave()
@@ -1050,6 +1150,13 @@ extension AppDelegate {
 
             group.enter()
             client.getPRRequestedReviewers(url: pr.url, token: token) { current in
+                guard let current else {
+                    syncQueue.async {
+                        reviewerFetchFailures += 1
+                        group.leave()
+                    }
+                    return
+                }
                 let currentSet = Set(current.map { $0.lowercased() })
                 // Add anyone in the ticket's list who isn't already requested on the PR.
                 let toAdd = desiredReviewerLogins.filter { !currentSet.contains($0.lowercased()) }
@@ -1101,8 +1208,11 @@ extension AppDelegate {
             if reviewerAttempted > 0 {
                 let failures = addFailures + removeFailures
                 parts.append("reviewers synced on \(reviewerAttempted - min(failures, reviewerAttempted))/\(reviewerAttempted)")
-            } else if !prs.isEmpty {
+            } else if !prs.isEmpty && reviewerFetchFailures == 0 {
                 parts.append("reviewers already in sync")
+            }
+            if reviewerFetchFailures > 0 {
+                parts.append("couldn't read reviewers on \(reviewerFetchFailures) PR\(reviewerFetchFailures == 1 ? "" : "s") — sync skipped")
             }
             if !unmappedReviewerNames.isEmpty {
                 parts.append("unmapped: \(unmappedReviewerNames.joined(separator: ", "))")
@@ -1119,9 +1229,10 @@ extension AppDelegate {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
 
         // Jira side: assignee display + is-me check. Independent of GitHub, fires in parallel.
+        // A failed read (nil) renders the same as unassigned — display-only here.
         jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { [weak self] assignees in
             guard let self else { return }
-            let assignee = assignees.first
+            let assignee = assignees?.first
             self.jiraClient.getCurrentUser { me in
                 DispatchQueue.main.async {
                     status.jiraAssigneeName = assignee?.displayName
@@ -1209,7 +1320,11 @@ extension AppDelegate {
         let syncQueue = DispatchQueue(label: "prActions.apply")
         var approveOK = 0, approveFail = 0
         var mergeOK = 0, mergeFail = 0, mergeSkipped = 0
-        var assignSetCount = 0, assignSkipped = 0
+        var assignSetCount = 0, assignFail = 0, assignNotTouched = 0
+        var assigneeLookupFailed = false
+        // PRs the viewer hasn't approved yet — the denominator for the approve summary
+        // (already-approved PRs are never attempted).
+        let approveAttempted = actions.approve ? candidates.filter { !$0.viewerApproved }.count : 0
 
         // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
         // reuse across all PRs.
@@ -1237,10 +1352,15 @@ extension AppDelegate {
             // reuse the mapped GitHub login across all eligible PRs.
             secondPassGroup.enter()
             self.jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: "assignee") { assignees in
+                if assignees == nil && actions.syncAssignee {
+                    // Couldn't read the Jira assignee — sync degrades to a no-op, but the
+                    // summary must say so rather than claim "already assigned".
+                    assigneeLookupFailed = true
+                }
                 let mappedLogin: String? = {
                     guard actions.syncAssignee,
                           let map,
-                          let accountId = assignees.first?.accountId,
+                          let accountId = assignees?.first?.accountId,
                           !accountId.isEmpty
                     else { return nil }
                     return map.githubLogin(forJiraAccountId: accountId)
@@ -1250,16 +1370,16 @@ extension AppDelegate {
                     if actions.syncAssignee {
                         if pr.assignees.isEmpty, let me = mappedLogin {
                             secondPassGroup.enter()
-                            client.setPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
+                            client.addPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
                                 syncQueue.async {
-                                    if ok { assignSetCount += 1 } else { assignSkipped += 1 }
+                                    if ok { assignSetCount += 1 } else { assignFail += 1 }
                                     secondPassGroup.leave()
                                 }
                             }
                         } else {
-                            // Either already assigned or we couldn't resolve a login for
-                            // the Jira Assignee — count as "not touched" either way.
-                            syncQueue.async { assignSkipped += 1 }
+                            // Already assigned, or no login could be resolved for the
+                            // Jira Assignee — nothing attempted.
+                            syncQueue.async { assignNotTouched += 1 }
                         }
                     }
 
@@ -1283,21 +1403,87 @@ extension AppDelegate {
             secondPassGroup.notify(queue: .main) {
                 var parts: [String] = []
                 if actions.approve {
-                    parts.append("approved \(approveOK)/\(candidates.count)")
-                    if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                    if approveAttempted > 0 {
+                        parts.append("approved \(approveOK)/\(approveAttempted)")
+                        if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                    }
+                    let alreadyApproved = candidates.count - approveAttempted
+                    if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
                 }
                 if actions.merge {
-                    parts.append("merged \(mergeOK)/\(candidates.count) via \(actions.mergeMethod)")
+                    let mergeAttempted = candidates.count - mergeSkipped
+                    if mergeAttempted > 0 {
+                        parts.append("merged \(mergeOK)/\(mergeAttempted) via \(actions.mergeMethod)")
+                        if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
+                    }
                     if mergeSkipped > 0 { parts.append("\(mergeSkipped) skipped (method not allowed)") }
-                    if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
                 }
                 if actions.syncAssignee {
                     parts.append("assignee set on \(assignSetCount) PR\(assignSetCount == 1 ? "" : "s")")
-                    if assignSkipped > 0 { parts.append("\(assignSkipped) already assigned") }
+                    if assignFail > 0 { parts.append("\(assignFail) assignee failed") }
+                    if assignNotTouched > 0 { parts.append("\(assignNotTouched) already assigned or unmapped") }
+                    if assigneeLookupFailed { parts.append("Jira assignee lookup failed") }
                 }
                 let summary = parts.isEmpty ? "no changes" : parts.joined(separator: "; ")
                 sendNotification(body: "PR actions for \(issueKey): \(summary).")
             }
+        }
+    }
+
+    /// Generic Jira issue-key pattern (e.g. ABC-123). Deliberately not tied to any specific
+    /// project keys — configs are user-supplied, nothing org-specific lives in source. Matched
+    /// case-sensitively, mirroring how Jira's own integrations link branches/titles to tickets.
+    private static let issueKeyRegex = try! NSRegularExpression(pattern: #"\b[A-Z][A-Z0-9]+-[0-9]+\b"#)
+
+    /// True when the string contains something that looks like a Jira issue key.
+    static func containsIssueKey(_ s: String) -> Bool {
+        let range = NSRange(s.startIndex..., in: s)
+        return AppDelegate.issueKeyRegex.firstMatch(in: s, options: [], range: range) != nil
+    }
+
+    /// Hangs the surviving "PRs Without Tickets" rows off the section item as a submenu, once the search
+    /// and the per-issue PR collection have both finished. A PR counts as "ticketed" — and is
+    /// dropped — when its URL already rendered under a visible issue, or when a Jira issue key
+    /// appears in its title or head branch (the ticket may simply be outside the current JQL
+    /// window). The branch check needs the GraphQL enrichment, so it runs as a second pass.
+    /// Removes the section when nothing survives, which is also what makes the item's presence
+    /// meaningful: it only appears when there's at least one PR behind it. Drops stale results
+    /// whose item a newer refresh already discarded.
+    private func populateMyPRsSubmenu(
+        results: [JiraPullRequest],
+        excludedURLs: Set<String>,
+        item: NSMenuItem,
+        separator: NSMenuItem
+    ) {
+        let removeSection = {
+            if self.menu.index(of: item) != -1 { self.menu.removeItem(item) }
+            if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
+        }
+        guard menu.index(of: item) != -1 else { return }
+
+        let candidates = results.filter { pr in
+            !excludedURLs.contains(pr.url) && !AppDelegate.containsIssueKey(pr.name)
+        }
+        guard !candidates.isEmpty else {
+            removeSection()
+            return
+        }
+
+        fetchGithubStatuses(for: candidates) { statusByURL in
+            guard self.menu.index(of: item) != -1 else { return }
+            let survivors = candidates.filter { pr in
+                guard let branch = statusByURL[pr.url]?.headRefName else { return true }
+                return !AppDelegate.containsIssueKey(branch)
+            }
+            guard !survivors.isEmpty else {
+                removeSection()
+                return
+            }
+            let submenu = NSMenu()
+            for pr in survivors {
+                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: submenu)
+            }
+            item.submenu = submenu
         }
     }
 
@@ -1339,11 +1525,12 @@ extension AppDelegate {
         completion: @escaping ([String: GithubPRStatus]) -> Void
     ) {
         let token = gitHubToken.trimmingCharacters(in: .whitespaces)
-        // Fetch for OPEN (review/CI info) and MERGED (release/releasing info) — the two states
-        // where the extra GitHub signals matter. DECLINED / DRAFT are ignored to save API calls.
+        // Fetch for OPEN and DRAFT (review/CI info, and the isDraft flag itself — GitHub
+        // reports drafts as open, so the search path can't tell them apart without this) and
+        // MERGED (release/releasing info). DECLINED is skipped to save API calls.
         let candidates = prs.filter {
             let status = $0.status.uppercased()
-            return (status == "OPEN" || status == "MERGED") && $0.url.contains("github.com")
+            return (status == "OPEN" || status == "DRAFT" || status == "MERGED") && $0.url.contains("github.com")
         }
         guard !token.isEmpty, !candidates.isEmpty else {
             completion([:])
@@ -1370,9 +1557,9 @@ extension AppDelegate {
         }
     }
 
-    /// Builds one PR row and appends it to the ticket's submenu. Renders 3 lines when GitHub
-    /// data is available (approval / unresolved / CI on line 3), otherwise 2 lines with the
-    /// legacy Jira-derived approved indicator.
+    /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the
+    /// "PRs Without Tickets" submenu. Renders 3 lines when GitHub data is available (approval /
+    /// unresolved / CI on line 3), otherwise 2 lines with the legacy Jira-derived indicator.
     private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: pr.name.trunc(length: 50))
@@ -1381,13 +1568,8 @@ extension AppDelegate {
         let slug = pr.repoSlug.isEmpty ? "PR" : pr.repoSlug
         title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: "#888888")
 
-        let ciFailed = AppDelegate.ciStateIsFailure(ghStatus?.ciState)
-        if pr.status.uppercased() == "OPEN" && ciFailed {
-            // Elevate the row's status word to "error" so the CI break is visible at a glance.
-            title.appendString(string: "error", color: "#CF222E")
-        } else {
-            title.appendString(string: pr.status.lowercased(), color: AppDelegate.prStatusColorHex(pr.status))
-        }
+        let state = AppDelegate.prStateLabel(status: pr.status, ghStatus: ghStatus)
+        title.appendString(string: state.text, color: state.colorHex)
 
         if let ghStatus {
             switch pr.status.uppercased() {
@@ -1449,22 +1631,14 @@ extension AppDelegate {
     /// Extracts the PR number from a URL like https://github.com/owner/repo/pull/269.
     /// Returns nil if the path isn't a /pull/<n> shape.
     static func prNumber(from prURL: String) -> String? {
-        guard let u = URL(string: prURL) else { return nil }
-        let parts = u.pathComponents
-        // ["/", "owner", "repo", "pull", "<n>"]
-        guard parts.count >= 5, parts[3] == "pull", Int(parts[4]) != nil else { return nil }
-        return parts[4]
+        guard let number = ForgePRURL(prURL)?.pullNumber else { return nil }
+        return String(number)
     }
 
     /// Turns a PR URL like https://github.com/owner/repo/pull/42 into
     /// https://github.com/owner/repo — nil if the path isn't at least two segments deep.
-    private static func repoBaseURL(from prURL: String) -> String? {
-        guard let u = URL(string: prURL),
-              let scheme = u.scheme,
-              let host = u.host else { return nil }
-        let parts = u.pathComponents
-        guard parts.count >= 3 else { return nil }
-        return "\(scheme)://\(host)/\(parts[1])/\(parts[2])"
+    static func repoBaseURL(from prURL: String) -> String? {
+        ForgePRURL(prURL)?.repoBase
     }
 
     /// Adds "approved · N unresolved · CI ✓" (or a subset) as a third line. Elements without
@@ -1536,6 +1710,22 @@ extension AppDelegate {
         return state == "FAILURE" || state == "ERROR"
     }
 
+    /// The state word for a PR row's second line, with its color. GitHub reports drafts as
+    /// open, so `isDraft` from the GraphQL enrichment is the only thing that distinguishes
+    /// them; Jira's dev-status can also report "DRAFT" directly, and both render the same.
+    /// A failed CI run on an open PR outranks the draft marker — it's the more actionable
+    /// signal, and it's the precedence the row already used before drafts were surfaced.
+    static func prStateLabel(status: String, ghStatus: GithubPRStatus?) -> (text: String, colorHex: String) {
+        let upper = status.uppercased()
+        if upper == "OPEN" && ciStateIsFailure(ghStatus?.ciState) {
+            return ("error", "#CF222E")
+        }
+        if upper == "OPEN" && ghStatus?.isDraft == true {
+            return ("draft", prStatusColorHex("DRAFT"))
+        }
+        return (status.lowercased(), prStatusColorHex(status))
+    }
+
     /// Color hex for a PR status badge in the menu. Falls back to a neutral gray for
     /// anything outside the four standard dev-status values.
     static func prStatusColorHex(_ status: String) -> String {
@@ -1559,31 +1749,35 @@ extension AppDelegate {
         let window = notification.object as? NSWindow
         if let windowTitle = window?.title {
             if (windowTitle == "Preferences") {
-                timer?.invalidate()
-                timer = Timer.scheduledTimer(
-                    timeInterval: Double(refreshRate * 60),
-                    target: self,
-                    selector: #selector(refreshMenu),
-                    userInfo: nil,
-                    repeats: true
-                )
-                timer?.fire()
+                // Recreate rather than just fire — the refresh rate may have changed.
+                scheduleRefreshTimer()
             }
         }
     }
-    
+
     @objc
     func checkForUpdates() {
-        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
+        let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         GithubClient().getLatestRelease { latestRelease in
             if let latestRelease = latestRelease {
                 let versionComparison = currentVersion.compare(latestRelease.name.replacingOccurrences(of: "v", with: ""), options: .numeric)
                 if versionComparison == .orderedAscending {
-                    let newVersionItem = NSMenuItem(title: "New version available", action: #selector(self.openLink), keyEquivalent: "")
-                    newVersionItem.representedObject = URL(string: latestRelease.htmlUrl)
-                    self.menu.addItem(newVersionItem)
+                    self.latestReleaseURL = URL(string: latestRelease.htmlUrl)
+                    self.appendUpdateItemIfNeeded()
                 }
             }
         }
+    }
+
+    /// Appends the "New version available" item unless it's already present. Called from
+    /// `checkForUpdates` (so it shows even before the next refresh) and at the end of every
+    /// `refreshMenu` rebuild (which starts from removeAllItems).
+    private func appendUpdateItemIfNeeded() {
+        guard let url = latestReleaseURL,
+              !menu.items.contains(where: { $0.title == "New version available" })
+        else { return }
+        let newVersionItem = NSMenuItem(title: "New version available", action: #selector(openLink), keyEquivalent: "")
+        newVersionItem.representedObject = url
+        menu.addItem(newVersionItem)
     }
 }

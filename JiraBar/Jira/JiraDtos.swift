@@ -153,11 +153,7 @@ struct JiraPullRequest: Codable, Hashable {
 
     /// "owner/repo" parsed from the URL path, or empty if the URL doesn't look like a forge PR.
     var repoSlug: String {
-        guard let u = URL(string: url) else { return "" }
-        // /<owner>/<repo>/pull/<number>  →  ["/", "owner", "repo", "pull", "<n>"]
-        let parts = u.pathComponents
-        guard parts.count >= 3 else { return "" }
-        return "\(parts[1])/\(parts[2])"
+        ForgePRURL(url)?.slug ?? ""
     }
 
     /// "42" — leading # stripped.

@@ -79,6 +79,26 @@ extension Defaults.Keys {
     /// reviewers. Empty disables the mirror. Configurable per install — most orgs use a custom
     /// "Reviewers" user-picker field; the exact id varies per Jira instance.
     static let githubPRReviewerJiraFieldId = Key<String>("githubPRReviewerJiraFieldId", default: "")
+
+    /// Optional JQL for the TODO section — a "what would I pick up next" backlog view, which
+    /// the main JQL typically can't show because it's scoped to the current user. When non-empty
+    /// a TODO entry appears in the menu whose submenu lists the matching tickets, each with the
+    /// same submenu a ticket gets in the main list. Empty disables the section.
+    static let todoJQL = Key<String>("todoJQL", default: "")
+
+    /// Cap on tickets listed in the TODO submenu. Separate from `maxResults` because a backlog
+    /// view usually wants a different depth than the main ticket list.
+    static let todoMaxResults = Key<String>("todoMaxResults", default: "15")
+
+    /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is
+    /// assigned to, or has been asked to review, minus any associated with a Jira ticket.
+    /// Default on — the section is already gated on a GitHub token and hides itself when empty,
+    /// so it costs nothing for users who haven't configured GitHub. Scoped by
+    /// `githubSearchOrgs` when set.
+    ///
+    /// The key name predates the section's rename from "My PRs" and is deliberately unchanged:
+    /// renaming it would orphan the stored value and silently reset the user's preference.
+    static let showMyPRsSection = Key<Bool>("showMyPRsSection", default: true)
 }
 
 extension KeychainKeys {

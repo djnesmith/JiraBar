@@ -383,12 +383,7 @@ struct BulkMoveDialog: View {
 
     private var footer: some View {
         HStack {
-            Button("") { submit() }
-                .keyboardShortcut(.return, modifiers: .command)
-                .frame(width: 0, height: 0)
-                .opacity(0)
-                .accessibilityHidden(true)
-                .disabled(submitting || !canSubmit)
+            HiddenSubmitButton(disabled: submitting || !canSubmit) { submit() }
 
             Spacer()
             Button("Cancel") { onCancel() }
@@ -483,28 +478,11 @@ struct BulkMoveDialog: View {
         let transitionName = selectedTransitionName
         let config = matchingPromptConfig
 
-        var updates: [JiraClient.TransitionFieldUpdate] = []
-        if let config {
-            if config.hasUserField, !pickedUsers.isEmpty {
-                updates.append(.users(
-                    fieldId: config.userFieldId.trimmingCharacters(in: .whitespaces),
-                    users: Array(pickedUsers),
-                    multi: config.userFieldAllowsMultiple
-                ))
-            }
-            if config.hasTextField, !freeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                updates.append(.text(
-                    fieldId: config.textFieldId.trimmingCharacters(in: .whitespaces),
-                    value: freeText
-                ))
-            }
-            if config.hasSelectField, !selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
-                updates.append(.select(
-                    fieldId: config.selectFieldId.trimmingCharacters(in: .whitespaces),
-                    value: selectValue
-                ))
-            }
-        }
+        let updates = config?.fieldUpdates(
+            users: Array(pickedUsers),
+            freeText: freeText,
+            selectValue: selectValue
+        ) ?? []
         let includeComment = config?.includeComment ?? true
         let effectiveComment: String? = (includeComment && !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             ? comment : nil

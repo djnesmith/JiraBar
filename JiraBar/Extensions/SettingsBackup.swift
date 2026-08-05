@@ -30,8 +30,14 @@ struct AppSettings: Codable {
     var githubSearchOrgs: String?
     var jiraGithubUserMapPath: String?
     var githubPRReviewerJiraFieldId: String?
+    var showMyPRsSection: Bool?
+    var todoJQL: String?
+    var todoMaxResults: String?
 
     // Lists
+    /// Legacy pre-statusDisplay key. Kept so older backup files still decode; no longer
+    /// snapshotted, and imports convert it into `statusDisplay` instead of repopulating the
+    /// migrated-away key.
     var statusOrder: [String]?
     var statusDisplay: [StatusDisplay]?
     var userFieldShortcuts: [UserFieldShortcut]?
@@ -59,7 +65,10 @@ struct AppSettings: Codable {
             githubSearchOrgs: Defaults[.githubSearchOrgs],
             jiraGithubUserMapPath: Defaults[.jiraGithubUserMapPath],
             githubPRReviewerJiraFieldId: Defaults[.githubPRReviewerJiraFieldId],
-            statusOrder: Defaults[.statusOrder],
+            showMyPRsSection: Defaults[.showMyPRsSection],
+            todoJQL: Defaults[.todoJQL],
+            todoMaxResults: Defaults[.todoMaxResults],
+            statusOrder: nil,
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
             transitionPrompts: Defaults[.transitionPrompts]
@@ -86,8 +95,15 @@ struct AppSettings: Codable {
         if let value = githubSearchOrgs { Defaults[.githubSearchOrgs] = value }
         if let value = jiraGithubUserMapPath { Defaults[.jiraGithubUserMapPath] = value }
         if let value = githubPRReviewerJiraFieldId { Defaults[.githubPRReviewerJiraFieldId] = value }
-        if let value = statusOrder { Defaults[.statusOrder] = value }
+        if let value = showMyPRsSection { Defaults[.showMyPRsSection] = value }
+        if let value = todoJQL { Defaults[.todoJQL] = value }
+        if let value = todoMaxResults { Defaults[.todoMaxResults] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
+        // Older backup files carry the legacy statusOrder list — convert it the same way the
+        // launch migration does, and only when the file didn't bring its own statusDisplay.
+        if let legacy = statusOrder, !legacy.isEmpty, (statusDisplay ?? []).isEmpty {
+            Defaults[.statusDisplay] = legacy.map { StatusDisplay(name: $0) }
+        }
         if let value = userFieldShortcuts { Defaults[.userFieldShortcuts] = value }
         if let value = transitionPrompts { Defaults[.transitionPrompts] = value }
     }

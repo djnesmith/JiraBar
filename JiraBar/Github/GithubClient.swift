@@ -38,9 +38,27 @@ struct GithubPRStatus {
     var mergeCommitAllowed: Bool
     var squashMergeAllowed: Bool
     var rebaseMergeAllowed: Bool
+    /// The PR's head branch name. Used by the "PRs Without Tickets" section to detect a Jira issue key in
+    /// the branch when the title doesn't carry one.
+    var headRefName: String?
+    /// Whether the PR is a draft. GitHub treats drafts as open, so they arrive through the
+    /// normal open-PR paths with nothing to distinguish them — this is what marks the row.
+    var isDraft: Bool
 }
 
 public class GithubClient {
+
+    /// Standard REST-API headers shared by every endpoint. `json: true` adds the JSON
+    /// content type for calls that send a body.
+    private func apiHeaders(token: String, json: Bool = false) -> HTTPHeaders {
+        var headers: HTTPHeaders = [
+            .authorization(bearerToken: token),
+            .accept("application/vnd.github+json"),
+            .userAgent("JiraBar")
+        ]
+        if json { headers.add(.contentType("application/json")) }
+        return headers
+    }
 
     func getLatestRelease(completion:@escaping (((LatestRelease?) -> Void))) -> Void {
              let headers: HTTPHeaders = [
@@ -58,9 +76,6 @@ public class GithubClient {
                          completion(latestRelease)
                      case .failure(let error):
                          completion(nil)
-                         if let data = response.data {
-                             let json = String(data: data, encoding: String.Encoding.utf8)
-                         }
                          sendNotification(body: error.localizedDescription)
                      }
                  }
@@ -90,6 +105,8 @@ public class GithubClient {
               reviewDecision
               merged
               mergedAt
+              headRefName
+              isDraft
               viewerLatestReview { state }
               assignees(first: 10) { nodes { login } }
               reviewThreads(first: 100) { nodes { isResolved } }
@@ -112,7 +129,7 @@ public class GithubClient {
                 "number": number
             ]
         ]
-        var headers: HTTPHeaders = [
+        let headers: HTTPHeaders = [
             .authorization(bearerToken: token),
             .accept("application/json"),
             .contentType("application/json"),
@@ -161,6 +178,8 @@ public class GithubClient {
                     let mergeCommitAllowed = (repoDict["mergeCommitAllowed"] as? Bool) ?? false
                     let squashMergeAllowed = (repoDict["squashMergeAllowed"] as? Bool) ?? false
                     let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
+                    let headRefName = prDict["headRefName"] as? String
+                    let isDraft = (prDict["isDraft"] as? Bool) ?? false
 
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
@@ -175,7 +194,9 @@ public class GithubClient {
                         assignees: assignees,
                         mergeCommitAllowed: mergeCommitAllowed,
                         squashMergeAllowed: squashMergeAllowed,
-                        rebaseMergeAllowed: rebaseMergeAllowed
+                        rebaseMergeAllowed: rebaseMergeAllowed,
+                        headRefName: headRefName,
+                        isDraft: isDraft
                     ))
                 case .failure(let error):
                     print("github graphql: \(error)")
@@ -210,11 +231,7 @@ public class GithubClient {
         let q = "\"\(key)\" in:title is:pr \(orgTerms)"
         let normalizedKey = key.lowercased()
 
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token)
 
         AF.request(
             "https://api.github.com/search/issues",
@@ -268,6 +285,144 @@ public class GithubClient {
         }
     }
 
+    /// Searches GitHub for open PRs relevant to the token's user — ones they authored, ones
+    /// assigned to them, and ones with their review requested — the candidate pool that the
+    /// "PRs Without Tickets" menu section then filters down.
+    ///
+    /// Three search calls, because GitHub's search has no OR across qualifiers, deduped by URL.
+    /// `author:@me` is not redundant with the other two: opening a PR does not assign it to you
+    /// or request your review, so a PR you wrote and haven't handed to anyone matches only the
+    /// author term — which is exactly the case that was silently missing before.
+    ///
+    /// Scoped to `orgs` when non-empty; `@me` resolves server-side from the token, so no
+    /// identity lookup is needed.
+    func searchMyPRs(orgs: [String], token: String, completion: @escaping ([JiraPullRequest]) -> Void) {
+        guard !token.isEmpty else {
+            completion([])
+            return
+        }
+        let queries = GithubClient.myPRsQueries(orgs: orgs)
+
+        let headers = apiHeaders(token: token)
+
+        let group = DispatchGroup()
+        let syncQueue = DispatchQueue(label: "githubMyPRs.sync")
+        var hitsByURL: [String: MyPRHit] = [:]
+        // Preserves first-seen order so the rendered list doesn't reshuffle between refreshes.
+        var order: [String] = []
+
+        for (relation, q) in queries {
+            group.enter()
+            AF.request(
+                "https://api.github.com/search/issues",
+                method: .get,
+                parameters: ["q": q, "per_page": 50],
+                headers: headers
+            )
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                var parsed: [(pr: JiraPullRequest, assignees: [String])] = []
+                switch response.result {
+                case .success(let data):
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let items = json["items"] as? [[String: Any]] {
+                        parsed = items.compactMap { item in
+                            guard
+                                let htmlURL = item["html_url"] as? String,
+                                let number = item["number"] as? Int,
+                                let title = item["title"] as? String
+                            else { return nil }
+                            let assignees = ((item["assignees"] as? [[String: Any]]) ?? [])
+                                .compactMap { $0["login"] as? String }
+                            return (
+                                JiraPullRequest(
+                                    id: "#\(number)",
+                                    name: title,
+                                    url: htmlURL,
+                                    status: "OPEN",
+                                    reviewers: nil
+                                ),
+                                assignees
+                            )
+                        }
+                    }
+                case .failure(let error):
+                    print("github searchMyPRs: \(error)")
+                }
+                syncQueue.async {
+                    for (pr, assignees) in parsed {
+                        if var existing = hitsByURL[pr.url] {
+                            // A PR can match several relations; ownership from any one sticks.
+                            existing.ownedByMe = existing.ownedByMe || relation.impliesOwnership
+                            if existing.assigneeLogins.isEmpty { existing.assigneeLogins = assignees }
+                            hitsByURL[pr.url] = existing
+                        } else {
+                            hitsByURL[pr.url] = MyPRHit(
+                                pr: pr,
+                                ownedByMe: relation.impliesOwnership,
+                                assigneeLogins: assignees
+                            )
+                            order.append(pr.url)
+                        }
+                    }
+                    group.leave()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            completion(GithubClient.retainingOwnPRs(order.compactMap { hitsByURL[$0] }))
+        }
+    }
+
+    /// How a PR came to be in the search results. GitHub's search can't OR these
+    /// together, so each is its own query.
+    enum MyPRsRelation: String, CaseIterable {
+        case author = "author:@me"
+        case assignee = "assignee:@me"
+        case reviewRequested = "review-requested:@me"
+
+        /// Whether matching this relation alone means the PR is still the user's to act on.
+        /// Authorship doesn't: once you assign your PR to someone else, it's handed off and
+        /// stops being your problem. Being the assignee or the requested reviewer does.
+        var impliesOwnership: Bool { self != .author }
+    }
+
+    /// The search queries behind the "PRs Without Tickets" section, one per relation. Extracted so the set
+    /// of qualifiers is under test — dropping one silently hides a whole category of PRs
+    /// rather than failing loudly.
+    static func myPRsQueries(orgs: [String]) -> [(relation: MyPRsRelation, query: String)] {
+        let orgTerms = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { "org:\($0)" }
+            .joined(separator: " ")
+        return MyPRsRelation.allCases.map { relation in
+            (relation, "is:pr is:open \(relation.rawValue) \(orgTerms)".trimmingCharacters(in: .whitespaces))
+        }
+    }
+
+    /// A deduped search hit, carrying the provenance needed to spot handed-off work.
+    struct MyPRHit {
+        let pr: JiraPullRequest
+        /// True when at least one query that claims ownership (assignee / review-requested)
+        /// returned this PR.
+        var ownedByMe: Bool
+        /// Assignee logins straight from the search payload — no extra request needed.
+        var assigneeLogins: [String]
+    }
+
+    /// Drops handed-off work: PRs the user authored but assigned to someone else.
+    ///
+    /// This needs no knowledge of the user's own login. If they were an assignee or a requested
+    /// reviewer, the `assignee:@me` or `review-requested:@me` query would have returned the PR
+    /// and set `ownedByMe`. So a hit that only ever matched `author:@me` yet carries assignees
+    /// must be assigned to somebody else. An authored PR with no assignees at all is still
+    /// theirs and stays.
+    static func retainingOwnPRs(_ hits: [MyPRHit]) -> [JiraPullRequest] {
+        hits.filter { $0.ownedByMe || $0.assigneeLogins.isEmpty }.map(\.pr)
+    }
+
     /// Submits a review on a PR — e.g. `event: "APPROVE"` with an optional body — via the
     /// pull-request reviews endpoint. Empty `body` submits the review without a comment.
     /// Ignores non-github.com URLs.
@@ -285,12 +440,7 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         var payload: [String: Any] = ["event": event]
         if !body.isEmpty { payload["body"] = body }
         AF.request(
@@ -329,12 +479,7 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let payload: [String: Any] = ["merge_method": method]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/merge",
@@ -355,10 +500,10 @@ public class GithubClient {
         }
     }
 
-    /// Sets the "Assignees" list on a PR (a PR is an Issue under the hood, so the issues API
-    /// owns this field). Replaces whatever was there — GitHub's PATCH endpoint takes the full
-    /// desired list. Ignores non-github.com URLs.
-    func setPRAssignees(
+    /// Adds to the "Assignees" list on a PR (a PR is an Issue under the hood, so the issues API
+    /// owns this field). Additive — anyone already assigned stays; the PATCH-with-full-list
+    /// variant this replaced silently dropped existing assignees. Ignores non-github.com URLs.
+    func addPRAssignees(
         url urlString: String,
         assignees: [String],
         token: String,
@@ -371,16 +516,11 @@ public class GithubClient {
             completion(false)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["assignees": assignees]
         AF.request(
-            "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)",
-            method: .patch,
+            "https://api.github.com/repos/\(owner)/\(repo)/issues/\(number)/assignees",
+            method: .post,
             parameters: body,
             encoding: JSONEncoding.default,
             headers: headers
@@ -391,30 +531,28 @@ public class GithubClient {
             case .success:
                 completion(true)
             case .failure(let error):
-                print("github setPRAssignees: \(error)")
+                print("github addPRAssignees: \(error)")
                 completion(false)
             }
         }
     }
 
-    /// Returns the current requested-reviewer logins on a PR. Empty list on failure / non-github URL.
+    /// Returns the current requested-reviewer logins on a PR, or nil when the state couldn't
+    /// be read (auth/network failure, non-github URL). Callers must not treat nil as "no
+    /// reviewers" — the mirror flow diffs against this list and removes people.
     func getPRRequestedReviewers(
         url urlString: String,
         token: String,
-        completion: @escaping ([String]) -> Void
+        completion: @escaping ([String]?) -> Void
     ) {
         guard
             !token.isEmpty,
             let (owner, repo, number) = GithubClient.parsePRURL(urlString)
         else {
-            completion([])
+            completion(nil)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token)
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
             method: .get,
@@ -422,15 +560,22 @@ public class GithubClient {
         )
         .validate(statusCode: 200..<300)
         .responseData { response in
-            guard
-                let data = response.data,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let users = json["users"] as? [[String: Any]]
-            else {
-                completion([])
-                return
+            switch response.result {
+            case .success(let data):
+                guard
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let users = json["users"] as? [[String: Any]]
+                else {
+                    // 2xx but an unexpected shape — a genuinely empty reviewer list still
+                    // parses, so treat this as unreadable rather than empty.
+                    completion(nil)
+                    return
+                }
+                completion(users.compactMap { $0["login"] as? String })
+            case .failure(let error):
+                print("github getPRRequestedReviewers: \(error)")
+                completion(nil)
             }
-            completion(users.compactMap { $0["login"] as? String })
         }
     }
 
@@ -452,12 +597,7 @@ public class GithubClient {
             completion(true)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["reviewers": reviewers]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
@@ -497,12 +637,7 @@ public class GithubClient {
             completion(true)
             return
         }
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/vnd.github+json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
+        let headers = apiHeaders(token: token, json: true)
         let body: [String: Any] = ["reviewers": reviewers]
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/requested_reviewers",
@@ -524,12 +659,9 @@ public class GithubClient {
     }
 
     /// Extracts (owner, repo, number) from a github.com PR URL. Returns nil for anything else
-    /// (e.g. Bitbucket, GitLab) so the caller can skip the GraphQL call.
+    /// (e.g. Bitbucket, GitLab) so the caller can skip the API call.
     private static func parsePRURL(_ raw: String) -> (String, String, Int)? {
-        guard let url = URL(string: raw), url.host?.contains("github.com") == true else { return nil }
-        let parts = url.pathComponents
-        // Expected: ["/", "owner", "repo", "pull", "<number>"]
-        guard parts.count >= 5, parts[3] == "pull", let number = Int(parts[4]) else { return nil }
-        return (parts[1], parts[2], number)
+        guard let parsed = ForgePRURL(raw), parsed.isGithub, let number = parsed.pullNumber else { return nil }
+        return (parsed.owner, parsed.repo, number)
     }
 }
