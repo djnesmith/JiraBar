@@ -285,23 +285,22 @@ public class GithubClient {
         }
     }
 
-    /// Searches GitHub for open PRs relevant to the token's user — assigned to them, or with
-    /// their review requested — for the "My PRs" menu section. Two search calls (GitHub's
-    /// search has no OR across qualifiers), deduped by URL. Scoped to `orgs` when non-empty;
-    /// `@me` resolves server-side from the token, so no identity lookup is needed.
+    /// Searches GitHub for open PRs relevant to the token's user — ones they authored, ones
+    /// assigned to them, and ones with their review requested — for the "My PRs" menu section.
+    ///
+    /// Three search calls, because GitHub's search has no OR across qualifiers, deduped by URL.
+    /// `author:@me` is not redundant with the other two: opening a PR does not assign it to you
+    /// or request your review, so a PR you wrote and haven't handed to anyone matches only the
+    /// author term — which is exactly the case that was silently missing before.
+    ///
+    /// Scoped to `orgs` when non-empty; `@me` resolves server-side from the token, so no
+    /// identity lookup is needed.
     func searchMyPRs(orgs: [String], token: String, completion: @escaping ([JiraPullRequest]) -> Void) {
         guard !token.isEmpty else {
             completion([])
             return
         }
-        let trimmedOrgs = orgs
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        let orgTerms = trimmedOrgs.map { "org:\($0)" }.joined(separator: " ")
-        let queries = [
-            "is:pr is:open assignee:@me \(orgTerms)",
-            "is:pr is:open review-requested:@me \(orgTerms)"
-        ].map { $0.trimmingCharacters(in: .whitespaces) }
+        let queries = GithubClient.myPRsQueries(orgs: orgs)
 
         let headers = apiHeaders(token: token)
 
@@ -352,6 +351,20 @@ public class GithubClient {
         group.notify(queue: .main) {
             var seen = Set<String>()
             completion(collected.filter { seen.insert($0.url).inserted })
+        }
+    }
+
+    /// The search queries behind the "My PRs" section, one per relationship GitHub can't OR
+    /// together in a single query. Extracted so the set of qualifiers is under test — dropping
+    /// one silently hides a whole category of PRs rather than failing loudly.
+    static func myPRsQueries(orgs: [String]) -> [String] {
+        let orgTerms = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { "org:\($0)" }
+            .joined(separator: " ")
+        return ["author:@me", "assignee:@me", "review-requested:@me"].map {
+            "is:pr is:open \($0) \(orgTerms)".trimmingCharacters(in: .whitespaces)
         }
     }
 
