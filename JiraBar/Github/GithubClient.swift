@@ -306,9 +306,11 @@ public class GithubClient {
 
         let group = DispatchGroup()
         let syncQueue = DispatchQueue(label: "githubMyPRs.sync")
-        var collected: [JiraPullRequest] = []
+        var hitsByURL: [String: MyPRHit] = [:]
+        // Preserves first-seen order so the rendered list doesn't reshuffle between refreshes.
+        var order: [String] = []
 
-        for q in queries {
+        for (relation, q) in queries {
             group.enter()
             AF.request(
                 "https://api.github.com/search/issues",
@@ -318,23 +320,28 @@ public class GithubClient {
             )
             .validate(statusCode: 200..<300)
             .responseData { response in
-                var prs: [JiraPullRequest] = []
+                var parsed: [(pr: JiraPullRequest, assignees: [String])] = []
                 switch response.result {
                 case .success(let data):
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let items = json["items"] as? [[String: Any]] {
-                        prs = items.compactMap { item in
+                        parsed = items.compactMap { item in
                             guard
                                 let htmlURL = item["html_url"] as? String,
                                 let number = item["number"] as? Int,
                                 let title = item["title"] as? String
                             else { return nil }
-                            return JiraPullRequest(
-                                id: "#\(number)",
-                                name: title,
-                                url: htmlURL,
-                                status: "OPEN",
-                                reviewers: nil
+                            let assignees = ((item["assignees"] as? [[String: Any]]) ?? [])
+                                .compactMap { $0["login"] as? String }
+                            return (
+                                JiraPullRequest(
+                                    id: "#\(number)",
+                                    name: title,
+                                    url: htmlURL,
+                                    status: "OPEN",
+                                    reviewers: nil
+                                ),
+                                assignees
                             )
                         }
                     }
@@ -342,30 +349,77 @@ public class GithubClient {
                     print("github searchMyPRs: \(error)")
                 }
                 syncQueue.async {
-                    collected.append(contentsOf: prs)
+                    for (pr, assignees) in parsed {
+                        if var existing = hitsByURL[pr.url] {
+                            // A PR can match several relations; ownership from any one sticks.
+                            existing.ownedByMe = existing.ownedByMe || relation.impliesOwnership
+                            if existing.assigneeLogins.isEmpty { existing.assigneeLogins = assignees }
+                            hitsByURL[pr.url] = existing
+                        } else {
+                            hitsByURL[pr.url] = MyPRHit(
+                                pr: pr,
+                                ownedByMe: relation.impliesOwnership,
+                                assigneeLogins: assignees
+                            )
+                            order.append(pr.url)
+                        }
+                    }
                     group.leave()
                 }
             }
         }
 
         group.notify(queue: .main) {
-            var seen = Set<String>()
-            completion(collected.filter { seen.insert($0.url).inserted })
+            completion(GithubClient.retainingOwnPRs(order.compactMap { hitsByURL[$0] }))
         }
     }
 
-    /// The search queries behind the "My PRs" section, one per relationship GitHub can't OR
-    /// together in a single query. Extracted so the set of qualifiers is under test — dropping
-    /// one silently hides a whole category of PRs rather than failing loudly.
-    static func myPRsQueries(orgs: [String]) -> [String] {
+    /// How a PR came to be in the "My PRs" search results. GitHub's search can't OR these
+    /// together, so each is its own query.
+    enum MyPRsRelation: String, CaseIterable {
+        case author = "author:@me"
+        case assignee = "assignee:@me"
+        case reviewRequested = "review-requested:@me"
+
+        /// Whether matching this relation alone means the PR is still the user's to act on.
+        /// Authorship doesn't: once you assign your PR to someone else, it's handed off and
+        /// stops being your problem. Being the assignee or the requested reviewer does.
+        var impliesOwnership: Bool { self != .author }
+    }
+
+    /// The search queries behind the "My PRs" section, one per relation. Extracted so the set
+    /// of qualifiers is under test — dropping one silently hides a whole category of PRs
+    /// rather than failing loudly.
+    static func myPRsQueries(orgs: [String]) -> [(relation: MyPRsRelation, query: String)] {
         let orgTerms = orgs
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { "org:\($0)" }
             .joined(separator: " ")
-        return ["author:@me", "assignee:@me", "review-requested:@me"].map {
-            "is:pr is:open \($0) \(orgTerms)".trimmingCharacters(in: .whitespaces)
+        return MyPRsRelation.allCases.map { relation in
+            (relation, "is:pr is:open \(relation.rawValue) \(orgTerms)".trimmingCharacters(in: .whitespaces))
         }
+    }
+
+    /// A deduped "My PRs" search hit, carrying the provenance needed to spot handed-off work.
+    struct MyPRHit {
+        let pr: JiraPullRequest
+        /// True when at least one query that claims ownership (assignee / review-requested)
+        /// returned this PR.
+        var ownedByMe: Bool
+        /// Assignee logins straight from the search payload — no extra request needed.
+        var assigneeLogins: [String]
+    }
+
+    /// Drops handed-off work: PRs the user authored but assigned to someone else.
+    ///
+    /// This needs no knowledge of the user's own login. If they were an assignee or a requested
+    /// reviewer, the `assignee:@me` or `review-requested:@me` query would have returned the PR
+    /// and set `ownedByMe`. So a hit that only ever matched `author:@me` yet carries assignees
+    /// must be assigned to somebody else. An authored PR with no assignees at all is still
+    /// theirs and stays.
+    static func retainingOwnPRs(_ hits: [MyPRHit]) -> [JiraPullRequest] {
+        hits.filter { $0.ownedByMe || $0.assigneeLogins.isEmpty }.map(\.pr)
     }
 
     /// Submits a review on a PR — e.g. `event: "APPROVE"` with an optional body — via the
