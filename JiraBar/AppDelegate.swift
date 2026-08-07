@@ -324,12 +324,16 @@ extension AppDelegate {
             // attached (or the whole section removed) once the searches and the per-issue PR
             // collection both finish; the item doubles as the staleness marker — if a newer
             // refresh rebuilt the menu, it's gone and the late results are dropped. It has no
-            // action of its own: until the submenu lands it renders as an inert label, matching
-            // how the per-issue items get their submenus asynchronously.
+            // action of its own: until the real submenu lands it shows the "Waiting on data…" row
+            // makeSectionHeader gives it, which is also what keeps it from greying out for good.
+            // This is the longest of the async sections to fill in — it joins on the per-issue PR
+            // collection as well as the search — so it's the one that row exists for.
             if myPRsEnabled {
                 let separator = NSMenuItem.separator()
-                let myPRsItem = NSMenuItem(title: "PRs Without Tickets", action: nil, keyEquivalent: "")
-                myPRsItem.image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: nil)
+                let myPRsItem = AppDelegate.makeSectionHeader(
+                    title: "PRs Without Tickets",
+                    symbolName: "arrow.triangle.pull"
+                )
                 self.menu.addItem(separator)
                 self.menu.addItem(myPRsItem)
                 myPRsGroup.notify(queue: .main) {
@@ -402,8 +406,7 @@ extension AppDelegate {
         guard !query.isEmpty else { return }
 
         let separator = NSMenuItem.separator()
-        let todoItem = NSMenuItem(title: "TODO", action: nil, keyEquivalent: "")
-        todoItem.image = NSImage(systemSymbolName: "checklist.unchecked", accessibilityDescription: nil)
+        let todoItem = AppDelegate.makeSectionHeader(title: "TODO", symbolName: "checklist.unchecked")
         menu.addItem(separator)
         menu.addItem(todoItem)
 
@@ -436,6 +439,45 @@ extension AppDelegate {
             self.submenuDelegates.append(delegate)
             todoItem.submenu = todoMenu
         }
+    }
+
+    /// Builds the header item for a section whose rows arrive asynchronously (TODO, PRs Without
+    /// Tickets), carrying a placeholder submenu with a single disabled "Waiting on data…" row.
+    ///
+    /// That placeholder submenu is load-bearing, not decoration. NSMenu's automatic enabling
+    /// latches: an item with no action and no submenu is disabled by the first enabling pass —
+    /// which AppKit runs when the menu is opened — and attaching a submenu afterwards does *not*
+    /// bring it back, no matter how many enabling passes follow. So a section header added bare
+    /// and filled in from a network completion renders greyed out and stays that way for the rest
+    /// of that menu's life whenever the user reopens the menu before the data lands, which is
+    /// exactly what happens on a manual Refresh (the click closes the menu; they reopen it right
+    /// away). Shipping the header with a submenu already attached keeps it enabled through every
+    /// enabling pass, and turns the wait into visible "Waiting on data…" instead of a dead label.
+    ///
+    /// Callers replace `submenu` wholesale once their data arrives; the item stays enabled across
+    /// the swap. A section with nothing to show still has to remove its header — leaving an empty
+    /// submenu behind would render an enabled header that opens onto nothing.
+    ///
+    /// The row is deliberately static text rather than a spinner. An open NSMenu runs a modal
+    /// tracking run loop (`NSEventTrackingRunLoopMode`), and NSProgressIndicator does not animate
+    /// in it: measured 1 distinct frame across 28 samples over ~2.2s of tracking, unchanged by
+    /// `usesThreadedAnimation` or by forcing the view layer-backed. A spinner stopped mid-frame
+    /// reads as a hung app — strictly worse than saying nothing is wrong. Motion *is* achievable
+    /// by driving it ourselves from a Timer registered in `.common` mode (a `.default` timer never
+    /// fires while tracking: 0 ticks vs 18 in the same window), but that means either a custom
+    /// `NSMenuItem.view`, which doesn't pick up standard menu row metrics or highlighting and so
+    /// wouldn't match the real rows it's replaced by, or a live repeating timer whose lifetime has
+    /// to be tied to a placeholder that exists for barely a second. Neither is worth it for a wait
+    /// this short; the honest fix for the wait is to shorten it, not to decorate it.
+    static func makeSectionHeader(title: String, symbolName: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        let placeholder = NSMenu()
+        let waitingRow = NSMenuItem(title: "Waiting on data…", action: nil, keyEquivalent: "")
+        waitingRow.isEnabled = false
+        placeholder.addItem(waitingRow)
+        item.submenu = placeholder
+        return item
     }
 
     /// Builds the two-line ticket row: truncated summary, then `#KEY · assignee · type`.
