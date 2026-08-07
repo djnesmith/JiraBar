@@ -2,9 +2,9 @@ import XCTest
 import AppKit
 @testable import jiraBar
 
-/// Covers the async section headers (TODO, PRs Without Tickets). The bug these pin down: both
-/// sections greyed out on a manual refresh and stayed greyed until some later refresh happened
-/// to win a race against AppKit's enabling pass.
+/// Covers the async section headers (TODO, PRs Without Tickets) and the rendezvous that fills
+/// them in. The bug these pin down: both sections greyed out on a manual refresh and stayed
+/// greyed until some later refresh happened to win a race against AppKit's enabling pass.
 final class MenuSectionHeaderTests: XCTestCase {
 
     // MARK: - The AppKit behaviour the fix works around
@@ -79,6 +79,52 @@ final class MenuSectionHeaderTests: XCTestCase {
         let header = AppDelegate.makeSectionHeader(title: "TODO", symbolName: "checklist.unchecked")
         XCTAssertEqual(header.title, "TODO")
         XCTAssertNotNil(header.image)
+    }
+
+    // MARK: - PendingSection
+
+    func testPendingSectionRendersWhenDataArrivesAfterTheRenderer() {
+        let pending = PendingSection<[String]>()
+        var rendered: [String]?
+        pending.onReady { rendered = $0 }
+        XCTAssertNil(rendered, "nothing to render yet")
+
+        pending.deliver(["PROJ-1"])
+        XCTAssertEqual(rendered, ["PROJ-1"])
+    }
+
+    /// The other half of the race: the TODO search now starts before its menu item exists, so the
+    /// data can be sitting there by the time the renderer registers.
+    func testPendingSectionRendersImmediatelyWhenDataArrivedFirst() {
+        let pending = PendingSection<[String]>()
+        pending.deliver(["PROJ-1"])
+
+        var rendered: [String]?
+        pending.onReady { rendered = $0 }
+        XCTAssertEqual(rendered, ["PROJ-1"], "renderer runs at once against the data already held")
+    }
+
+    func testPendingSectionRendersOnlyOnce() {
+        let pending = PendingSection<[String]>()
+        var renderCount = 0
+        pending.onReady { _ in renderCount += 1 }
+
+        pending.deliver(["PROJ-1"])
+        pending.deliver(["PROJ-2"])
+        XCTAssertEqual(renderCount, 1, "a late second delivery must not re-render the section")
+    }
+
+    func testPendingSectionIgnoresASecondRegistration() {
+        let pending = PendingSection<[String]>()
+        pending.deliver(["PROJ-1"])
+
+        var first: [String]?
+        var second: [String]?
+        pending.onReady { first = $0 }
+        pending.onReady { second = $0 }
+
+        XCTAssertEqual(first, ["PROJ-1"])
+        XCTAssertNil(second, "the data is consumed by the first renderer")
     }
 
     // MARK: - Helpers

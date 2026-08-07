@@ -95,6 +95,45 @@ private final class LazyMenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
+/// A one-shot rendezvous between a fetch that starts early and the menu item it fills in.
+///
+/// Sections like TODO can start their network call at the top of a refresh, but their menu item
+/// can only be inserted once the sections above it exist — so the data and the item become
+/// available in either order. `deliver` and `onReady` are the two sides of that race and
+/// resolve it whichever way it lands: data first is held until the item asks for it, item first
+/// leaves a renderer waiting for the data.
+///
+/// Main-thread only. Every caller is already there (Alamofire's default response queue is
+/// `.main`, and refreshMenu runs from a timer or a menu action), so this deliberately carries no
+/// lock — one would only hide a threading mistake.
+final class PendingSection<T> {
+    private var value: T?
+    private var render: ((T) -> Void)?
+    private var delivered = false
+
+    /// Hands over the fetched data. Later deliveries are ignored — a section renders once.
+    func deliver(_ newValue: T) {
+        guard !delivered else { return }
+        delivered = true
+        if let render {
+            self.render = nil
+            render(newValue)
+        } else {
+            value = newValue
+        }
+    }
+
+    /// Registers the renderer for this section, running it immediately if the data already landed.
+    func onReady(_ newRender: @escaping (T) -> Void) {
+        if let value {
+            self.value = nil
+            newRender(value)
+        } else {
+            render = newRender
+        }
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -237,6 +276,8 @@ extension AppDelegate {
         // a ticket must not repeat here). All of it joins on myPRsGroup.
         let myPRsEnabled = self.showMyPRsSection
             && !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty
+        // Runs concurrently with the main search below — see startTodoFetch.
+        let todoPending = self.startTodoFetch()
         let myPRsGroup = DispatchGroup()
         let collectedURLsQueue = DispatchQueue(label: "myPRs.collectedURLs")
         var collectedPRURLs = Set<String>()
@@ -318,7 +359,7 @@ extension AppDelegate {
                 self.statusBarItem.button?.title = String(0)
             }
 
-            self.appendTodoSection()
+            if let todoPending { self.appendTodoSection(todoPending) }
 
             // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
             // attached (or the whole section removed) once the searches and the per-issue PR
@@ -394,32 +435,44 @@ extension AppDelegate {
     }
     
     
+    /// Starts the TODO backlog search, returning the handle `appendTodoSection` renders from —
+    /// nil when no TODO JQL is configured, which is how the caller knows to skip the section.
+    ///
+    /// Fired at the top of a refresh, alongside the main JQL search and the GitHub PR search,
+    /// rather than from inside the main search's completion. The TODO rows don't depend on the
+    /// main result in any way, so waiting for it only widened the window where the section has
+    /// nothing to show — by the full cost of the primary search (~0.3–0.5s against the author's
+    /// instance, visible in the unified log as one Jira request wave strictly following another).
+    private func startTodoFetch() -> PendingSection<[Issue]>? {
+        let query = todoJQL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return nil }
+
+        let pending = PendingSection<[Issue]>()
+        jiraClient.getIssuesByJql(jql: query, maxResults: todoMaxResults) { resp, ranks in
+            pending.deliver(AppDelegate.orderedByRank(resp.issues ?? [], ranks: ranks))
+        }
+        return pending
+    }
+
     /// Adds the TODO section — a backlog rollup whose submenu lists the tickets matching the
     /// user's TODO JQL in board order, each carrying the same submenu it would have in the main
-    /// ticket list. No-op when no TODO JQL is configured.
+    /// ticket list.
     ///
     /// Only the ticket rows are built up front; their submenus are populated the first time the
     /// TODO menu is opened (see `LazyMenuDelegate`). Removes the section when the query comes
     /// back empty, and drops results whose item a newer refresh already discarded.
-    private func appendTodoSection() {
-        let query = todoJQL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
-
+    private func appendTodoSection(_ pending: PendingSection<[Issue]>) {
         let separator = NSMenuItem.separator()
         let todoItem = AppDelegate.makeSectionHeader(title: "TODO", symbolName: "checklist.unchecked")
         menu.addItem(separator)
         menu.addItem(todoItem)
 
-        jiraClient.getIssuesByJql(jql: query, maxResults: todoMaxResults) { [weak self] resp, ranks in
+        pending.onReady { [weak self] issues in
             guard let self else { return }
-            let removeSection = {
-                if self.menu.index(of: todoItem) != -1 { self.menu.removeItem(todoItem) }
-                if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
-            }
             guard self.menu.index(of: todoItem) != -1 else { return }
-            let issues = AppDelegate.orderedByRank(resp.issues ?? [], ranks: ranks)
             guard !issues.isEmpty else {
-                removeSection()
+                self.menu.removeItem(todoItem)
+                if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
                 return
             }
 
