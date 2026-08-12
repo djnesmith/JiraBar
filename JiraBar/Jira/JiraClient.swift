@@ -33,10 +33,21 @@ public class JiraClient {
         }
     }
 
-    /// False before the instance has been set up at all — no Cloud org, or no Server host. Every
-    /// request would then go to a URL like `https://.atlassian.net`, which fails DNS and is worth no
-    /// notification: nothing is wrong except that the app hasn't been configured yet.
+    /// False before the instance has been set up at all — no Cloud org, or no Server host, so
+    /// `baseUrl` would come out as something like `https://.atlassian.net`.
+    ///
+    /// Only `getIssuesByJql` consults this, because it is the only request an unconfigured session
+    /// actually makes: every other notifying call hangs off a menu row, and the rows are built from
+    /// the search's own results, so with no issues there is nothing to click. A blank-instance guard
+    /// on the others would be unreachable code.
     var isConfigured: Bool {
+        JiraClient.isConfigured(instanceType: instanceType, orgName: orgName, jiraHost: jiraHost)
+    }
+
+    /// The pure half, so it can be tested without reading whatever is in the running machine's
+    /// preferences. A test that instantiates `JiraClient` inherits the developer's real settings —
+    /// and with them the risk of firing a real authenticated request.
+    static func isConfigured(instanceType: JiraInstanceType, orgName: String, jiraHost: String) -> Bool {
         switch instanceType {
         case .cloud:  return !orgName.trimmingCharacters(in: .whitespaces).isEmpty
         case .server: return !jiraHost.trimmingCharacters(in: .whitespaces).isEmpty
@@ -256,9 +267,10 @@ public class JiraClient {
         var required: Set<String> = []
         for (key, value) in fields {
             guard let meta = value as? [String: Any] else { return nil }
-            // Absent `required` is Jira omitting it, which the docs treat as false. A present but
-            // non-bool value is a shape we don't understand — unknown, so fail closed rather than
-            // quietly reading it as not-required.
+            // Absent `required` is Jira omitting it, which the docs treat as false. A value that
+            // won't read as a bool at all is a shape we don't understand — unknown, so fail closed
+            // rather than quietly treating it as not-required. (JSON numbers still bridge to Bool
+            // via NSNumber, so `1`/`0` are read, not rejected; Jira sends booleans.)
             switch meta["required"] {
             case nil:
                 continue

@@ -61,6 +61,26 @@ enum TransitionSubmitOutcome {
     case prActionsIncomplete(lines: [String])
 }
 
+/// The reasons a dialog's submit button is disabled, rendered the one way. Shared because the
+/// transition and bulk-move dialogs both gate on the same `missingRequirements`, and because the
+/// colour carries meaning: orange here means "this is why the button is dead", so a second
+/// hand-rolled copy is how that meaning drifts.
+struct ValidationHints: View {
+    let problems: [String]
+
+    var body: some View {
+        if !problems.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(problems, id: \.self) { problem in
+                    Text(problem)
+                        .font(.footnote).foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
 /// Which fields Jira itself says the transition requires, filled in asynchronously after the dialog
 /// opens (same pattern as `PRActionsStatus`).
 final class TransitionFieldRequirements: ObservableObject {
@@ -561,16 +581,8 @@ struct TransitionDialog: View {
             .font(.footnote).foregroundColor(.accentColor)
             .fixedSize(horizontal: false, vertical: true)
         }
-        if !transitionApplied, !validationProblems.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(validationProblems, id: \.self) { problem in
-                    // Orange, not secondary grey: this is why the button is dead, and it must not
-                    // read like the informational lines above it.
-                    Text(problem)
-                        .font(.footnote).foregroundColor(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+        if !transitionApplied {
+            ValidationHints(problems: validationProblems)
         }
     }
 

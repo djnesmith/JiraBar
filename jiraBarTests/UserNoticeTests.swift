@@ -13,12 +13,18 @@ final class RecordingNotice {
 
     init() {
         previous = UserNotice.deliver
-        UserNotice.deliver = { _ in }
         UserNotice.deliver = { [weak self] body in self?.recorded.append(body) }
     }
 
     func restore() {
         UserNotice.deliver = previous
+    }
+
+    /// Safety net for a test class that forgets `restore()`. Without it the recorder deallocs, the
+    /// seam keeps pointing at a closure whose `self` is nil, and every later notification in the
+    /// process vanishes silently — with nothing failing, because nothing else asserts on them.
+    deinit {
+        restore()
     }
 }
 
@@ -91,39 +97,36 @@ final class UserNoticeInjectionTests: XCTestCase {
 
 /// An unconfigured instance is why the test host used to post a real DNS-failure banner on every
 /// run: it searched `https://.atlassian.net`, failed, and notified.
+///
+/// Asserted against the pure `isConfigured` rather than a live `JiraClient`. Instantiating the client
+/// reads the running machine's own preferences — on this machine the debug domain already carries a
+/// `jiraHost`, so a client-based test would pass or fail depending on which instance type happened to
+/// be selected, and under Self-Hosted it would fire a real authenticated request. That is the same
+/// "a test reached a process-global" defect this commit exists to remove, one layer down.
 final class UnconfiguredInstanceTests: XCTestCase {
 
-    private var notice: RecordingNotice!
-
-    override func setUp() {
-        super.setUp()
-        notice = RecordingNotice()
+    func testCloudNeedsAnOrg() {
+        XCTAssertFalse(JiraClient.isConfigured(instanceType: .cloud, orgName: "", jiraHost: ""))
+        XCTAssertFalse(
+            JiraClient.isConfigured(instanceType: .cloud, orgName: "   ", jiraHost: ""),
+            "whitespace still builds https://.atlassian.net"
+        )
+        XCTAssertTrue(JiraClient.isConfigured(instanceType: .cloud, orgName: "acme", jiraHost: ""))
     }
 
-    override func tearDown() {
-        notice.restore()
-        notice = nil
-        super.tearDown()
+    /// A host configured for the *other* instance type must not count as configured — the shape that
+    /// would have made this suite fire a live request.
+    func testCloudIgnoresAServerHost() {
+        XCTAssertFalse(
+            JiraClient.isConfigured(instanceType: .cloud, orgName: "", jiraHost: "https://jira.example.com")
+        )
     }
 
-    func testUnconfiguredCloudInstanceIsNotConsideredConfigured() {
-        let client = JiraClient()
-        // The test host has no org set, which is exactly the fresh-install shape.
-        XCTAssertFalse(client.isConfigured, "no Cloud org means nothing to search")
-    }
-
-    /// The search must return empty without touching the network or notifying.
-    func testSearchOnAnUnconfiguredInstanceIsSilentAndEmpty() {
-        let client = JiraClient()
-        let done = expectation(description: "search completes")
-
-        client.getIssuesByJql { response, ranks in
-            XCTAssertTrue(response.issues?.isEmpty ?? true)
-            XCTAssertTrue(ranks.isEmpty)
-            done.fulfill()
-        }
-
-        wait(for: [done], timeout: 2)
-        XCTAssertTrue(notice.recorded.isEmpty, "an unconfigured app must not notify: \(notice.recorded)")
+    func testServerNeedsAHost() {
+        XCTAssertFalse(JiraClient.isConfigured(instanceType: .server, orgName: "acme", jiraHost: ""))
+        XCTAssertFalse(JiraClient.isConfigured(instanceType: .server, orgName: "acme", jiraHost: "  "))
+        XCTAssertTrue(
+            JiraClient.isConfigured(instanceType: .server, orgName: "", jiraHost: "https://jira.example.com")
+        )
     }
 }

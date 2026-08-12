@@ -399,17 +399,8 @@ struct BulkMoveDialog: View {
         }
     }
 
-    @ViewBuilder
     private var requirementsSection: some View {
-        if !missingRequirements.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(missingRequirements, id: \.self) { problem in
-                    Text(problem)
-                        .font(.footnote).foregroundColor(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
+        ValidationHints(problems: missingRequirements)
     }
 
     private var canSubmit: Bool {

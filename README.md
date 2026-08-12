@@ -118,6 +118,8 @@ JiraBar also reads Jira's own required-field flags for the transition being subm
 
 If the metadata can't be read, requiredness is *unknown* rather than empty and the button stays disabled with a reason. Guessing "nothing is required" would just move the failure to Jira. Prompts with no fields at all are never gated by this.
 
+**Move Multiple Issues** honours the **Required** checkboxes but not Jira's own flags: those are per-issue metadata, and reading them for a bulk move would mean one extra request per ticket before the dialog could open.
+
 ### Mapping file format
 
 ```json
