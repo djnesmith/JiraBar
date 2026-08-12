@@ -972,7 +972,7 @@ extension AppDelegate {
         updateGithub: Bool,
         prActions: PRActionChoices,
         prStatus: PRActionsStatus,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (TransitionSubmitOutcome) -> Void
     ) {
         let updates = config.fieldUpdates(users: users, freeText: freeText, selectValue: selectValue)
 
@@ -983,22 +983,44 @@ extension AppDelegate {
             to: transitionId,
             comment: effectiveComment,
             fieldUpdates: updates
-        ) { [weak self] success in
+        ) { [weak self] success, errorMessage in
             DispatchQueue.main.async {
-                if success {
-                    self?.transitionWindow?.close()
-                    self?.transitionWindow = nil
-                    self?.refreshMenu()
-                    if updateGithub, config.hasUserField {
-                        self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
-                    }
-                    if prActions.hasWork {
-                        self?.applyPRActions(issueKey: issueKey, actions: prActions, prStatus: prStatus)
-                    }
+                guard success else {
+                    // Jira refused, or was unreachable. The window stays up carrying the server's
+                    // own words — "Testers are required before moving into QA." is only useful if
+                    // he can read it.
+                    completion(.jiraRefused(errorMessage ?? "Jira rejected the transition and gave no reason."))
+                    return
                 }
-                completion(success)
+                self?.refreshMenu()
+                if updateGithub, config.hasUserField {
+                    self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
+                }
+                guard prActions.hasWork else {
+                    self?.closeTransitionWindow()
+                    completion(.applied)
+                    return
+                }
+                // The window deliberately stays open until the PR actions land. Closing here is
+                // what used to make a failed review invisible: the ticket had moved, the window
+                // had gone, and only a notification carried the bad news.
+                self?.applyPRActions(issueKey: issueKey, actions: prActions, prStatus: prStatus) { tally in
+                    var lines = tally.failureLines
+                    if let blocked = tally.blockedReason { lines.append(blocked) }
+                    guard lines.isEmpty else {
+                        completion(.prActionsIncomplete(lines: lines))
+                        return
+                    }
+                    self?.closeTransitionWindow()
+                    completion(.applied)
+                }
             }
         }
+    }
+
+    private func closeTransitionWindow() {
+        transitionWindow?.close()
+        transitionWindow = nil
     }
     
     @objc
@@ -1397,26 +1419,37 @@ extension AppDelegate {
     /// chosen review (APPROVE or REQUEST_CHANGES), merges using the chosen method (skipping any
     /// repo that disallows it), and sets the Jira Assignee as PR Assignee when the PR has none.
     /// Uses the dialog's already-enriched `PRActionsStatus` so we don't re-fetch per action.
-    /// Posts a single summary notification when the batch is done.
-    private func applyPRActions(issueKey: String, actions: PRActionChoices, prStatus: PRActionsStatus) {
+    ///
+    /// Posts a single summary notification when the batch is done, and hands the same outcome to
+    /// `completion` on the main queue so the still-open dialog can show which PRs failed. The Jira
+    /// transition has already been applied by the time this runs, so a failure here can't be left
+    /// to a notification the user may never look at.
+    private func applyPRActions(
+        issueKey: String,
+        actions: PRActionChoices,
+        prStatus: PRActionsStatus,
+        completion: @escaping (PRActionTally) -> Void = { _ in }
+    ) {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
         guard !token.isEmpty else {
             sendNotification(body: "PR actions skipped for \(issueKey): no GitHub token set.")
+            completion(PRActionTally(blockedReason: "No GitHub token is set, so no PR action ran."))
             return
         }
         let candidates = prStatus.openPRs.filter { !$0.isMerged }
         guard !candidates.isEmpty else {
             sendNotification(body: "PR actions skipped for \(issueKey): no open linked PRs.")
+            completion(PRActionTally(blockedReason: "No open linked PRs were found, so no PR action ran."))
             return
         }
 
         let client = GithubClient()
         let group = DispatchGroup()
+        // Every mutation of `tally` goes through this queue, and the final read is a `sync`
+        // barrier on it — otherwise the skip counters, which no dispatch group waits on, can
+        // still be in flight when the summary is built.
         let syncQueue = DispatchQueue(label: "prActions.apply")
-        var reviewOK = 0, reviewFail = 0
-        var mergeOK = 0, mergeFail = 0, mergeSkipped = 0
-        var assignSetCount = 0, assignFail = 0, assignNotTouched = 0
-        var assigneeLookupFailed = false
+        var tally = PRActionTally()
         // The denominator for the review summary: every candidate except the ones where the
         // review would add nothing. Empty when no review is going out at all, including the
         // blank-mandatory-comment case `reviewEvent` withholds.
@@ -1434,7 +1467,7 @@ extension AppDelegate {
                 group.enter()
                 client.submitPRReview(url: pr.url, event: event, body: actions.trimmedReviewComment, token: token) { ok in
                     syncQueue.async {
-                        if ok { reviewOK += 1 } else { reviewFail += 1 }
+                        if ok { tally.reviewOK += 1 } else { tally.reviewFailed.append(pr.label) }
                         group.leave()
                     }
                 }
@@ -1453,7 +1486,7 @@ extension AppDelegate {
                 if assignees == nil && actions.syncAssignee {
                     // Couldn't read the Jira assignee — sync degrades to a no-op, but the
                     // summary must say so rather than claim "already assigned".
-                    assigneeLookupFailed = true
+                    syncQueue.async { tally.assigneeLookupFailed = true }
                 }
                 let mappedLogin: String? = {
                     guard actions.syncAssignee,
@@ -1470,14 +1503,14 @@ extension AppDelegate {
                             secondPassGroup.enter()
                             client.addPRAssignees(url: pr.url, assignees: [me], token: token) { ok in
                                 syncQueue.async {
-                                    if ok { assignSetCount += 1 } else { assignFail += 1 }
+                                    if ok { tally.assignSet += 1 } else { tally.assignFailed.append(pr.label) }
                                     secondPassGroup.leave()
                                 }
                             }
                         } else {
                             // Already assigned, or no login could be resolved for the
                             // Jira Assignee — nothing attempted.
-                            syncQueue.async { assignNotTouched += 1 }
+                            syncQueue.async { tally.assignNotTouched += 1 }
                         }
                     }
 
@@ -1486,12 +1519,12 @@ extension AppDelegate {
                             secondPassGroup.enter()
                             client.mergePR(url: pr.url, method: actions.mergeMethod, token: token) { ok in
                                 syncQueue.async {
-                                    if ok { mergeOK += 1 } else { mergeFail += 1 }
+                                    if ok { tally.mergeOK += 1 } else { tally.mergeFailed.append(pr.label) }
                                     secondPassGroup.leave()
                                 }
                             }
                         } else {
-                            syncQueue.async { mergeSkipped += 1 }
+                            syncQueue.async { tally.mergeSkipped += 1 }
                         }
                     }
                 }
@@ -1499,41 +1532,106 @@ extension AppDelegate {
             }
 
             secondPassGroup.notify(queue: .main) {
-                var parts: [String] = []
-                if actions.review != .none {
-                    if actions.reviewBlockedForEmptyComment {
-                        // Never silent: the review was withheld on purpose, not attempted and lost.
-                        parts.append("request changes skipped: a comment is required")
-                    } else {
-                        if !reviewTargets.isEmpty {
-                            let verb = actions.review == .requestChanges ? "requested changes on" : "approved"
-                            parts.append("\(verb) \(reviewOK)/\(reviewTargets.count)")
-                            if reviewFail > 0 { parts.append("\(reviewFail) review failed") }
-                        }
-                        // Approvals are the only review we skip as redundant, so this can only
-                        // ever be an already-approved count.
-                        let alreadyApproved = candidates.count - reviewTargets.count
-                        if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
-                    }
-                }
-                if actions.merge {
-                    let mergeAttempted = candidates.count - mergeSkipped
-                    if mergeAttempted > 0 {
-                        parts.append("merged \(mergeOK)/\(mergeAttempted) via \(actions.mergeMethod)")
-                        if mergeFail > 0 { parts.append("\(mergeFail) merge failed") }
-                    }
-                    if mergeSkipped > 0 { parts.append("\(mergeSkipped) skipped (method not allowed)") }
-                }
-                if actions.syncAssignee {
-                    parts.append("assignee set on \(assignSetCount) PR\(assignSetCount == 1 ? "" : "s")")
-                    if assignFail > 0 { parts.append("\(assignFail) assignee failed") }
-                    if assignNotTouched > 0 { parts.append("\(assignNotTouched) already assigned or unmapped") }
-                    if assigneeLookupFailed { parts.append("Jira assignee lookup failed") }
-                }
-                let summary = parts.isEmpty ? "no changes" : parts.joined(separator: "; ")
-                sendNotification(body: "PR actions for \(issueKey): \(summary).")
+                // Barrier read: drains every pending mutation before anything reports.
+                let final = syncQueue.sync { tally }
+                sendNotification(body: AppDelegate.prActionsSummaryBody(
+                    issueKey: issueKey,
+                    actions: actions,
+                    candidateCount: candidates.count,
+                    reviewTargetCount: reviewTargets.count,
+                    tally: final
+                ))
+                completion(final)
             }
         }
+    }
+
+    /// What one `applyPRActions` batch actually did. Split out from the notification text so the
+    /// wording — in particular that a failure never reads like a skip — is testable without a
+    /// network round trip.
+    struct PRActionTally {
+        var reviewOK = 0
+        var mergeOK = 0, mergeSkipped = 0
+        var assignSet = 0, assignNotTouched = 0
+        var assigneeLookupFailed = false
+        /// Labels ("owner/repo #12") of the PRs each action was attempted on and failed. Labels
+        /// rather than counts because the dialog has to name which PR of the three didn't take.
+        var reviewFailed: [String] = []
+        var mergeFailed: [String] = []
+        var assignFailed: [String] = []
+        /// Set when the batch never started — no token, no open PRs. Not a failure of an action;
+        /// the dialog reports it as a reason nothing ran.
+        var blockedReason: String?
+
+        var reviewFail: Int { reviewFailed.count }
+        var mergeFail: Int { mergeFailed.count }
+        var assignFail: Int { assignFailed.count }
+
+        /// Actions that were attempted against GitHub and came back refused or unreachable.
+        /// Deliberately excludes the skip counters: not attempting something is not failing at it.
+        var failureCount: Int { reviewFail + mergeFail + assignFail }
+
+        /// One line per failed action, naming the PR. This is what the dialog lists, so the
+        /// partial case — three linked PRs, the second one fails — points at the right PR.
+        var failureLines: [String] {
+            reviewFailed.map { "Review not submitted on \($0)" }
+                + mergeFailed.map { "Merge failed on \($0)" }
+                + assignFailed.map { "Assignee not set on \($0)" }
+        }
+    }
+
+    /// The body of the one summary notification a PR-actions batch posts.
+    ///
+    /// Leads with the failure count when anything failed. This runs only after the Jira transition
+    /// has already succeeded, so a failed action means the ticket moved and GitHub did not follow —
+    /// and every client's error path otherwise only `print`s, making this notification the sole
+    /// place that shows up. Banners truncate, so the failure can't trail behind a success ratio.
+    static func prActionsSummaryBody(
+        issueKey: String,
+        actions: PRActionChoices,
+        candidateCount: Int,
+        reviewTargetCount: Int,
+        tally: PRActionTally
+    ) -> String {
+        var parts: [String] = []
+        if actions.review != .none {
+            if actions.reviewBlockedForEmptyComment {
+                // Never silent: the review was withheld on purpose, not attempted and lost.
+                parts.append("request changes skipped: a comment is required")
+            } else {
+                if reviewTargetCount > 0 {
+                    let verb = actions.review == .requestChanges ? "requested changes on" : "approved"
+                    parts.append("\(verb) \(tally.reviewOK)/\(reviewTargetCount)")
+                    if tally.reviewFail > 0 { parts.append("\(tally.reviewFail) review failed") }
+                }
+                // Approvals are the only review we skip as redundant, so this can only
+                // ever be an already-approved count.
+                let alreadyApproved = candidateCount - reviewTargetCount
+                if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
+            }
+        }
+        if actions.merge {
+            let mergeAttempted = candidateCount - tally.mergeSkipped
+            if mergeAttempted > 0 {
+                parts.append("merged \(tally.mergeOK)/\(mergeAttempted) via \(actions.mergeMethod)")
+                if tally.mergeFail > 0 { parts.append("\(tally.mergeFail) merge failed") }
+            }
+            if tally.mergeSkipped > 0 { parts.append("\(tally.mergeSkipped) skipped (method not allowed)") }
+        }
+        if actions.syncAssignee {
+            parts.append("assignee set on \(tally.assignSet) PR\(tally.assignSet == 1 ? "" : "s")")
+            if tally.assignFail > 0 { parts.append("\(tally.assignFail) assignee failed") }
+            if tally.assignNotTouched > 0 {
+                parts.append("\(tally.assignNotTouched) already assigned or unmapped")
+            }
+            if tally.assigneeLookupFailed { parts.append("Jira assignee lookup failed") }
+        }
+        let summary = parts.isEmpty ? "no changes" : parts.joined(separator: "; ")
+        guard tally.failureCount > 0 else {
+            return "PR actions for \(issueKey): \(summary)."
+        }
+        return "PR actions for \(issueKey): \(tally.failureCount) FAILED — "
+            + "ticket moved, GitHub did not. \(summary)."
     }
 
     /// Generic Jira issue-key pattern (e.g. ABC-123). Deliberately not tied to any specific

@@ -40,6 +40,21 @@ struct PRActionChoices {
     }
 }
 
+/// How a submit attempt ended. The dialog reacts differently to each, so this is deliberately not
+/// a `Bool` — "Jira refused" and "Jira applied it but GitHub didn't follow" need opposite handling:
+/// the first is retryable in place, the second must not offer to transition again.
+enum TransitionSubmitOutcome {
+    /// Jira refused the transition, or couldn't be reached. Nothing was applied; the dialog stays
+    /// open with the server's own message so the user can fix the input and retry.
+    case jiraRefused(String)
+    /// Everything asked for landed. The dialog can close.
+    case applied
+    /// The Jira transition was applied, but some PR actions did not land. The ticket has moved and
+    /// GitHub has not followed, so the dialog stays open naming each one; retrying the transition
+    /// is not the remedy.
+    case prActionsIncomplete(lines: [String])
+}
+
 /// Live view-model for the transition dialog's PR-actions section. AppDelegate populates it
 /// asynchronously (after enriching each linked open PR via GitHub GraphQL) so the dialog
 /// can show status indicators — "you've approved 2/3", etc. — without blocking on open.
@@ -105,7 +120,7 @@ struct TransitionDialog: View {
     /// Optional live status feed for the PR-actions section. Nil when the transition's
     /// prompt config has no PR actions enabled.
     @ObservedObject var prStatus: PRActionsStatus
-    let onSubmit: (String, [JiraUser], String, String, Bool, PRActionChoices, @escaping (Bool) -> Void) -> Void
+    let onSubmit: (String, [JiraUser], String, String, Bool, PRActionChoices, @escaping (TransitionSubmitOutcome) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var comment: String = ""
@@ -120,10 +135,18 @@ struct TransitionDialog: View {
     @State private var updateGithub: Bool = true
     @State private var prReview: Bool = true
     @State private var prReviewComment: String = ""
-    @State private var showReviewCommentWarning: Bool = false
     @State private var prMerge: Bool = true
     @State private var prMergeMethod: String = "rebase"
     @State private var prSyncAssignee: Bool = true
+    /// Jira's own rejection message from the last attempt — e.g. "Testers are required before
+    /// moving into QA." Kept in the window because the notification is missable and the console
+    /// line is invisible.
+    @State private var submitError: String?
+    /// One line per PR action that didn't land, shown while the window stays open.
+    @State private var prFailureLines: [String] = []
+    /// True once Jira has accepted the transition. The window may still be open — waiting on PR
+    /// actions, or reporting that some failed — but re-submitting is no longer the right offer.
+    @State private var transitionApplied: Bool = false
 
     private var filteredUsers: [JiraUser] {
         let q = userFilter.trimmingCharacters(in: .whitespaces).lowercased()
@@ -164,6 +187,9 @@ struct TransitionDialog: View {
 
             Spacer(minLength: 0)
 
+            validationSection
+            outcomeSection
+
             footer
         }
         .padding(16)
@@ -195,13 +221,25 @@ struct TransitionDialog: View {
             : "Approval comment (optional)"
     }
 
+    /// The PR-action choices as the dialog currently stands. Built here, not only in `submit()`, so
+    /// the submit gate and the inline hint test the same value the batch will actually run on.
+    private var currentPRChoices: PRActionChoices {
+        guard config.hasPRActions else { return .disabled }
+        return PRActionChoices(
+            review: prReview ? config.prReviewAction : .none,
+            reviewComment: prReviewComment,
+            merge: config.allowsPRMerge && prMerge,
+            mergeMethod: prMergeMethod,
+            syncAssignee: config.enablePRAssigneeSync && prSyncAssignee
+        )
+    }
+
     /// The blocked state: a review whose comment is mandatory, ticked, with nothing typed.
     /// Submitting is refused while this holds — the review is the point of the transition, so
-    /// finishing without it would leave the ticket moved and the PR untouched.
+    /// finishing without it would leave the ticket moved and the PR untouched. Delegates to the
+    /// same predicate `applyPRActions` uses, rather than re-deriving "blank" here.
     private var reviewCommentMissing: Bool {
-        prReview
-            && config.prReviewAction.requiresComment
-            && prReviewComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        currentPRChoices.reviewBlockedForEmptyComment
     }
 
     /// Which review state the status line reports on. A merge-only or assignee-only config still
@@ -224,15 +262,6 @@ struct TransitionDialog: View {
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .lineLimit(2...5)
                         .padding(.leading, 20)
-                    // Raised by a submit attempt, not on open — an untouched dialog shouldn't
-                    // greet you with an error for something you haven't had a chance to type.
-                    if showReviewCommentWarning, reviewCommentMissing {
-                        Text("GitHub requires a comment on a request-changes review.")
-                            .font(.footnote)
-                            .foregroundColor(.red)
-                            .padding(.leading, 20)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
             }
             if config.allowsPRMerge {
@@ -423,45 +452,120 @@ struct TransitionDialog: View {
         }
     }
 
+    /// Everything currently blocking submit, all of it rather than the first problem. One list
+    /// feeds one disabled state and one hint, so a required-field check added later shows up in
+    /// both places by construction.
+    ///
+    /// Always visible while non-empty, not raised on a submit attempt: the Transition button is
+    /// disabled off this same list, and a dead button with no stated reason is worse than an
+    /// early hint.
+    private var validationProblems: [String] {
+        var problems: [String] = []
+        if currentPRChoices.reviewBlockedForEmptyComment {
+            problems.append("Write a review comment — GitHub rejects a request-changes review without one.")
+        }
+        return problems
+    }
+
+    @ViewBuilder
+    private var validationSection: some View {
+        if !transitionApplied, !validationProblems.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(validationProblems, id: \.self) { problem in
+                    Text(problem)
+                        .font(.footnote).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// Failures reported in the window, while it is still open. A dismissed window is what made the
+    /// old behaviour a lie: everything looked like it worked.
+    @ViewBuilder
+    private var outcomeSection: some View {
+        if let submitError {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Jira refused the transition — nothing was changed.")
+                    .font(.footnote).bold().foregroundColor(.red)
+                Text(submitError)
+                    .font(.footnote).foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        }
+        if !prFailureLines.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                // Naming the Jira half explicitly: it did happen, and it is not being rolled back.
+                Text("The Jira transition WAS applied, but \(prFailureLines.count) PR action\(prFailureLines.count == 1 ? "" : "s") did not:")
+                    .font(.footnote).bold().foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(prFailureLines, id: \.self) { line in
+                    Text("• \(line)").font(.footnote).foregroundColor(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                Text("Do it on the PR directly — retrying the transition won't fix it.")
+                    .font(.footnote).foregroundColor(.secondary)
+            }
+        }
+    }
+
     private var footer: some View {
         HStack {
             // Invisible companion button: binds ⌘-Return as a dialog-wide submit shortcut.
             // The visible Transition button keeps .defaultAction so Return still works when
             // no text field has focus, but a multi-line TextField swallows Return for newlines,
             // so we need ⌘-Return as an unambiguous submit path.
-            HiddenSubmitButton(disabled: submitting) { submit() }
+            HiddenSubmitButton(disabled: !canSubmit) { submit() }
 
             Spacer()
-            Button("Cancel") { onCancel() }
-                .keyboardShortcut(.cancelAction)
-            Button(submitting ? "Submitting…" : "Transition") { submit() }
-                .keyboardShortcut(.defaultAction)
-                .disabled(submitting)
+            if transitionApplied {
+                // The transition already went through. Offering "Transition" again would invite
+                // re-running it; the only sensible action left is to acknowledge and close.
+                Button("Close") { onCancel() }
+                    .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+                Button(submitButtonTitle) { submit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSubmit)
+            }
         }
     }
 
+    private var submitButtonTitle: String {
+        submitting ? "Submitting…" : "Transition"
+    }
+
+    /// The single gate: not already in flight, nothing outstanding, and not already applied.
+    private var canSubmit: Bool {
+        !submitting && !transitionApplied && validationProblems.isEmpty
+    }
+
     private func submit() {
-        guard !submitting else { return }
-        if reviewCommentMissing {
-            showReviewCommentWarning = true
-            return
-        }
+        guard canSubmit else { return }
         submitting = true
+        submitError = nil
+        prFailureLines = []
         let flag = showGithubMirrorCheckbox && updateGithub
-        let choices: PRActionChoices
-        if config.hasPRActions {
-            choices = PRActionChoices(
-                review: prReview ? config.prReviewAction : .none,
-                reviewComment: prReviewComment,
-                merge: config.allowsPRMerge && prMerge,
-                mergeMethod: prMergeMethod,
-                syncAssignee: config.enablePRAssigneeSync && prSyncAssignee
-            )
-        } else {
-            choices = .disabled
-        }
-        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag, choices) { success in
-            if !success { submitting = false }
+        let choices = currentPRChoices
+        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag, choices) { outcome in
+            switch outcome {
+            case .jiraRefused(let message):
+                // Nothing was applied — stay open, say why, let him fix it and retry.
+                submitError = message
+                submitting = false
+            case .applied:
+                // AppDelegate closes the window in this case; leaving the flags set keeps the
+                // button from re-firing in the frames before it goes away.
+                transitionApplied = true
+            case .prActionsIncomplete(let lines):
+                transitionApplied = true
+                submitting = false
+                prFailureLines = lines
+            }
         }
     }
 
@@ -565,11 +669,15 @@ struct TransitionDialog: View {
         if config.hasPRActions {
             var pr: CGFloat = 60 // headline + status summary
             if config.prReviewAction != .none { pr += (prReview ? 90 : 24) }
-            if showReviewCommentWarning, reviewCommentMissing { pr += 20 } // required-comment warning
             if config.allowsPRMerge { pr += 32 }
             if config.enablePRAssigneeSync { pr += 24 }
             h += pr
         }
+        // Room for whatever the window is currently reporting. Growth rather than a scroll view:
+        // an error the user has to scroll to find is the problem we're fixing.
+        if !transitionApplied { h += CGFloat(validationProblems.count) * 18 }
+        if submitError != nil { h += 52 }
+        if !prFailureLines.isEmpty { h += 48 + CGFloat(prFailureLines.count) * 18 }
         return max(h, 220)
     }
 }

@@ -63,8 +63,9 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// Options the user can choose from. Each option's `value` is what the API receives.
     var selectOptions: [TransitionSelectOption] = []
 
-    /// Backing store for `prReviewAction == .approve`. Read `prReviewAction` instead — it
-    /// resolves this against `enablePRRequestChanges`, which can't be true at the same time.
+    /// Backing store for `prReviewAction == .approve`. Read `prReviewAction` instead — the
+    /// Preferences picker can't set this and `enablePRRequestChanges` together, but a hand-edited
+    /// settings file can, and the getter is what resolves that pair.
     var enablePRApprove: Bool = false
 
     /// Backing store for `prReviewAction == .requestChanges`. Read `prReviewAction` instead.

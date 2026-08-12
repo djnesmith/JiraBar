@@ -457,8 +457,13 @@ public class GithubClient {
             return
         }
         let headers = apiHeaders(token: token, json: true)
-        var payload: [String: Any] = ["event": event]
-        if !body.isEmpty { payload["body"] = body }
+        // Normalise here rather than trusting callers: the submittability check above is
+        // case-insensitive, so accepting "request_changes" and then posting it verbatim would
+        // bless a call the API rejects. Same for the body — validated trimmed, so send it trimmed,
+        // otherwise a whitespace-only APPROVE comment posts as a review body of spaces.
+        var payload: [String: Any] = ["event": event.uppercased()]
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedBody.isEmpty { payload["body"] = trimmedBody }
         AF.request(
             "https://api.github.com/repos/\(owner)/\(repo)/pulls/\(number)/reviews",
             method: .post,

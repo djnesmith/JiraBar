@@ -514,7 +514,7 @@ struct BulkMoveDialog: View {
                 to: target.id,
                 comment: effectiveComment,
                 fieldUpdates: updates
-            ) { success in
+            ) { success, _ in
                 DispatchQueue.main.async {
                     if success {
                         successfulKeys.append(key)

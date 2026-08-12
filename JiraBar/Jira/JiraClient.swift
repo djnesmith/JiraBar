@@ -180,7 +180,7 @@ public class JiraClient {
     }
 
     func transitionIssue(issueKey: String, to: String, completion: @escaping (() -> Void)) -> Void {
-        transitionIssue(issueKey: issueKey, to: to, comment: nil, fieldUpdates: []) { _ in
+        transitionIssue(issueKey: issueKey, to: to, comment: nil, fieldUpdates: []) { _, _ in
             completion()
         }
     }
@@ -190,7 +190,7 @@ public class JiraClient {
         to transitionId: String,
         comment: String?,
         fieldUpdates: [TransitionFieldUpdate],
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Bool, String?) -> Void
     ) {
         // Build the fields payload once. We send it via a separate PUT to /issue/{key}
         // because Jira's transitions endpoint rejects fields that aren't on the workflow's
@@ -236,11 +236,11 @@ public class JiraClient {
         if fields.isEmpty {
             runTransition()
         } else {
-            updateIssueFields(issueKey: issueKey, fields: fields) { success in
+            updateIssueFields(issueKey: issueKey, fields: fields) { success, message in
                 if success {
                     runTransition()
                 } else {
-                    completion(false)
+                    completion(false, message)
                 }
             }
         }
@@ -250,7 +250,7 @@ public class JiraClient {
         issueKey: String,
         transitionId: String,
         comment: String?,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Bool, String?) -> Void
     ) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)/transitions"
 
@@ -273,13 +273,13 @@ public class JiraClient {
                 switch response.result {
                 case .success:
                     sendNotification(body: "Successfully transitioned issue")
-                    completion(true)
+                    completion(true, nil)
                 case .failure(let error):
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
                     sendNotification(body: "Transition failed: \(message)")
-                    completion(false)
+                    completion(false, message)
                 }
             }
     }
@@ -287,7 +287,7 @@ public class JiraClient {
     private func updateIssueFields(
         issueKey: String,
         fields: [String: Any],
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Bool, String?) -> Void
     ) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)"
         let body: [String: Any] = ["fields": fields]
@@ -300,13 +300,13 @@ public class JiraClient {
             .responseData { response in
                 switch response.result {
                 case .success:
-                    completion(true)
+                    completion(true, nil)
                 case .failure(let error):
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
                     sendNotification(body: "Field update failed: \(message)")
-                    completion(false)
+                    completion(false, message)
                 }
             }
     }
@@ -420,7 +420,7 @@ public class JiraClient {
             fieldId: [["value": optionValue]]
         ]
 
-        updateIssueFields(issueKey: issueKey, fields: fields) { [self] success in
+        updateIssueFields(issueKey: issueKey, fields: fields) { [self] success, _ in
             guard success else {
                 completion(false)
                 return
@@ -545,7 +545,9 @@ public class JiraClient {
         } else {
             value = refs.first ?? NSNull()
         }
-        updateIssueFields(issueKey: issueKey, fields: [fieldId: value], completion: completion)
+        updateIssueFields(issueKey: issueKey, fields: [fieldId: value]) { success, _ in
+            completion(success)
+        }
     }
 
     private static func parseUser(_ dict: [String: Any]) -> JiraUser? {
