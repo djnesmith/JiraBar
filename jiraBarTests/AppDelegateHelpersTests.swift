@@ -129,3 +129,26 @@ final class AppDelegateHelpersTests: XCTestCase {
         XCTAssertEqual(AppDelegate.prStatusColorHex("SOMETHING"), "#888888")
     }
 }
+
+final class AssigneeSegmentTests: XCTestCase {
+
+    private let grey = NSColor(hex: "#888888")
+
+    func testUnassignedReadsUnassignedAndStaysGrey() {
+        for highlight in [true, false] {
+            let segment = AppDelegate.assigneeSegment(displayName: nil, highlightAssigned: highlight)
+            XCTAssertEqual(segment.text, "Unassigned")
+            XCTAssertEqual(segment.color, grey, "unassigned is never green, in either section")
+        }
+    }
+
+    func testAssignedGoesGreenOnlyWhenHighlightIsOn() {
+        let todo = AppDelegate.assigneeSegment(displayName: "Alice Example", highlightAssigned: true)
+        XCTAssertEqual(todo.text, "Alice Example")
+        XCTAssertEqual(todo.color, NSColor.systemGreen)
+
+        let main = AppDelegate.assigneeSegment(displayName: "Alice Example", highlightAssigned: false)
+        XCTAssertEqual(main.text, "Alice Example")
+        XCTAssertEqual(main.color, grey, "the status-grouped rows are all the user's own tickets")
+    }
+}

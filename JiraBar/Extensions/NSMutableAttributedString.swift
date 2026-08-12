@@ -19,6 +19,13 @@ extension NSMutableAttributedString {
         return self
     }
     
+    /// `NSColor(hex:)` flattens to a fixed sRGB value, so dynamic system colours have to arrive as colours.
+    @discardableResult
+    func appendString(string: String, color: NSColor) -> NSMutableAttributedString {
+        self.append(NSMutableAttributedString(string: string, attributes: [.foregroundColor: color]))
+        return self
+    }
+
     @discardableResult
     func appendIcon(iconName: String, color: NSColor = NSColor.gray) -> NSMutableAttributedString {
         let image = NSImage(named: iconName)?.tint(color: color)

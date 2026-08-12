@@ -479,7 +479,7 @@ extension AppDelegate {
             let todoMenu = NSMenu()
             var rows: [(NSMenuItem, Issue)] = []
             for issue in issues {
-                let row = self.makeIssueRow(for: issue)
+                let row = self.makeIssueRow(for: issue, highlightAssigned: true)
                 todoMenu.addItem(row)
                 rows.append((row, issue))
             }
@@ -533,10 +533,25 @@ extension AppDelegate {
         return item
     }
 
+    /// Opt-in because green only means something in TODO, where the rule is "top-ranked *unassigned*
+    /// ticket" and so green reads as taken-skip-it; the status-grouped rows are all the user's own
+    /// tickets and would be green throughout.
+    static func assigneeSegment(
+        displayName: String?,
+        highlightAssigned: Bool
+    ) -> (text: String, color: NSColor) {
+        let grey = NSColor(hex: "#888888")
+        guard let displayName else { return ("Unassigned", grey) }
+        return (displayName, highlightAssigned ? .systemGreen : grey)
+    }
+
     /// Builds the two-line ticket row: truncated summary, then `#KEY · assignee · type`.
     /// Clicking opens the ticket in the browser. The submenu is attached separately by
     /// `attachIssueSubmenu` so callers can decide when to pay for it.
-    private func makeIssueRow(for issue: Issue) -> NSMenuItem {
+    private func makeIssueRow(for issue: Issue, highlightAssigned: Bool = false) -> NSMenuItem {
+        let assignee = AppDelegate.assigneeSegment(
+            displayName: issue.fields.assignee?.displayName, highlightAssigned: highlightAssigned
+        )
         let issueItem = NSMenuItem(title: "", action: #selector(self.openLink), keyEquivalent: "")
         issueItem.attributedTitle = NSMutableAttributedString(string: "")
             .appendString(string: issue.fields.summary.trunc(length: 50))
@@ -544,7 +559,7 @@ extension AppDelegate {
             .appendIcon(iconName: "hash", color: NSColor.gray)
             .appendString(string: issue.key, color: "#888888")
             .appendSeparator()
-            .appendString(string: issue.fields.assignee?.displayName ?? "Unassign", color: "#888888")
+            .appendString(string: assignee.text, color: assignee.color)
             .appendSeparator()
             .appendString(string: issue.fields.issuetype.name, color: "#888888")
         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
