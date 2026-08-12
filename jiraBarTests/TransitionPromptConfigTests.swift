@@ -727,22 +727,15 @@ final class TransitionOutcomeTextTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            TransitionOutcomeText.prActionsFailed(count: lines.count),
+            TransitionOutcomeText.prActionsIncomplete(count: lines.count),
             "The Jira transition WAS applied, but 1 PR action did not:"
         )
-        XCTAssertEqual(
-            lines.map(TransitionOutcomeText.bullet),
-            ["• Review not submitted on Tradeswell/tw-utils #36"]
-        )
-        XCTAssertEqual(
-            TransitionOutcomeText.prActionsFailedFootnote,
-            "Do it on the PR directly — retrying the transition won't fix it."
-        )
+        XCTAssertEqual(lines, ["Review not submitted on Tradeswell/tw-utils #36"])
     }
 
     func testPluralisesOnMoreThanOneFailure() {
         XCTAssertEqual(
-            TransitionOutcomeText.prActionsFailed(count: 2),
+            TransitionOutcomeText.prActionsIncomplete(count: 2),
             "The Jira transition WAS applied, but 2 PR actions did not:"
         )
     }
@@ -759,12 +752,14 @@ final class TransitionOutcomeTextTests: XCTestCase {
         )
     }
 
-    /// "Nothing ran" is not "something failed", and its sentence must not borrow the failure wording.
-    func testNothingRanHasItsOwnSentence() {
-        XCTAssertEqual(
-            TransitionOutcomeText.prActionsDidNotRun,
-            "The Jira transition was applied. No PR action ran:"
-        )
-        XCTAssertFalse(TransitionOutcomeText.prActionsDidNotRun.contains("did not:"))
+    /// "Nothing ran" must not borrow the failure wording, and must not repeat the reason rendered
+    /// beneath it — every `blockedReason` already ends in "…so no PR action ran."
+    func testNothingRanDoesNotBorrowFailureWordingOrRepeatItsReason() {
+        let headline = TransitionOutcomeText.prActionsDidNotRun
+        XCTAssertFalse(headline.contains("did not"), headline)
+        XCTAssertFalse(headline.lowercased().contains("no pr action ran"), headline)
+
+        let reason = AppDelegate.PRActionTally(blockedReason: "No open linked PRs were found, so no PR action ran.")
+        XCTAssertEqual(reason.report, .nothingRan(reason: "No open linked PRs were found, so no PR action ran."))
     }
 }

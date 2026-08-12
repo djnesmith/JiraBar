@@ -61,32 +61,29 @@ enum TransitionSubmitOutcome {
     case prActionsIncomplete(lines: [String])
 }
 
-/// Every sentence the transition window uses to report an outcome.
+/// The transition window's own framing for each `TransitionSubmitOutcome`. The detail lines it wraps
+/// come from `PRActionTally.failureLines` and from Jira itself.
 ///
-/// Pure and separate from the view because this wording *is* the feature: the complaint being fixed
-/// was that a failure vanished into a `print` while the ticket had already moved. Text buried in a
-/// view body can only be read; text produced here can be asserted, and quoted in a hand-over as what
-/// the window actually says.
+/// Outside the view because this wording is the contract: it is the only place a failure is reported
+/// where the user will see it, so it has to be assertable rather than merely readable.
 enum TransitionOutcomeText {
-    /// Jira refused. `fieldsWritten` matters because the field PUT precedes the transition POST, so a
-    /// refusal can leave the field values persisted — claiming nothing changed would be false.
+    /// `fieldsWritten` because the field values go out as a PUT *before* the transition POST, so a
+    /// refusal can leave them persisted — "nothing was changed" would then be false.
     static func jiraRefused(fieldsWritten: Bool) -> String {
         fieldsWritten
             ? "Jira saved the field values but refused the transition — the status did not change."
             : "Jira refused the transition — nothing was changed."
     }
 
-    /// Names the Jira half explicitly: it happened, and it is not being rolled back.
-    static func prActionsFailed(count: Int) -> String {
+    static func prActionsIncomplete(count: Int) -> String {
         "The Jira transition WAS applied, but \(count) PR action\(count == 1 ? "" : "s") did not:"
     }
 
-    static let prActionsFailedFootnote = "Do it on the PR directly — retrying the transition won't fix it."
+    static let prActionsIncompleteFootnote = "Do it on the PR directly — retrying the transition won't fix it."
 
-    /// Nothing was attempted — no token, no open linked PRs. Reported, but not as a failure.
-    static let prActionsDidNotRun = "The Jira transition was applied. No PR action ran:"
-
-    static func bullet(_ line: String) -> String { "• \(line)" }
+    /// Says only what the window can vouch for; the reason rendered beneath it comes from
+    /// `PRActionTally.blockedReason` and already ends in "…so no PR action ran."
+    static let prActionsDidNotRun = "The Jira transition was applied."
 }
 
 /// The reasons a dialog's submit button is disabled, rendered the one way. Shared because the
@@ -558,9 +555,9 @@ struct TransitionDialog: View {
                 // Fail closed. Unknown is not false: guessing "nothing is required" would hand back
                 // the silent failure this whole change removes. Cheap, too — if Jira is unreachable
                 // for the metadata it is unreachable for the transition.
-                // Also covers "the transition came back absent", which happens when someone else moved
-            // the ticket first — hence "may no longer be available" rather than just "retry".
-            problems.append("Couldn't confirm which fields Jira requires — the transition may no longer be available. Close and reopen the dialog.")
+                // A failed read also covers the transition coming back absent, which is what happens
+                // when someone else moved the ticket first.
+                problems.append("Couldn't confirm which fields Jira requires — the transition may no longer be available. Close and reopen the dialog.")
             }
         }
         problems.append(contentsOf: config.missingRequirements(
@@ -587,9 +584,6 @@ struct TransitionDialog: View {
             && !selectedUsers.isEmpty
     }
 
-    /// Truthful about scope. The field values go out as a PUT before the transition POST, so a
-    /// refusal can leave them persisted; claiming "nothing was changed" there is the same class of
-    /// lie as the window that closed on a failed review.
     private var submitErrorHeadline: String {
         TransitionOutcomeText.jiraRefused(fieldsWritten: submitErrorAfterFieldsWritten)
     }
@@ -640,16 +634,15 @@ struct TransitionDialog: View {
         }
         if !prFailureLines.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                // Naming the Jira half explicitly: it did happen, and it is not being rolled back.
-                Text(TransitionOutcomeText.prActionsFailed(count: prFailureLines.count))
+                Text(TransitionOutcomeText.prActionsIncomplete(count: prFailureLines.count))
                     .font(.footnote).bold().foregroundColor(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(prFailureLines, id: \.self) { line in
-                    Text(TransitionOutcomeText.bullet(line)).font(.footnote).foregroundColor(.red)
+                    Text("• \(line)").font(.footnote).foregroundColor(.red)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
-                Text(TransitionOutcomeText.prActionsFailedFootnote)
+                Text(TransitionOutcomeText.prActionsIncompleteFootnote)
                     .font(.footnote).foregroundColor(.secondary)
             }
         }
