@@ -710,3 +710,61 @@ final class GithubReviewSubmittabilityTests: XCTestCase {
         }
     }
 }
+
+/// What the transition window actually says. Asserted rather than read off the view body, because
+/// this wording is the fix: the complaint was that a failed PR action vanished into a `print` while
+/// the Jira ticket had already moved.
+final class TransitionOutcomeTextTests: XCTestCase {
+
+    /// The end-to-end sentence for the case a real GitHub rejection produces: one linked PR, the
+    /// review refused, the transition already applied.
+    func testSingleFailedReviewRendersTheWholeReport() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewFailed = ["Tradeswell/tw-utils #36"]
+
+        guard case .failures(let lines) = tally.report else {
+            return XCTFail("a refused review is a failure, not a skip: \(tally.report)")
+        }
+
+        XCTAssertEqual(
+            TransitionOutcomeText.prActionsFailed(count: lines.count),
+            "The Jira transition WAS applied, but 1 PR action did not:"
+        )
+        XCTAssertEqual(
+            lines.map(TransitionOutcomeText.bullet),
+            ["• Review not submitted on Tradeswell/tw-utils #36"]
+        )
+        XCTAssertEqual(
+            TransitionOutcomeText.prActionsFailedFootnote,
+            "Do it on the PR directly — retrying the transition won't fix it."
+        )
+    }
+
+    func testPluralisesOnMoreThanOneFailure() {
+        XCTAssertEqual(
+            TransitionOutcomeText.prActionsFailed(count: 2),
+            "The Jira transition WAS applied, but 2 PR actions did not:"
+        )
+    }
+
+    /// A refusal must not claim nothing changed when the field PUT had already landed.
+    func testJiraRefusalIsHonestAboutWhatWasPersisted() {
+        XCTAssertEqual(
+            TransitionOutcomeText.jiraRefused(fieldsWritten: false),
+            "Jira refused the transition — nothing was changed."
+        )
+        XCTAssertEqual(
+            TransitionOutcomeText.jiraRefused(fieldsWritten: true),
+            "Jira saved the field values but refused the transition — the status did not change."
+        )
+    }
+
+    /// "Nothing ran" is not "something failed", and its sentence must not borrow the failure wording.
+    func testNothingRanHasItsOwnSentence() {
+        XCTAssertEqual(
+            TransitionOutcomeText.prActionsDidNotRun,
+            "The Jira transition was applied. No PR action ran:"
+        )
+        XCTAssertFalse(TransitionOutcomeText.prActionsDidNotRun.contains("did not:"))
+    }
+}

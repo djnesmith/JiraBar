@@ -61,6 +61,34 @@ enum TransitionSubmitOutcome {
     case prActionsIncomplete(lines: [String])
 }
 
+/// Every sentence the transition window uses to report an outcome.
+///
+/// Pure and separate from the view because this wording *is* the feature: the complaint being fixed
+/// was that a failure vanished into a `print` while the ticket had already moved. Text buried in a
+/// view body can only be read; text produced here can be asserted, and quoted in a hand-over as what
+/// the window actually says.
+enum TransitionOutcomeText {
+    /// Jira refused. `fieldsWritten` matters because the field PUT precedes the transition POST, so a
+    /// refusal can leave the field values persisted — claiming nothing changed would be false.
+    static func jiraRefused(fieldsWritten: Bool) -> String {
+        fieldsWritten
+            ? "Jira saved the field values but refused the transition — the status did not change."
+            : "Jira refused the transition — nothing was changed."
+    }
+
+    /// Names the Jira half explicitly: it happened, and it is not being rolled back.
+    static func prActionsFailed(count: Int) -> String {
+        "The Jira transition WAS applied, but \(count) PR action\(count == 1 ? "" : "s") did not:"
+    }
+
+    static let prActionsFailedFootnote = "Do it on the PR directly — retrying the transition won't fix it."
+
+    /// Nothing was attempted — no token, no open linked PRs. Reported, but not as a failure.
+    static let prActionsDidNotRun = "The Jira transition was applied. No PR action ran:"
+
+    static func bullet(_ line: String) -> String { "• \(line)" }
+}
+
 /// The reasons a dialog's submit button is disabled, rendered the one way. Shared because the
 /// transition and bulk-move dialogs both gate on the same `missingRequirements`, and because the
 /// colour carries meaning: orange here means "this is why the button is dead", so a second
@@ -563,9 +591,7 @@ struct TransitionDialog: View {
     /// refusal can leave them persisted; claiming "nothing was changed" there is the same class of
     /// lie as the window that closed on a failed review.
     private var submitErrorHeadline: String {
-        submitErrorAfterFieldsWritten
-            ? "Jira saved the field values but refused the transition — the status did not change."
-            : "Jira refused the transition — nothing was changed."
+        TransitionOutcomeText.jiraRefused(fieldsWritten: submitErrorAfterFieldsWritten)
     }
 
     @ViewBuilder
@@ -605,7 +631,7 @@ struct TransitionDialog: View {
             // Deliberately not red and deliberately not in the failure list: nothing was attempted,
             // so calling it a failed action would be the same conflation in the other direction.
             VStack(alignment: .leading, spacing: 2) {
-                Text("The Jira transition was applied. No PR action ran:")
+                Text(TransitionOutcomeText.prActionsDidNotRun)
                     .font(.footnote).foregroundColor(.secondary)
                 Text(prNote)
                     .font(.footnote).foregroundColor(.secondary)
@@ -615,15 +641,15 @@ struct TransitionDialog: View {
         if !prFailureLines.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 // Naming the Jira half explicitly: it did happen, and it is not being rolled back.
-                Text("The Jira transition WAS applied, but \(prFailureLines.count) PR action\(prFailureLines.count == 1 ? "" : "s") did not:")
+                Text(TransitionOutcomeText.prActionsFailed(count: prFailureLines.count))
                     .font(.footnote).bold().foregroundColor(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(prFailureLines, id: \.self) { line in
-                    Text("• \(line)").font(.footnote).foregroundColor(.red)
+                    Text(TransitionOutcomeText.bullet(line)).font(.footnote).foregroundColor(.red)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
-                Text("Do it on the PR directly — retrying the transition won't fix it.")
+                Text(TransitionOutcomeText.prActionsFailedFootnote)
                     .font(.footnote).foregroundColor(.secondary)
             }
         }
