@@ -423,9 +423,24 @@ public class GithubClient {
         hits.filter { $0.ownedByMe || $0.assigneeLogins.isEmpty }.map(\.pr)
     }
 
+    /// The reviews API documents `body` as required for these events — see
+    /// `PRReviewAction.requiresComment`. Keyed by the API's own event strings, so it covers
+    /// COMMENT too even though nothing submits one yet.
+    static let reviewEventsRequiringBody: Set<String> = ["REQUEST_CHANGES", "COMMENT"]
+
+    /// Whether the reviews API would accept this (event, body) pair. False for the events whose
+    /// body is required when nothing but whitespace was supplied.
+    static func reviewIsSubmittable(event: String, body: String) -> Bool {
+        guard reviewEventsRequiringBody.contains(event.uppercased()) else { return true }
+        return !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Submits a review on a PR — e.g. `event: "APPROVE"` with an optional body — via the
-    /// pull-request reviews endpoint. Empty `body` submits the review without a comment.
-    /// Ignores non-github.com URLs.
+    /// pull-request reviews endpoint. Ignores non-github.com URLs.
+    ///
+    /// `body` is only optional for APPROVE; a bodyless REQUEST_CHANGES or COMMENT is refused here
+    /// rather than sent to fail validation. Callers shouldn't rely on that — the dialog and
+    /// `PRActionChoices.reviewEvent` keep the case from reaching this far.
     func submitPRReview(
         url urlString: String,
         event: String,
@@ -435,7 +450,8 @@ public class GithubClient {
     ) {
         guard
             !token.isEmpty,
-            let (owner, repo, number) = GithubClient.parsePRURL(urlString)
+            let (owner, repo, number) = GithubClient.parsePRURL(urlString),
+            GithubClient.reviewIsSubmittable(event: event, body: body)
         else {
             completion(false)
             return

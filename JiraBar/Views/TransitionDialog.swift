@@ -3,15 +3,41 @@ import SwiftUI
 /// Choices the user made in the PR-actions section of a transition dialog. Bundled into one
 /// struct so `onSubmit` doesn't grow every time we add a knob.
 struct PRActionChoices {
-    var approve: Bool
-    var approvalComment: String
+    var review: PRReviewAction
+    var reviewComment: String
     var merge: Bool
     var mergeMethod: String
     var syncAssignee: Bool
 
     static let disabled = PRActionChoices(
-        approve: false, approvalComment: "", merge: false, mergeMethod: "rebase", syncAssignee: false
+        review: .none, reviewComment: "", merge: false, mergeMethod: "rebase", syncAssignee: false
     )
+
+    /// Whitespace-only is empty — it satisfies neither the user's intent nor GitHub's
+    /// body requirement.
+    var trimmedReviewComment: String {
+        reviewComment.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The `event` to POST to the reviews API, or nil when no review should go out — including
+    /// when the mode's comment is mandatory (`PRReviewAction.requiresComment`) and blank, which
+    /// resolves to nil rather than to a review GitHub would reject.
+    var reviewEvent: String? {
+        guard let event = review.githubEvent else { return nil }
+        if review.requiresComment, trimmedReviewComment.isEmpty { return nil }
+        return event
+    }
+
+    /// A review was asked for and withheld only because its mandatory comment is blank. The
+    /// summary notification has to name that, rather than report it as a failed review.
+    var reviewBlockedForEmptyComment: Bool {
+        review.requiresComment && trimmedReviewComment.isEmpty
+    }
+
+    /// True when at least one PR action would be attempted.
+    var hasWork: Bool {
+        review != .none || merge || syncAssignee
+    }
 }
 
 /// Live view-model for the transition dialog's PR-actions section. AppDelegate populates it
@@ -24,6 +50,7 @@ final class PRActionsStatus: ObservableObject {
         let label: String
         let isMerged: Bool
         let viewerApproved: Bool
+        let viewerRequestedChanges: Bool
         let assignees: [String]
         let mergeCommitAllowed: Bool
         let squashMergeAllowed: Bool
@@ -43,6 +70,26 @@ final class PRActionsStatus: ObservableObject {
         case "rebase": return pr.rebaseMergeAllowed
         default:       return false
         }
+    }
+
+    /// Whether the viewer's latest review on `pr` is already `action`. Drives the status line.
+    func viewerSubmitted(_ action: PRReviewAction, on pr: LinkedPR) -> Bool {
+        switch action {
+        case .none:           return false
+        case .approve:        return pr.viewerApproved
+        case .requestChanges: return pr.viewerRequestedChanges
+        }
+    }
+
+    /// Whether submitting `action` again would add nothing, so the PR can be skipped.
+    ///
+    /// Only approvals: a second APPROVE on a PR you've already approved carries no information.
+    /// A second REQUEST_CHANGES does — its comment is the entire payload, and the case that
+    /// produces one is precisely when the viewer's latest review is already CHANGES_REQUESTED
+    /// (the ticket has come back a second time, GitHub doesn't clear the old review state, and
+    /// the endpoint accepts the repeat).
+    func resubmissionIsRedundant(_ action: PRReviewAction, on pr: LinkedPR) -> Bool {
+        action == .approve && pr.viewerApproved
     }
 }
 
@@ -71,8 +118,9 @@ struct TransitionDialog: View {
     @State private var selectedOptionValue: String = ""
     @State private var submitting: Bool = false
     @State private var updateGithub: Bool = true
-    @State private var prApprove: Bool = true
-    @State private var prApprovalComment: String = ""
+    @State private var prReview: Bool = true
+    @State private var prReviewComment: String = ""
+    @State private var showReviewCommentWarning: Bool = false
     @State private var prMerge: Bool = true
     @State private var prMergeMethod: String = "rebase"
     @State private var prSyncAssignee: Bool = true
@@ -110,7 +158,7 @@ struct TransitionDialog: View {
                 commentSection
             }
 
-            if hasPRActions {
+            if config.hasPRActions {
                 prActionsSection
             }
 
@@ -134,8 +182,32 @@ struct TransitionDialog: View {
         }
     }
 
-    private var hasPRActions: Bool {
-        config.enablePRApprove || config.enablePRMerge || config.enablePRAssigneeSync
+    private var reviewToggleLabel: String {
+        config.prReviewAction == .requestChanges
+            ? "Request changes on linked open PRs"
+            : "Approve linked open PRs"
+    }
+
+    /// Says "required" in request-changes mode, where GitHub won't take a bodyless review.
+    private var reviewCommentPlaceholder: String {
+        config.prReviewAction.requiresComment
+            ? "Review comment (required)"
+            : "Approval comment (optional)"
+    }
+
+    /// The blocked state: a review whose comment is mandatory, ticked, with nothing typed.
+    /// Submitting is refused while this holds — the review is the point of the transition, so
+    /// finishing without it would leave the ticket moved and the PR untouched.
+    private var reviewCommentMissing: Bool {
+        prReview
+            && config.prReviewAction.requiresComment
+            && prReviewComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Which review state the status line reports on. A merge-only or assignee-only config still
+    /// reports approvals, as it did before request-changes existed.
+    private var displayedReviewAction: PRReviewAction {
+        config.prReviewAction == .requestChanges ? .requestChanges : .approve
     }
 
     private var prActionsSection: some View {
@@ -145,16 +217,25 @@ struct TransitionDialog: View {
             // Status indicators fill in as the async PR enrichment lands.
             prStatusSummary
 
-            if config.enablePRApprove {
-                Toggle("Approve linked open PRs", isOn: $prApprove)
-                if prApprove {
-                    TextField("Approval comment (optional)", text: $prApprovalComment, axis: .vertical)
+            if config.prReviewAction != .none {
+                Toggle(reviewToggleLabel, isOn: $prReview)
+                if prReview {
+                    TextField(reviewCommentPlaceholder, text: $prReviewComment, axis: .vertical)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .lineLimit(2...5)
                         .padding(.leading, 20)
+                    // Raised by a submit attempt, not on open — an untouched dialog shouldn't
+                    // greet you with an error for something you haven't had a chance to type.
+                    if showReviewCommentWarning, reviewCommentMissing {
+                        Text("GitHub requires a comment on a request-changes review.")
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                            .padding(.leading, 20)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            if config.enablePRMerge {
+            if config.allowsPRMerge {
                 HStack {
                     Toggle("Merge linked open PRs", isOn: $prMerge)
                     Picker("Method:", selection: $prMergeMethod) {
@@ -193,9 +274,11 @@ struct TransitionDialog: View {
                     Text("Jira ticket is unassigned.").font(.footnote).foregroundColor(.secondary)
                 }
                 let total = prStatus.openPRs.count
-                let approved = prStatus.openPRs.filter(\.viewerApproved).count
+                let action = displayedReviewAction
+                let done = prStatus.openPRs.filter { prStatus.viewerSubmitted(action, on: $0) }.count
                 let merged = prStatus.openPRs.filter(\.isMerged).count
-                Text("You've approved \(approved)/\(total) open PR\(total == 1 ? "" : "s")\(merged > 0 ? "; \(merged) already merged." : ".")")
+                let verb = action == .requestChanges ? "requested changes on" : "approved"
+                Text("You've \(verb) \(done)/\(total) open PR\(total == 1 ? "" : "s")\(merged > 0 ? "; \(merged) already merged." : ".")")
                     .font(.footnote).foregroundColor(.secondary)
             }
         }
@@ -359,14 +442,18 @@ struct TransitionDialog: View {
 
     private func submit() {
         guard !submitting else { return }
+        if reviewCommentMissing {
+            showReviewCommentWarning = true
+            return
+        }
         submitting = true
         let flag = showGithubMirrorCheckbox && updateGithub
         let choices: PRActionChoices
-        if hasPRActions {
+        if config.hasPRActions {
             choices = PRActionChoices(
-                approve: config.enablePRApprove && prApprove,
-                approvalComment: prApprovalComment,
-                merge: config.enablePRMerge && prMerge,
+                review: prReview ? config.prReviewAction : .none,
+                reviewComment: prReviewComment,
+                merge: config.allowsPRMerge && prMerge,
                 mergeMethod: prMergeMethod,
                 syncAssignee: config.enablePRAssigneeSync && prSyncAssignee
             )
@@ -475,10 +562,11 @@ struct TransitionDialog: View {
         if config.hasTextField { h += config.textFieldMultiline ? 130 : 70 }
         if config.includeComment { h += 150 }
         if showGithubMirrorCheckbox { h += 24 }
-        if hasPRActions {
+        if config.hasPRActions {
             var pr: CGFloat = 60 // headline + status summary
-            if config.enablePRApprove { pr += (prApprove ? 90 : 24) }
-            if config.enablePRMerge { pr += 32 }
+            if config.prReviewAction != .none { pr += (prReview ? 90 : 24) }
+            if showReviewCommentWarning, reviewCommentMissing { pr += 20 } // required-comment warning
+            if config.allowsPRMerge { pr += 32 }
             if config.enablePRAssigneeSync { pr += 24 }
             h += pr
         }

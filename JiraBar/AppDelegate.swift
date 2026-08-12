@@ -927,8 +927,7 @@ extension AppDelegate {
         let showMirror = config.hasUserField
             && shouldShowGithubMirrorCheckbox(forJiraFieldId: config.userFieldId)
         let prStatus = PRActionsStatus()
-        let hasPRActions = config.enablePRApprove || config.enablePRMerge || config.enablePRAssigneeSync
-        if hasPRActions {
+        if config.hasPRActions {
             populatePRActionsStatus(prStatus, issueKey: issueKey)
         } else {
             prStatus.loading = false
@@ -993,7 +992,7 @@ extension AppDelegate {
                     if updateGithub, config.hasUserField {
                         self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
                     }
-                    if prActions.approve || prActions.merge || prActions.syncAssignee {
+                    if prActions.hasWork {
                         self?.applyPRActions(issueKey: issueKey, actions: prActions, prStatus: prStatus)
                     }
                 }
@@ -1373,6 +1372,7 @@ extension AppDelegate {
                                 label: "\(pr.repoSlug) #\(pr.numberOnly)",
                                 isMerged: gh?.isMerged ?? false,
                                 viewerApproved: gh?.viewerLatestReviewState == "APPROVED",
+                                viewerRequestedChanges: gh?.viewerLatestReviewState == "CHANGES_REQUESTED",
                                 assignees: gh?.assignees ?? [],
                                 mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,
                                 squashMergeAllowed: gh?.squashMergeAllowed ?? false,
@@ -1393,11 +1393,11 @@ extension AppDelegate {
         }
     }
 
-    /// Runs the transition dialog's PR-actions choices against every open linked PR: submits
-    /// an APPROVE review, merges using the chosen method (skipping any repo that disallows it),
-    /// and sets the Jira Assignee as PR Assignee when the PR has none. Uses the dialog's
-    /// already-enriched `PRActionsStatus` so we don't re-fetch per action. Posts a single
-    /// summary notification when the batch is done.
+    /// Runs the transition dialog's PR-actions choices against every open linked PR: submits the
+    /// chosen review (APPROVE or REQUEST_CHANGES), merges using the chosen method (skipping any
+    /// repo that disallows it), and sets the Jira Assignee as PR Assignee when the PR has none.
+    /// Uses the dialog's already-enriched `PRActionsStatus` so we don't re-fetch per action.
+    /// Posts a single summary notification when the batch is done.
     private func applyPRActions(issueKey: String, actions: PRActionChoices, prStatus: PRActionsStatus) {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
         guard !token.isEmpty else {
@@ -1413,32 +1413,35 @@ extension AppDelegate {
         let client = GithubClient()
         let group = DispatchGroup()
         let syncQueue = DispatchQueue(label: "prActions.apply")
-        var approveOK = 0, approveFail = 0
+        var reviewOK = 0, reviewFail = 0
         var mergeOK = 0, mergeFail = 0, mergeSkipped = 0
         var assignSetCount = 0, assignFail = 0, assignNotTouched = 0
         var assigneeLookupFailed = false
-        // PRs the viewer hasn't approved yet — the denominator for the approve summary
-        // (already-approved PRs are never attempted).
-        let approveAttempted = actions.approve ? candidates.filter { !$0.viewerApproved }.count : 0
+        // The denominator for the review summary: every candidate except the ones where the
+        // review would add nothing. Empty when no review is going out at all, including the
+        // blank-mandatory-comment case `reviewEvent` withholds.
+        let reviewTargets: [PRActionsStatus.LinkedPR] = actions.reviewEvent == nil
+            ? []
+            : candidates.filter { !prStatus.resubmissionIsRedundant(actions.review, on: $0) }
 
         // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
         // reuse across all PRs.
         let mapPath = self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces)
         let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
 
-        for pr in candidates {
-            if actions.approve && !pr.viewerApproved {
+        if let event = actions.reviewEvent {
+            for pr in reviewTargets {
                 group.enter()
-                client.submitPRReview(url: pr.url, event: "APPROVE", body: actions.approvalComment, token: token) { ok in
+                client.submitPRReview(url: pr.url, event: event, body: actions.trimmedReviewComment, token: token) { ok in
                     syncQueue.async {
-                        if ok { approveOK += 1 } else { approveFail += 1 }
+                        if ok { reviewOK += 1 } else { reviewFail += 1 }
                         group.leave()
                     }
                 }
             }
         }
 
-        // Approvals go out first; assignee sync + merges follow so they don't race a stale
+        // Reviews go out first; assignee sync + merges follow so they don't race a stale
         // "you haven't approved" merge-eligibility check on the GitHub side.
         group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
             let secondPassGroup = DispatchGroup()
@@ -1497,13 +1500,21 @@ extension AppDelegate {
 
             secondPassGroup.notify(queue: .main) {
                 var parts: [String] = []
-                if actions.approve {
-                    if approveAttempted > 0 {
-                        parts.append("approved \(approveOK)/\(approveAttempted)")
-                        if approveFail > 0 { parts.append("\(approveFail) approve failed") }
+                if actions.review != .none {
+                    if actions.reviewBlockedForEmptyComment {
+                        // Never silent: the review was withheld on purpose, not attempted and lost.
+                        parts.append("request changes skipped: a comment is required")
+                    } else {
+                        if !reviewTargets.isEmpty {
+                            let verb = actions.review == .requestChanges ? "requested changes on" : "approved"
+                            parts.append("\(verb) \(reviewOK)/\(reviewTargets.count)")
+                            if reviewFail > 0 { parts.append("\(reviewFail) review failed") }
+                        }
+                        // Approvals are the only review we skip as redundant, so this can only
+                        // ever be an already-approved count.
+                        let alreadyApproved = candidates.count - reviewTargets.count
+                        if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
                     }
-                    let alreadyApproved = candidates.count - approveAttempted
-                    if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
                 }
                 if actions.merge {
                     let mergeAttempted = candidates.count - mergeSkipped

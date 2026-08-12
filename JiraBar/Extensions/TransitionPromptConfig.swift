@@ -1,6 +1,31 @@
 import Foundation
 import Defaults
 
+/// Which review a transition submits on each linked open PR. One choice, so approving and
+/// requesting changes can't both be asked for.
+///
+/// Deliberately not `Codable`: the two `Bool`s below are what persist, so a settings file can
+/// never carry an unknown case whose decode would fail and take the whole prompt array with it.
+enum PRReviewAction: Hashable {
+    case none
+    case approve
+    case requestChanges
+
+    /// `event` value for the GitHub reviews API; nil when no review is submitted.
+    var githubEvent: String? {
+        switch self {
+        case .none:           return nil
+        case .approve:        return "APPROVE"
+        case .requestChanges: return "REQUEST_CHANGES"
+        }
+    }
+
+    /// Whether the review can't be submitted without a comment. GitHub's reviews API documents
+    /// `body` as "Required when using REQUEST_CHANGES or COMMENT for the event parameter" —
+    /// APPROVE is the one that accepts a bodyless review.
+    var requiresComment: Bool { self == .requestChanges }
+}
+
 /// Per-transition prompt configuration. Generic by design — users define which transition names
 /// open a prompt and which custom fields to expose. Nothing in this struct is specific to any
 /// particular Jira workflow or instance.
@@ -38,10 +63,12 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// Options the user can choose from. Each option's `value` is what the API receives.
     var selectOptions: [TransitionSelectOption] = []
 
-    /// When true, the dialog exposes an "Approve linked PRs" checkbox (default on) and an
-    /// approval-comment box. On submit, each linked open GitHub PR gets an APPROVE review.
-    /// Requires a GitHub token; no-op when missing.
+    /// Backing store for `prReviewAction == .approve`. Read `prReviewAction` instead — it
+    /// resolves this against `enablePRRequestChanges`, which can't be true at the same time.
     var enablePRApprove: Bool = false
+
+    /// Backing store for `prReviewAction == .requestChanges`. Read `prReviewAction` instead.
+    var enablePRRequestChanges: Bool = false
 
     /// When true, the dialog exposes a "Merge linked PRs" checkbox (default on) and a merge
     /// method picker (see `prMergeMethod`). PRs whose repos disallow the chosen method are
@@ -55,6 +82,36 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// When true, on submit JiraBar adds the ticket's Jira Assignee (mapped via the Jira →
     /// GitHub file) as the PR assignee — only when the PR has no assignee yet.
     var enablePRAssigneeSync: Bool = false
+
+    /// The review this transition submits, over the two stored flags. The setter writes them
+    /// exclusively, so the Preferences picker can't produce a contradictory pair.
+    ///
+    /// Settings edited by hand still can, and there the getter resolves to `.requestChanges`:
+    /// wrongly approving someone's PR is a wrong review, while an unintended request for changes
+    /// can be dismissed.
+    var prReviewAction: PRReviewAction {
+        get {
+            if enablePRRequestChanges { return .requestChanges }
+            return enablePRApprove ? .approve : .none
+        }
+        set {
+            enablePRApprove = (newValue == .approve)
+            enablePRRequestChanges = (newValue == .requestChanges)
+        }
+    }
+
+    /// Merging a PR you just asked for changes on is nonsense, so request-changes mode withdraws
+    /// the merge action outright. Computed rather than validated on save so it holds for every
+    /// input path, including a hand-edited settings file.
+    var allowsPRMerge: Bool {
+        enablePRMerge && prReviewAction != .requestChanges
+    }
+
+    /// True when this transition has any PR action to run — what gates the dialog's PR section
+    /// and the status enrichment that feeds it.
+    var hasPRActions: Bool {
+        prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync
+    }
 
     func matches(transitionName incoming: String) -> Bool {
         let a = incoming.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -104,7 +161,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         case userFieldId, userFieldLabel, userFieldAllowsMultiple, userFieldDefaultsToCurrentUser
         case textFieldId, textFieldLabel, textFieldMultiline
         case selectFieldId, selectFieldLabel, selectOptions
-        case enablePRApprove, enablePRMerge, prMergeMethod, enablePRAssigneeSync
+        case enablePRApprove, enablePRRequestChanges, enablePRMerge, prMergeMethod, enablePRAssigneeSync
     }
 
     init(from decoder: Decoder) throws {
@@ -123,6 +180,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.selectFieldLabel = try c.decodeIfPresent(String.self, forKey: .selectFieldLabel) ?? "Select…"
         self.selectOptions = try c.decodeIfPresent([TransitionSelectOption].self, forKey: .selectOptions) ?? []
         self.enablePRApprove = try c.decodeIfPresent(Bool.self, forKey: .enablePRApprove) ?? false
+        self.enablePRRequestChanges = try c.decodeIfPresent(Bool.self, forKey: .enablePRRequestChanges) ?? false
         self.enablePRMerge = try c.decodeIfPresent(Bool.self, forKey: .enablePRMerge) ?? false
         self.prMergeMethod = try c.decodeIfPresent(String.self, forKey: .prMergeMethod) ?? "rebase"
         self.enablePRAssigneeSync = try c.decodeIfPresent(Bool.self, forKey: .enablePRAssigneeSync) ?? false

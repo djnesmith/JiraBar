@@ -616,7 +616,15 @@ private struct TransitionPromptRow: View {
 
                     GroupBox("PR actions (optional)") {
                         VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Auto-approve linked open PRs (with approval comment box)", isOn: $prompt.enablePRApprove)
+                            // One picker, not two checkboxes: a review is either an approval or a
+                            // request for changes, never both.
+                            Picker("Review linked open PRs:", selection: $prompt.prReviewAction) {
+                                Text("Don't review").tag(PRReviewAction.none)
+                                Text("Approve").tag(PRReviewAction.approve)
+                                Text("Request changes").tag(PRReviewAction.requestChanges)
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 320)
                             HStack {
                                 Toggle("Auto-merge linked open PRs", isOn: $prompt.enablePRMerge)
                                 Picker("Method:", selection: $prompt.prMergeMethod) {
@@ -628,11 +636,23 @@ private struct TransitionPromptRow: View {
                                 .frame(width: 180)
                                 .disabled(!prompt.enablePRMerge)
                             }
+                            .disabled(prompt.prReviewAction == .requestChanges)
                             Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prompt.enablePRAssigneeSync)
-                            Text("Runs after the Jira transition succeeds. Requires a GitHub Token; PRs whose repos disallow the chosen merge method are skipped with a summary notification.")
+                            Text("Runs after the Jira transition succeeds. Requires a GitHub Token.")
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if prompt.prReviewAction == .requestChanges {
+                                Text("Request changes needs a comment — GitHub rejects a request-changes review without one, so the dialog won't submit until you write one. Merging is unavailable in this mode.")
+                                    .font(.footnote)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else if prompt.allowsPRMerge {
+                                Text("PRs whose repos disallow the chosen merge method are skipped with a summary notification.")
+                                    .font(.footnote)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         .padding(.vertical, 4)
                     }
