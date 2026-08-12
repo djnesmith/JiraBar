@@ -83,6 +83,7 @@ final class AppDelegateHelpersTests: XCTestCase {
             reviewDecision: nil, unresolvedThreads: 0, totalThreads: 0, ciState: ciState,
             isMerged: false, mergedAt: nil, latestReleasePublishedAt: nil,
             defaultBranchCIState: nil, viewerLatestReviewState: nil, assignees: [],
+            pendingReviewers: [], reviews: [],
             mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true,
             headRefName: nil, isDraft: isDraft
         )
@@ -219,5 +220,125 @@ final class UserFieldMenuLabelTests: XCTestCase {
     /// An unprefixed label still renders unchanged on an empty field — no invented wording.
     func testEmptyFieldWithAnUnprefixedLabelIsUnchanged() {
         XCTAssertEqual(AppDelegate.userFieldMenuLabel(configured: "Reviewers", users: []), "Reviewers")
+    }
+}
+
+/// The ownership line on a "PRs Without Tickets" row — the one section with no ticket context, so the
+/// only place "who owns this?" is unanswerable from the menu.
+final class OwnershipPiecesTests: XCTestCase {
+
+    private func review(_ login: String, _ state: String) -> PRReview {
+        PRReview(login: login, state: state)
+    }
+
+    private func text(_ pieces: [(String, String)]) -> [String] { pieces.map(\.0) }
+
+    // MARK: - an absent read may not claim anything
+
+    /// nil status means the GitHub read failed or there is no token. "unassigned" would be a claim.
+    func testNilStatusRendersNoLineAtAll() {
+        XCTAssertTrue(AppDelegate.ownershipPieces(status: nil).isEmpty)
+    }
+
+    /// The reviewer half is withheld when the connections were missing from the response — a partial
+    /// read must not turn into "no reviewers".
+    func testAbsentReviewerConnectionsWithholdTheReviewerHalf() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["djnesmith"], pendingReviewers: nil, reviews: nil
+        )
+        XCTAssertEqual(text(pieces), ["assignee: djnesmith"], "no reviewer claim either way")
+    }
+
+    // MARK: - nobody home must be said, not omitted
+
+    /// A blank reads as "didn't load". Only a successful read reaches this function, so it can assert.
+    func testNoAssigneeSaysUnassigned() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: [], pendingReviewers: ["jgerman"], reviews: []
+        )
+        XCTAssertEqual(text(pieces).first, "unassigned")
+    }
+
+    func testNoReviewersSaysSo() {
+        let pieces = AppDelegate.ownershipPieces(assignees: ["djnesmith"], pendingReviewers: [], reviews: [])
+        XCTAssertEqual(text(pieces), ["assignee: djnesmith", "no reviewers"])
+    }
+
+    func testSingleAndMultipleAssigneesAreLabelledDifferently() {
+        XCTAssertEqual(
+            text(AppDelegate.ownershipPieces(assignees: ["a"], pendingReviewers: ["x"], reviews: [])).first,
+            "assignee: a"
+        )
+        XCTAssertEqual(
+            text(AppDelegate.ownershipPieces(assignees: ["a", "b"], pendingReviewers: ["x"], reviews: [])).first,
+            "assignees: a, b"
+        )
+    }
+
+    // MARK: - reviewed and merely-asked are different facts
+
+    func testCompletedReviewsAndPendingRequestsBothAppear() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["djnesmith"],
+            pendingReviewers: ["alice"],
+            reviews: [review("jgerman", "APPROVED")]
+        )
+        XCTAssertEqual(text(pieces), ["assignee: djnesmith", "jgerman approved", "alice pending"])
+    }
+
+    func testEachReviewStateGetsItsOwnWording() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["d"],
+            pendingReviewers: [],
+            reviews: [
+                review("a", "APPROVED"),
+                review("b", "CHANGES_REQUESTED"),
+                review("c", "COMMENTED"),
+            ]
+        )
+        XCTAssertEqual(
+            text(pieces),
+            ["assignee: d", "a approved", "b requested changes", "c commented"]
+        )
+    }
+
+    /// A dismissed review carries no signal, and an unknown future state must not render raw.
+    func testDismissedAndUnknownStatesAreDropped() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["d"],
+            pendingReviewers: ["x"],
+            reviews: [review("a", "DISMISSED"), review("b", "SOMETHING_NEW")]
+        )
+        XCTAssertEqual(text(pieces), ["assignee: d", "x pending"])
+    }
+
+    /// Only dropped states plus no pending requests still has to say something about reviewers.
+    func testAllStatesDroppedFallsBackToNoReviewers() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["d"], pendingReviewers: [], reviews: [review("a", "DISMISSED")]
+        )
+        XCTAssertEqual(text(pieces).last, "no reviewers", "a dismissed-only PR is not silently reviewer-less")
+    }
+
+    // MARK: - colours come from the existing palette
+
+    func testAllEmptySaysBothThings() {
+        XCTAssertEqual(
+            text(AppDelegate.ownershipPieces(assignees: [], pendingReviewers: [], reviews: [])),
+            ["unassigned", "no reviewers"]
+        )
+    }
+
+    func testReviewStateColoursAreTheSameHexesLine3Uses() {
+        let pieces = AppDelegate.ownershipPieces(
+            assignees: ["d"],
+            pendingReviewers: ["x"],
+            reviews: [review("a", "APPROVED"), review("b", "CHANGES_REQUESTED")]
+        )
+        let byText = Dictionary(uniqueKeysWithValues: pieces.map { ($0.0, $0.1) })
+        XCTAssertEqual(byText["a approved"], "#2DA44E")
+        XCTAssertEqual(byText["b requested changes"], "#CF222E")
+        XCTAssertEqual(byText["x pending"], "#888888")
+        XCTAssertEqual(byText["assignee: d"], "#888888")
     }
 }

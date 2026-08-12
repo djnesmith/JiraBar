@@ -8,6 +8,13 @@
 import Foundation
 import Alamofire
 
+/// One completed review: who left it and what it said.
+struct PRReview {
+    let login: String
+    /// "APPROVED" / "CHANGES_REQUESTED" / "COMMENTED" / "DISMISSED".
+    let state: String
+}
+
 /// Enriched pull request data pulled from GitHub's GraphQL API, layered on top of Jira's
 /// (often stale) dev-status view. All fields are optional / defaulted so a partial response
 /// still renders something useful.
@@ -33,6 +40,12 @@ struct GithubPRStatus {
     var viewerLatestReviewState: String?
     /// GitHub logins currently assigned to the PR.
     var assignees: [String]
+    /// Logins (or team names) asked for a review who haven't left one yet. nil when the connection was
+    /// absent from the response — unknown, which must not render as "nobody was asked".
+    var pendingReviewers: [String]?
+    /// Reviews actually left, one per reviewer. Distinct from `pendingReviewers`: "asked jgerman" and
+    /// "jgerman requested changes" are different facts. nil when absent, as above.
+    var reviews: [PRReview]?
     /// Merge methods the repo permits. Used by the auto-merge flow to skip PRs whose repo
     /// disallows the chosen method.
     var mergeCommitAllowed: Bool
@@ -123,6 +136,10 @@ public class GithubClient {
               isDraft
               viewerLatestReview { state }
               assignees(first: 10) { nodes { login } }
+              reviewRequests(first: 20) {
+                nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
+              }
+              latestReviews(first: 20) { nodes { state author { login } } }
               reviewThreads(first: 100) { nodes { isResolved } }
               commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
             }
@@ -182,6 +199,8 @@ public class GithubClient {
                     let viewerLatestReviewState = (prDict["viewerLatestReview"] as? [String: Any])?["state"] as? String
                     let assigneeNodes = ((prDict["assignees"] as? [String: Any])?["nodes"] as? [[String: Any]]) ?? []
                     let assignees = assigneeNodes.compactMap { $0["login"] as? String }
+                    let pendingReviewers = GithubClient.pendingReviewers(fromConnection: prDict["reviewRequests"])
+                    let reviews = GithubClient.reviews(fromConnection: prDict["latestReviews"])
                     let mergeCommitAllowed = (repoDict["mergeCommitAllowed"] as? Bool) ?? false
                     let squashMergeAllowed = (repoDict["squashMergeAllowed"] as? Bool) ?? false
                     let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
@@ -200,6 +219,8 @@ public class GithubClient {
                         defaultBranchCIState: defaultBranchCIState,
                         viewerLatestReviewState: viewerLatestReviewState,
                         assignees: assignees,
+                        pendingReviewers: pendingReviewers,
+                        reviews: reviews,
                         mergeCommitAllowed: mergeCommitAllowed,
                         squashMergeAllowed: squashMergeAllowed,
                         rebaseMergeAllowed: rebaseMergeAllowed,
@@ -571,6 +592,31 @@ public class GithubClient {
             }
         }
         page(after: nil)
+    }
+
+    /// Who has been asked for a review and hasn't left one, or nil when the connection is missing —
+    /// unknown, since a caller that rendered "nobody was asked" from that would be asserting a fact the
+    /// response does not contain.
+    ///
+    /// A requested reviewer is a union: a Team arrives with `name` rather than `login`, and dropping it
+    /// would leave a PR that has a reviewer claiming it has none.
+    static func pendingReviewers(fromConnection connection: Any?) -> [String]? {
+        guard let nodes = (connection as? [String: Any])?["nodes"] as? [[String: Any]] else { return nil }
+        return nodes.compactMap { node in
+            guard let reviewer = node["requestedReviewer"] as? [String: Any] else { return nil }
+            return (reviewer["login"] as? String) ?? (reviewer["name"] as? String)
+        }
+    }
+
+    /// Reviews actually left, or nil when the connection is missing.
+    static func reviews(fromConnection connection: Any?) -> [PRReview]? {
+        guard let nodes = (connection as? [String: Any])?["nodes"] as? [[String: Any]] else { return nil }
+        return nodes.compactMap { node in
+            guard let login = (node["author"] as? [String: Any])?["login"] as? String,
+                  let state = node["state"] as? String
+            else { return nil }
+            return PRReview(login: login, state: state)
+        }
     }
 
     /// Picks the unresolved threads out of one page of nodes. Split out so the shape-handling is

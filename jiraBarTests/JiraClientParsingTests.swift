@@ -191,3 +191,53 @@ final class FieldUsersParsingTests: XCTestCase {
         XCTAssertNil(JiraClient.fieldUsers(from: ["f": 42], fieldId: "f"))
     }
 }
+
+/// Parsing the two reviewer connections. A missing connection is unknown; a Team reviewer is a reviewer.
+final class ReviewerConnectionParsingTests: XCTestCase {
+
+    func testAbsentConnectionIsUnknown() {
+        XCTAssertNil(GithubClient.pendingReviewers(fromConnection: nil))
+        XCTAssertNil(GithubClient.reviews(fromConnection: nil))
+        XCTAssertNil(GithubClient.pendingReviewers(fromConnection: ["unexpected": 1]))
+    }
+
+    func testEmptyConnectionIsAKnownEmptyAnswer() {
+        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: ["nodes": [[String: Any]]()])?.count, 0)
+        XCTAssertEqual(GithubClient.reviews(fromConnection: ["nodes": [[String: Any]]()])?.count, 0)
+    }
+
+    func testUserReviewerReadsItsLogin() {
+        let connection: [String: Any] = ["nodes": [["requestedReviewer": ["login": "jgerman"]]]]
+        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: connection), ["jgerman"])
+    }
+
+    /// A requested reviewer can be a Team, which has a name and no login. Dropping it made the row claim
+    /// "no reviewers" for a PR that has one.
+    func testTeamReviewerReadsItsName() {
+        let connection: [String: Any] = ["nodes": [["requestedReviewer": ["name": "data-platform"]]]]
+        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: connection), ["data-platform"])
+    }
+
+    func testReviewerNodeWithNeitherIsSkipped() {
+        let connection: [String: Any] = ["nodes": [["requestedReviewer": [String: Any]()]]]
+        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: connection), [])
+    }
+
+    func testReviewsReadAuthorAndState() {
+        let connection: [String: Any] = [
+            "nodes": [
+                ["state": "APPROVED", "author": ["login": "jgerman"]],
+                ["state": "CHANGES_REQUESTED", "author": ["login": "alice"]],
+            ]
+        ]
+        let reviews = GithubClient.reviews(fromConnection: connection)
+        XCTAssertEqual(reviews?.map(\.login), ["jgerman", "alice"])
+        XCTAssertEqual(reviews?.map(\.state), ["APPROVED", "CHANGES_REQUESTED"])
+    }
+
+    /// A review from a deleted account has a null author and cannot be attributed.
+    func testReviewWithoutAnAuthorIsSkipped() {
+        let connection: [String: Any] = ["nodes": [["state": "APPROVED"]]]
+        XCTAssertEqual(GithubClient.reviews(fromConnection: connection)?.count, 0)
+    }
+}

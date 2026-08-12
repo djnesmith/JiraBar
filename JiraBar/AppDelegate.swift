@@ -537,6 +537,59 @@ extension AppDelegate {
         return item
     }
 
+    /// The "who owns this" line for a PR row: who it is assigned to, and where its reviews stand.
+    ///
+    /// Empty for a nil status, and the reviewer half is omitted when the reviewer connections were
+    /// absent: "unassigned" and "no reviewers" are claims, and a read that didn't arrive cannot support
+    /// them. Returns (text, hex) pieces for the caller to join, as line 3 does.
+    static func ownershipPieces(status: GithubPRStatus?) -> [(String, String)] {
+        guard let status else { return [] }
+        return ownershipPieces(
+            assignees: status.assignees,
+            pendingReviewers: status.pendingReviewers,
+            reviews: status.reviews
+        )
+    }
+
+    static func ownershipPieces(
+        assignees: [String],
+        pendingReviewers: [String]?,
+        reviews: [PRReview]?
+    ) -> [(String, String)] {
+        var pieces: [(String, String)] = []
+        if assignees.isEmpty {
+            pieces.append(("unassigned", "#BF6900"))
+        } else {
+            let label = assignees.count == 1 ? "assignee" : "assignees"
+            pieces.append(("\(label): \(assignees.joined(separator: ", "))", "#888888"))
+        }
+
+        let assigneePieceCount = pieces.count
+        for review in reviews ?? [] {
+            switch review.state.uppercased() {
+            case "APPROVED":
+                pieces.append(("\(review.login) approved", "#2DA44E"))
+            case "CHANGES_REQUESTED":
+                pieces.append(("\(review.login) requested changes", "#CF222E"))
+            case "COMMENTED":
+                pieces.append(("\(review.login) commented", "#888888"))
+            default:
+                break // DISMISSED and anything new carry no signal worth a row
+            }
+        }
+        for login in pendingReviewers ?? [] {
+            pieces.append(("\(login) pending", "#888888"))
+        }
+
+        // Keyed on what actually rendered, not on the input arrays: a PR whose only review was dismissed
+        // has reviews and yet nothing to show, and a silent gap there reads as "didn't load". Withheld
+        // entirely when either connection was missing, since then nothing is known to report.
+        if pieces.count == assigneePieceCount, reviews != nil, pendingReviewers != nil {
+            pieces.append(("no reviewers", "#BF6900"))
+        }
+        return pieces
+    }
+
     /// What a user-field shortcut should read once its value is known.
     ///
     /// nil `users` is a **failed read**, and unknown is not empty: it keeps the configured label rather
@@ -1873,7 +1926,7 @@ extension AppDelegate {
             }
             let submenu = NSMenu()
             for pr in survivors {
-                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: submenu)
+                self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: submenu, showOwnership: true)
             }
             item.submenu = submenu
         }
@@ -1952,7 +2005,12 @@ extension AppDelegate {
     /// Builds one PR row and appends it to the given menu — a ticket's submenu, or the
     /// "PRs Without Tickets" submenu. Renders 3 lines when GitHub data is available (approval /
     /// unresolved / CI on line 3), otherwise 2 lines with the legacy Jira-derived indicator.
-    private func addPRMenuItem(pr: JiraPullRequest, ghStatus: GithubPRStatus?, to menu: NSMenu) {
+    private func addPRMenuItem(
+        pr: JiraPullRequest,
+        ghStatus: GithubPRStatus?,
+        to menu: NSMenu,
+        showOwnership: Bool = false
+    ) {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: pr.name.trunc(length: 50))
             .appendNewLine()
@@ -1976,6 +2034,17 @@ extension AppDelegate {
             // Fallback when GitHub data isn't available but Jira has an approved flag.
             title.appendString(string: " - ", color: "#888888")
             title.appendString(string: "approved", color: "#2DA44E")
+        }
+
+        if showOwnership {
+            let pieces = AppDelegate.ownershipPieces(status: ghStatus)
+            if !pieces.isEmpty {
+                title.appendNewLine()
+                for (index, piece) in pieces.enumerated() {
+                    if index > 0 { title.appendString(string: " · ", color: "#888888") }
+                    title.appendString(string: piece.0, color: piece.1)
+                }
+            }
         }
 
         let urlString = pr.url
