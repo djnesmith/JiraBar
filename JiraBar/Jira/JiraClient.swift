@@ -33,6 +33,16 @@ public class JiraClient {
         }
     }
 
+    /// False before the instance has been set up at all — no Cloud org, or no Server host. Every
+    /// request would then go to a URL like `https://.atlassian.net`, which fails DNS and is worth no
+    /// notification: nothing is wrong except that the app hasn't been configured yet.
+    var isConfigured: Bool {
+        switch instanceType {
+        case .cloud:  return !orgName.trimmingCharacters(in: .whitespaces).isEmpty
+        case .server: return !jiraHost.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
     /// Jira Server/Data Center only supports REST API v2.
     /// Cloud supports both v2 and v3; we use v3 for richer field types on Cloud.
     private var apiVersion: String {
@@ -92,6 +102,13 @@ public class JiraClient {
         maxResults overrideMaxResults: String? = nil,
         completion: @escaping ((JiraResponse, [String: String]) -> Void)
     ) {
+        // An unconfigured instance has nothing to search. Returning empty beats firing a DNS failure
+        // at the user as a notification banner — which is exactly what a fresh install, and this
+        // app's own test host, used to do on every refresh.
+        guard isConfigured else {
+            completion(JiraResponse(), [:])
+            return
+        }
         // Cloud introduced the /search/jql endpoint; Server only supports /search
         let searchPath = instanceType == .cloud ? "search/jql" : "search"
         let url = "\(baseUrl)/rest/api/\(apiVersion)/\(searchPath)"
@@ -771,22 +788,39 @@ public class JiraClient {
 }
 
 
+/// The single seam every user-facing notification goes through.
+///
+/// `deliver` is substitutable so a test can record what would have been posted instead of posting
+/// it. That is not only hygiene: this app is hosted inside its own test bundle, so anything reaching
+/// a process-global — the notification centre, the pasteboard, the login-item registry — reaches the
+/// real one on the developer's machine. It also buys a better assertion than a boolean: the exact
+/// body text and the number of notifications.
+///
+/// Deliberately not gated on "are we running tests". A build flag or an `isRunningTests` check would
+/// leave the production path unexercised and hide the fact that the dependency was never injected.
+enum UserNotice {
+    /// Replaced by tests with a recorder; restored in `tearDown`.
+    static var deliver: (String) -> Void = postToNotificationCentre
+
+    static func postToNotificationCentre(_ body: String) {
+        let content = UNMutableNotificationContent()
+        // Neutral title — body text already conveys success vs failure (e.g. "Comment failed:" /
+        // "Copied PR URL"). Previously hardcoded as "JiraBar Error" which mislabeled success cases.
+        content.title = "JiraBar"
+        if !body.isEmpty {
+            content.body = body
+        }
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        let notificationCentre = UNUserNotificationCenter.current()
+        notificationCentre.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        notificationCentre.add(request)
+    }
+}
+
 func sendNotification(body: String = "") {
-  let content = UNMutableNotificationContent()
-  // Neutral title — body text already conveys success vs failure (e.g. "Comment failed:" /
-  // "Copied PR URL"). Previously hardcoded as "JiraBar Error" which mislabeled success cases.
-  content.title = "JiraBar"
-
-  if body.count > 0 {
-    content.body = body
-  }
-
-  let uuidString = UUID().uuidString
-  let request = UNNotificationRequest(
-    identifier: uuidString,
-    content: content, trigger: nil)
-
-  let notificationCenter = UNUserNotificationCenter.current()
-  notificationCenter.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-  notificationCenter.add(request)
+    UserNotice.deliver(body)
 }
