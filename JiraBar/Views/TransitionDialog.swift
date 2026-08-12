@@ -61,6 +61,23 @@ enum TransitionSubmitOutcome {
     case prActionsIncomplete(lines: [String])
 }
 
+/// Which fields Jira itself says the transition requires, filled in asynchronously after the dialog
+/// opens (same pattern as `PRActionsStatus`).
+final class TransitionFieldRequirements: ObservableObject {
+    @Published var loading: Bool = true
+    @Published var requiredFieldIds: Set<String> = []
+    /// True when the metadata read failed. Requiredness is then *unknown*, not empty — the dialog
+    /// fails closed rather than letting a submit through that Jira would refuse.
+    @Published var fetchFailed: Bool = false
+
+    /// Marks the fetch finished. `ids == nil` means the read failed.
+    func finish(_ ids: Set<String>?) {
+        requiredFieldIds = ids ?? []
+        fetchFailed = (ids == nil)
+        loading = false
+    }
+}
+
 /// Live view-model for the transition dialog's PR-actions section. AppDelegate populates it
 /// asynchronously (after enriching each linked open PR via GitHub GraphQL) so the dialog
 /// can show status indicators — "you've approved 2/3", etc. — without blocking on open.
@@ -126,6 +143,8 @@ struct TransitionDialog: View {
     /// Optional live status feed for the PR-actions section. Nil when the transition's
     /// prompt config has no PR actions enabled.
     @ObservedObject var prStatus: PRActionsStatus
+    /// Jira's own required-field metadata for this transition, filled in after open.
+    @ObservedObject var requirements: TransitionFieldRequirements
     let onSubmit: (String, [JiraUser], String, String, Bool, PRActionChoices, @escaping (TransitionSubmitOutcome) -> Void) -> Void
     let onCancel: () -> Void
 
@@ -154,6 +173,12 @@ struct TransitionDialog: View {
     @State private var prNote: String?
     /// True when the refusal came after the field values had already been written.
     @State private var submitErrorAfterFieldsWritten: Bool = false
+    /// True while the user picker still holds exactly what was prefilled and nothing was touched.
+    /// Only interesting for a required field: a prefill satisfies the gate without a decision being
+    /// made, so it gets said out loud rather than passing silently.
+    @State private var userSelectionIsUntouchedPrefill: Bool = false
+    /// Whether that prefill came from `userFieldDefaultsToCurrentUser` rather than the ticket.
+    @State private var prefillWasCurrentUser: Bool = false
     /// True once Jira has accepted the transition. The window may still be open — waiting on PR
     /// actions, or reporting that some failed — but re-submitting is no longer the right offer.
     @State private var transitionApplied: Bool = false
@@ -478,7 +503,38 @@ struct TransitionDialog: View {
         if config.hasPRActions, prStatus.loading {
             problems.append("Still checking linked PRs…")
         }
+        if config.hasGatableField {
+            if requirements.loading {
+                problems.append("Checking which fields Jira requires…")
+            } else if requirements.fetchFailed {
+                // Fail closed. Unknown is not false: guessing "nothing is required" would hand back
+                // the silent failure this whole change removes. Cheap, too — if Jira is unreachable
+                // for the metadata it is unreachable for the transition.
+                problems.append("Couldn't check which fields Jira requires. Reopen the dialog to retry.")
+            }
+        }
+        problems.append(contentsOf: config.missingRequirements(
+            selectedUserCount: selectedUsers.count,
+            textValue: freeText,
+            selectValue: selectedOptionValue,
+            jiraRequiredFieldIds: requirements.requiredFieldIds
+        ))
         return problems
+    }
+
+    /// A required user field that is satisfied only by the current-user prefill. Not a blocker — the
+    /// default was configured deliberately — but transitioning with yourself as tester when you meant
+    /// someone else is a quiet wrong outcome, so it is named.
+    private var prefillSatisfiesRequirementSilently: Bool {
+        config.hasUserField
+            && config.fieldIsRequired(
+                config.userFieldId,
+                manualFlag: config.userFieldRequired,
+                jiraRequiredFieldIds: requirements.requiredFieldIds
+            )
+            && userSelectionIsUntouchedPrefill
+            && prefillWasCurrentUser
+            && !selectedUsers.isEmpty
     }
 
     /// Truthful about scope. The field values go out as a PUT before the transition POST, so a
@@ -492,6 +548,11 @@ struct TransitionDialog: View {
 
     @ViewBuilder
     private var validationSection: some View {
+        if !transitionApplied, prefillSatisfiesRequirementSilently {
+            Text("\(config.userFieldLabel) is required and was prefilled with you — change it if someone else should be named.")
+                .font(.footnote).foregroundColor(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if !transitionApplied, !validationProblems.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(validationProblems, id: \.self) { problem in
@@ -618,6 +679,7 @@ struct TransitionDialog: View {
     // MARK: - Helpers
 
     private func toggle(_ user: JiraUser) {
+        userSelectionIsUntouchedPrefill = false
         if selectedUsers.contains(user) {
             selectedUsers.remove(user)
         } else {
@@ -660,7 +722,7 @@ struct TransitionDialog: View {
         if config.userFieldDefaultsToCurrentUser {
             client.getCurrentUser { me in
                 DispatchQueue.main.async {
-                    if let me { self.applyPrefill([me]) }
+                    if let me { self.applyPrefill([me], wasCurrentUser: true) }
                 }
             }
         } else {
@@ -680,12 +742,16 @@ struct TransitionDialog: View {
 
     /// Maps prefill candidates to instances already in `availableUsers` so the row checkboxes
     /// light up; falls back to the raw user otherwise (still selected, just not in the visible list).
-    private func applyPrefill(_ candidates: [JiraUser]) {
+    private func applyPrefill(_ candidates: [JiraUser], wasCurrentUser: Bool = false) {
         guard !candidates.isEmpty else { return }
         let matched: [JiraUser] = candidates.map { candidate in
             availableUsers.first(where: { Self.sameUser($0, candidate) }) ?? candidate
         }
         selectedUsers = Set(matched)
+        // Remembered so a required field satisfied purely by a prefill can say so. Cleared by the
+        // first click in `toggle`.
+        userSelectionIsUntouchedPrefill = true
+        prefillWasCurrentUser = wasCurrentUser
         arrangeSelectedFirst()
     }
 
@@ -722,6 +788,7 @@ struct TransitionDialog: View {
         // Room for whatever the window is currently reporting. Growth rather than a scroll view:
         // an error the user has to scroll to find is the problem we're fixing.
         if !transitionApplied { h += CGFloat(validationProblems.count) * 18 }
+        if !transitionApplied, prefillSatisfiesRequirementSilently { h += 32 }
         if submitError != nil { h += 52 }
         if prNote != nil { h += 52 }
         if !prFailureLines.isEmpty { h += 48 + CGFloat(prFailureLines.count) * 18 }

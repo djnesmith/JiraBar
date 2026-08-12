@@ -47,6 +47,17 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// Pre-selects the authenticated Jira user when the dialog opens.
     /// Useful for transitions like "Start Progress" where the assignee defaults to whoever's acting.
     var userFieldDefaultsToCurrentUser: Bool = false
+    /// Marks this field required even when Jira's transition screen does not.
+    ///
+    /// **Not** a fallback for metadata we failed to fetch — see `requiredFieldIds`. A rule enforced
+    /// by a workflow validator (a Jira Expression, ScriptRunner, JMWE) is invisible to the
+    /// transition screen's `required` flag: the flag reads `false` while the transition is rejected
+    /// with a message like "Testers are required before moving into QA.". Verified against a live
+    /// instance — transition "Ready for QA" reports its Testers multiuserpicker as
+    /// `required: false`, while a genuinely screen-required field (`resolution` on a Force Close)
+    /// reports `required: true`. So this flag is the only way to express such a rule locally.
+    /// Do not "simplify" it away by trusting Jira's flag.
+    var userFieldRequired: Bool = false
 
     /// Optional free-text custom field. Empty `textFieldId` disables this section.
     var textFieldId: String = ""
@@ -54,6 +65,8 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     var textFieldLabel: String = "Notes"
     /// Renders a multi-line editor instead of a single-line text field.
     var textFieldMultiline: Bool = true
+    /// Marks this field required even when Jira's transition screen does not. See `userFieldRequired`.
+    var textFieldRequired: Bool = false
 
     /// Optional select-dropdown field. Empty `selectFieldId` disables this section.
     /// Works for system fields like `resolution` and custom select fields. Sent as `{fieldId: {id: value}}`.
@@ -62,6 +75,8 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     var selectFieldLabel: String = "Select…"
     /// Options the user can choose from. Each option's `value` is what the API receives.
     var selectOptions: [TransitionSelectOption] = []
+    /// Marks this field required even when Jira's transition screen does not. See `userFieldRequired`.
+    var selectFieldRequired: Bool = false
 
     /// Backing store for `prReviewAction == .approve`. Read `prReviewAction` instead — the
     /// Preferences picker can't set this and `enablePRRequestChanges` together, but a hand-edited
@@ -114,6 +129,54 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync
     }
 
+    /// True when this prompt renders at least one field that could be required. A comment-only
+    /// prompt has nothing to gate, so unknown requiredness must not block it.
+    var hasGatableField: Bool { hasUserField || hasTextField || hasSelectField }
+
+    /// Whether `fieldId` must be filled, from either source: Jira's own transition-screen flag, or
+    /// this config's manual override. OR, not fallback — the two express different things and
+    /// neither subsumes the other.
+    func fieldIsRequired(_ fieldId: String, manualFlag: Bool, jiraRequiredFieldIds: Set<String>) -> Bool {
+        manualFlag || jiraRequiredFieldIds.contains(fieldId)
+    }
+
+    /// Every required field that is still empty, phrased for the user. **All** of them, so fixing
+    /// one doesn't reveal the next.
+    ///
+    /// `selectedUserCount` rather than a bool: "at least one tester" is a count. A multiuserpicker
+    /// with an empty array satisfies presence and fails the rule, which is the whole point.
+    func missingRequirements(
+        selectedUserCount: Int,
+        textValue: String,
+        selectValue: String,
+        jiraRequiredFieldIds: Set<String>
+    ) -> [String] {
+        var missing: [String] = []
+        if hasUserField,
+           fieldIsRequired(userFieldId, manualFlag: userFieldRequired, jiraRequiredFieldIds: jiraRequiredFieldIds),
+           selectedUserCount < 1 {
+            missing.append("Select at least one \(userFieldLabel.lowercased()) — \(userFieldLabel) is required.")
+        }
+        if hasTextField,
+           fieldIsRequired(textFieldId, manualFlag: textFieldRequired, jiraRequiredFieldIds: jiraRequiredFieldIds),
+           textValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            missing.append("Fill in \(textFieldLabel) — it is required.")
+        }
+        let selectConfigured = !selectFieldId.trimmingCharacters(in: .whitespaces).isEmpty
+        let selectIsRequired = selectConfigured
+            && fieldIsRequired(selectFieldId, manualFlag: selectFieldRequired, jiraRequiredFieldIds: jiraRequiredFieldIds)
+        if selectIsRequired {
+            if !hasSelectField {
+                // Configured but optionless, so the dialog renders no picker and there is nothing
+                // here to satisfy it with. Blocking with a pointer beats submitting into a refusal.
+                missing.append("\(selectFieldLabel) is required but has no options configured — add them in Preferences, or set the field in Jira first.")
+            } else if selectValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                missing.append("Choose a \(selectFieldLabel) — it is required.")
+            }
+        }
+        return missing
+    }
+
     func matches(transitionName incoming: String) -> Bool {
         let a = incoming.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let b = transitionName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -162,6 +225,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         case userFieldId, userFieldLabel, userFieldAllowsMultiple, userFieldDefaultsToCurrentUser
         case textFieldId, textFieldLabel, textFieldMultiline
         case selectFieldId, selectFieldLabel, selectOptions
+        case userFieldRequired, textFieldRequired, selectFieldRequired
         case enablePRApprove, enablePRRequestChanges, enablePRMerge, prMergeMethod, enablePRAssigneeSync
     }
 
@@ -180,6 +244,9 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.selectFieldId = try c.decodeIfPresent(String.self, forKey: .selectFieldId) ?? ""
         self.selectFieldLabel = try c.decodeIfPresent(String.self, forKey: .selectFieldLabel) ?? "Select…"
         self.selectOptions = try c.decodeIfPresent([TransitionSelectOption].self, forKey: .selectOptions) ?? []
+        self.userFieldRequired = try c.decodeIfPresent(Bool.self, forKey: .userFieldRequired) ?? false
+        self.textFieldRequired = try c.decodeIfPresent(Bool.self, forKey: .textFieldRequired) ?? false
+        self.selectFieldRequired = try c.decodeIfPresent(Bool.self, forKey: .selectFieldRequired) ?? false
         self.enablePRApprove = try c.decodeIfPresent(Bool.self, forKey: .enablePRApprove) ?? false
         self.enablePRRequestChanges = try c.decodeIfPresent(Bool.self, forKey: .enablePRRequestChanges) ?? false
         self.enablePRMerge = try c.decodeIfPresent(Bool.self, forKey: .enablePRMerge) ?? false

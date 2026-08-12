@@ -555,6 +555,11 @@ private struct TransitionPromptRow: View {
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                             Toggle("Allow selecting multiple users", isOn: $prompt.userFieldAllowsMultiple)
                             Toggle("Default to current user", isOn: $prompt.userFieldDefaultsToCurrentUser)
+                            // Needed even though JiraBar reads Jira's own required flags: a rule
+                            // enforced by a workflow validator reports required:false and still
+                            // rejects the transition. See TransitionPromptConfig.userFieldRequired.
+                            Toggle("Required — block the transition unless at least one is selected",
+                                   isOn: $prompt.userFieldRequired)
                         }
                         .padding(.vertical, 4)
                     }
@@ -566,6 +571,8 @@ private struct TransitionPromptRow: View {
                             TextField("Label (e.g. QA Result)", text: $prompt.textFieldLabel)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                             Toggle("Multi-line", isOn: $prompt.textFieldMultiline)
+                            Toggle("Required — block the transition unless filled in",
+                                   isOn: $prompt.textFieldRequired)
                         }
                         .padding(.vertical, 4)
                     }
@@ -575,6 +582,8 @@ private struct TransitionPromptRow: View {
                             TextField("Field id (e.g. resolution or customfield_10300)", text: $prompt.selectFieldId)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                             TextField("Label (e.g. Resolution)", text: $prompt.selectFieldLabel)
+                            Toggle("Required — block the transition unless an option is chosen",
+                                   isOn: $prompt.selectFieldRequired)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
 
                             HStack {

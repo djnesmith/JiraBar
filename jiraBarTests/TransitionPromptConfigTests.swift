@@ -169,6 +169,171 @@ final class TransitionPromptConfigTests: XCTestCase {
         XCTAssertTrue(config.hasPRActions)
     }
 
+    // MARK: - Required fields
+
+    private func gated(label: String = "Testers", manualRequired: Bool) -> TransitionPromptConfig {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99002"
+        config.userFieldLabel = label
+        config.userFieldAllowsMultiple = true
+        config.userFieldRequired = manualRequired
+        return config
+    }
+
+    func testHasGatableFieldIsFalseForACommentOnlyPrompt() {
+        var config = TransitionPromptConfig()
+        config.includeComment = true
+        XCTAssertFalse(config.hasGatableField, "nothing to require, so unknown requiredness can't block")
+
+        config.userFieldId = "customfield_99002"
+        XCTAssertTrue(config.hasGatableField)
+    }
+
+    /// The two sources are OR'd, not one falling back to the other. Jira's flag can't express a
+    /// workflow-validator rule and the manual flag can't know about screen changes.
+    func testFieldIsRequiredTakesEitherSource() {
+        let config = gated(manualRequired: false)
+
+        XCTAssertFalse(config.fieldIsRequired("customfield_99002", manualFlag: false, jiraRequiredFieldIds: []))
+        XCTAssertTrue(config.fieldIsRequired("customfield_99002", manualFlag: true, jiraRequiredFieldIds: []))
+        XCTAssertTrue(config.fieldIsRequired("customfield_99002", manualFlag: false, jiraRequiredFieldIds: ["customfield_99002"]))
+        XCTAssertTrue(config.fieldIsRequired("customfield_99002", manualFlag: true, jiraRequiredFieldIds: ["customfield_99002"]))
+        XCTAssertFalse(
+            config.fieldIsRequired("customfield_99002", manualFlag: false, jiraRequiredFieldIds: ["somethingelse"]),
+            "another field being required says nothing about this one"
+        )
+    }
+
+    /// "At least one tester" is a COUNT. An empty multi-user picker satisfies presence and must
+    /// still fail — that is the whole rule.
+    func testRequiredUserFieldNeedsAtLeastOneSelection() {
+        let config = gated(manualRequired: true)
+
+        XCTAssertEqual(
+            config.missingRequirements(selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: []),
+            ["Select at least one testers — Testers is required."]
+        )
+        XCTAssertTrue(
+            config.missingRequirements(selectedUserCount: 1, textValue: "", selectValue: "", jiraRequiredFieldIds: []).isEmpty,
+            "one is enough"
+        )
+        XCTAssertTrue(
+            config.missingRequirements(selectedUserCount: 3, textValue: "", selectValue: "", jiraRequiredFieldIds: []).isEmpty
+        )
+    }
+
+    func testUnrequiredUserFieldAllowsAnEmptySelection() {
+        let config = gated(manualRequired: false)
+        XCTAssertTrue(
+            config.missingRequirements(selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: []).isEmpty
+        )
+    }
+
+    /// Jira's flag alone is enough — this is the `resolution`-on-Force-Close shape, where nothing
+    /// was ticked locally.
+    func testJiraRequiredFlagAloneGates() {
+        var config = TransitionPromptConfig()
+        config.selectFieldId = "resolution"
+        config.selectFieldLabel = "Resolution"
+        config.selectOptions = [TransitionSelectOption(label: "Done", value: "10000")]
+
+        XCTAssertEqual(
+            config.missingRequirements(
+                selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: ["resolution"]
+            ),
+            ["Choose a Resolution — it is required."]
+        )
+        XCTAssertTrue(
+            config.missingRequirements(
+                selectedUserCount: 0, textValue: "", selectValue: "10000", jiraRequiredFieldIds: ["resolution"]
+            ).isEmpty
+        )
+    }
+
+    /// Everything missing, not the first problem — he shouldn't fix one to discover the next.
+    func testMissingRequirementsListsEveryOutstandingField() {
+        var config = gated(manualRequired: true)
+        config.textFieldId = "customfield_99003"
+        config.textFieldLabel = "QA Notes"
+        config.textFieldRequired = true
+        config.selectFieldId = "resolution"
+        config.selectFieldLabel = "Resolution"
+        config.selectOptions = [TransitionSelectOption(label: "Done", value: "10000")]
+
+        let missing = config.missingRequirements(
+            selectedUserCount: 0, textValue: "   ", selectValue: "", jiraRequiredFieldIds: ["resolution"]
+        )
+
+        XCTAssertEqual(missing.count, 3, "all three, in field order: \(missing)")
+        XCTAssertEqual(missing, [
+            "Select at least one testers — Testers is required.",
+            "Fill in QA Notes — it is required.",
+            "Choose a Resolution — it is required.",
+        ])
+    }
+
+    /// A required select field with no options renders no picker, so nothing in the dialog can
+    /// satisfy it. It must block with a pointer rather than pass silently into a Jira refusal.
+    func testRequiredSelectFieldWithNoOptionsBlocksWithAPointer() {
+        var config = TransitionPromptConfig()
+        config.selectFieldId = "resolution"
+        config.selectFieldLabel = "Resolution"
+        config.selectFieldRequired = true
+
+        XCTAssertFalse(config.hasSelectField, "no options means no picker is rendered")
+        XCTAssertEqual(
+            config.missingRequirements(selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: []),
+            ["Resolution is required but has no options configured — add them in Preferences, or set the field in Jira first."]
+        )
+    }
+
+    /// Whitespace is not a filled-in text field.
+    func testWhitespaceDoesNotSatisfyARequiredTextField() {
+        var config = TransitionPromptConfig()
+        config.textFieldId = "customfield_99003"
+        config.textFieldLabel = "QA Notes"
+        config.textFieldRequired = true
+
+        XCTAssertFalse(
+            config.missingRequirements(selectedUserCount: 0, textValue: " \n\t ", selectValue: "", jiraRequiredFieldIds: []).isEmpty
+        )
+        XCTAssertTrue(
+            config.missingRequirements(selectedUserCount: 0, textValue: "ran it", selectValue: "", jiraRequiredFieldIds: []).isEmpty
+        )
+    }
+
+    /// A required flag on a field this prompt doesn't render can't block the dialog — there would be
+    /// nothing to fill in.
+    func testRequirementsOnlyCoverFieldsThePromptRenders() {
+        let config = TransitionPromptConfig()
+        XCTAssertTrue(
+            config.missingRequirements(
+                selectedUserCount: 0, textValue: "", selectValue: "",
+                jiraRequiredFieldIds: ["customfield_99002", "resolution"]
+            ).isEmpty
+        )
+    }
+
+    func testRequiredFlagsDefaultOffAndSurviveARoundTrip() throws {
+        var config = gated(manualRequired: true)
+        config.transitionName = "Ready for QA"
+
+        let decoded = try JSONDecoder().decode(
+            TransitionPromptConfig.self, from: try JSONEncoder().encode(config)
+        )
+        XCTAssertTrue(decoded.userFieldRequired)
+        XCTAssertFalse(decoded.textFieldRequired)
+        XCTAssertFalse(decoded.selectFieldRequired)
+
+        // Settings written before these keys existed must decode with every flag off.
+        let old = try decode("""
+        { "transitionName": "Reopen", "userFieldId": "customfield_99002" }
+        """)
+        XCTAssertFalse(old.userFieldRequired)
+        XCTAssertFalse(old.textFieldRequired)
+        XCTAssertFalse(old.selectFieldRequired)
+    }
+
     // MARK: - PRReviewAction
 
     func testGithubEvent() {

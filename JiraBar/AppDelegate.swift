@@ -932,12 +932,24 @@ extension AppDelegate {
         } else {
             prStatus.loading = false
         }
+        // Read which fields Jira requires for THIS transition only, and only now that a dialog is
+        // actually opening. Deliberately not folded into the transitions call that builds the issue
+        // submenu (`attachIssueSubmenu`): that one runs per issue on every menu rebuild.
+        let requirements = TransitionFieldRequirements()
+        if config.hasGatableField {
+            jiraClient.getRequiredFieldIds(issueKey: issueKey, transitionId: transitionId) { ids in
+                DispatchQueue.main.async { requirements.finish(ids) }
+            }
+        } else {
+            requirements.finish([])
+        }
         let view = TransitionDialog(
             issueKey: issueKey,
             transitionName: transitionName,
             config: config,
             showGithubMirrorCheckbox: showMirror,
             prStatus: prStatus,
+            requirements: requirements,
             onSubmit: { [weak self] comment, users, freeText, selectValue, updateGithub, prActions, done in
                 self?.submitTransition(
                     issueKey: issueKey,

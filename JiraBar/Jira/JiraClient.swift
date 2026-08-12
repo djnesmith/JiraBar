@@ -179,6 +179,61 @@ public class JiraClient {
         case select(fieldId: String, value: String)
     }
 
+    /// Field ids Jira's own transition screen marks `required: true` for one transition, or nil when
+    /// the metadata couldn't be read.
+    ///
+    /// nil is deliberately distinct from an empty set: "nothing is required" and "we don't know what
+    /// is required" must not collapse, or a failed fetch silently unlocks a submit Jira will refuse.
+    /// Callers treat nil as fail-closed.
+    ///
+    /// Only ever called for a single transition when its dialog opens. It must NOT be folded into
+    /// the transitions call that builds the issue submenu — that one runs per issue on every menu
+    /// rebuild, and `expand=transitions.fields` inflates each response with field metadata for every
+    /// transition on the workflow.
+    func getRequiredFieldIds(
+        issueKey: String,
+        transitionId: String,
+        completion: @escaping (Set<String>?) -> Void
+    ) {
+        let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)/transitions"
+        let parameters: [String: Any] = [
+            "expand": "transitions.fields",
+            "transitionId": transitionId
+        ]
+        AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                switch response.result {
+                case .success(let data):
+                    guard
+                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                        let transitions = json["transitions"] as? [[String: Any]]
+                    else {
+                        completion(nil)
+                        return
+                    }
+                    // `transitionId` is a filter, not a guarantee of one element — match it back.
+                    let match = transitions.first { ($0["id"] as? String) == transitionId }
+                    guard let fields = match?["fields"] as? [String: Any] else {
+                        // The transition exists but exposes no screen fields: genuinely nothing
+                        // required, which is a known answer rather than a failed read.
+                        completion(match == nil ? nil : [])
+                        return
+                    }
+                    let required = fields.compactMap { key, value -> String? in
+                        guard let meta = value as? [String: Any],
+                              (meta["required"] as? Bool) == true
+                        else { return nil }
+                        return key
+                    }
+                    completion(Set(required))
+                case .failure(let error):
+                    print("\(url):  \(error)")
+                    completion(nil)
+                }
+            }
+    }
+
     /// Outcome of a transition attempt.
     ///
     /// `fieldsAlreadyWritten` exists because the field values go out as a separate PUT *before* the
