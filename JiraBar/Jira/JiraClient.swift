@@ -179,8 +179,18 @@ public class JiraClient {
         case select(fieldId: String, value: String)
     }
 
+    /// Outcome of a transition attempt.
+    ///
+    /// `fieldsAlreadyWritten` exists because the field values go out as a separate PUT *before* the
+    /// transition POST (see `transitionIssue`). A refusal after that PUT succeeded has already
+    /// persisted the reviewers/notes/resolution, so a caller must not tell the user nothing changed.
+    enum TransitionResult {
+        case success
+        case failed(message: String?, fieldsAlreadyWritten: Bool)
+    }
+
     func transitionIssue(issueKey: String, to: String, completion: @escaping (() -> Void)) -> Void {
-        transitionIssue(issueKey: issueKey, to: to, comment: nil, fieldUpdates: []) { _, _ in
+        transitionIssue(issueKey: issueKey, to: to, comment: nil, fieldUpdates: []) { _ in
             completion()
         }
     }
@@ -190,7 +200,7 @@ public class JiraClient {
         to transitionId: String,
         comment: String?,
         fieldUpdates: [TransitionFieldUpdate],
-        completion: @escaping (Bool, String?) -> Void
+        completion: @escaping (TransitionResult) -> Void
     ) {
         // Build the fields payload once. We send it via a separate PUT to /issue/{key}
         // because Jira's transitions endpoint rejects fields that aren't on the workflow's
@@ -224,23 +234,24 @@ public class JiraClient {
             }
         }
 
-        let runTransition: () -> Void = { [self] in
+        let runTransition: (Bool) -> Void = { [self] fieldsWritten in
             performTransition(
                 issueKey: issueKey,
                 transitionId: transitionId,
                 comment: comment,
+                fieldsAlreadyWritten: fieldsWritten,
                 completion: completion
             )
         }
 
         if fields.isEmpty {
-            runTransition()
+            runTransition(false)
         } else {
             updateIssueFields(issueKey: issueKey, fields: fields) { success, message in
                 if success {
-                    runTransition()
+                    runTransition(true)
                 } else {
-                    completion(false, message)
+                    completion(.failed(message: message, fieldsAlreadyWritten: false))
                 }
             }
         }
@@ -250,7 +261,8 @@ public class JiraClient {
         issueKey: String,
         transitionId: String,
         comment: String?,
-        completion: @escaping (Bool, String?) -> Void
+        fieldsAlreadyWritten: Bool,
+        completion: @escaping (TransitionResult) -> Void
     ) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)/transitions"
 
@@ -273,13 +285,13 @@ public class JiraClient {
                 switch response.result {
                 case .success:
                     sendNotification(body: "Successfully transitioned issue")
-                    completion(true, nil)
+                    completion(.success)
                 case .failure(let error):
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
                     sendNotification(body: "Transition failed: \(message)")
-                    completion(false, message)
+                    completion(.failed(message: message, fieldsAlreadyWritten: fieldsAlreadyWritten))
                 }
             }
     }

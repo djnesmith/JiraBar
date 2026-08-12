@@ -977,19 +977,24 @@ extension AppDelegate {
         let updates = config.fieldUpdates(users: users, freeText: freeText, selectValue: selectValue)
 
         let effectiveComment = config.includeComment ? comment : nil
+        // Pinned now, not read at completion time: the batch can outlive this dialog being replaced.
+        let submittedFrom = transitionWindow
 
         jiraClient.transitionIssue(
             issueKey: issueKey,
             to: transitionId,
             comment: effectiveComment,
             fieldUpdates: updates
-        ) { [weak self] success, errorMessage in
+        ) { [weak self] result in
             DispatchQueue.main.async {
-                guard success else {
+                if case .failed(let message, let fieldsWritten) = result {
                     // Jira refused, or was unreachable. The window stays up carrying the server's
-                    // own words — "Testers are required before moving into QA." is only useful if
-                    // he can read it.
-                    completion(.jiraRefused(errorMessage ?? "Jira rejected the transition and gave no reason."))
+                    // own words — a message like "Testers are required before moving into QA." is
+                    // only useful where it can be read.
+                    completion(.jiraRefused(
+                        message: message ?? "Jira rejected the transition and gave no reason.",
+                        fieldsWritten: fieldsWritten
+                    ))
                     return
                 }
                 self?.refreshMenu()
@@ -997,7 +1002,7 @@ extension AppDelegate {
                     self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
                 }
                 guard prActions.hasWork else {
-                    self?.closeTransitionWindow()
+                    self?.closeTransitionWindow(submittedFrom)
                     completion(.applied)
                     return
                 }
@@ -1005,20 +1010,25 @@ extension AppDelegate {
                 // what used to make a failed review invisible: the ticket had moved, the window
                 // had gone, and only a notification carried the bad news.
                 self?.applyPRActions(issueKey: issueKey, actions: prActions, prStatus: prStatus) { tally in
-                    var lines = tally.failureLines
-                    if let blocked = tally.blockedReason { lines.append(blocked) }
-                    guard lines.isEmpty else {
+                    switch tally.report {
+                    case .clean:
+                        self?.closeTransitionWindow(submittedFrom)
+                        completion(.applied)
+                    case .nothingRan(let reason):
+                        completion(.prActionsDidNotRun(reason: reason))
+                    case .failures(let lines):
                         completion(.prActionsIncomplete(lines: lines))
-                        return
                     }
-                    self?.closeTransitionWindow()
-                    completion(.applied)
                 }
             }
         }
     }
 
-    private func closeTransitionWindow() {
+    /// Closes the transition window only if it is still the one that submitted. The window now
+    /// stays up for the whole GitHub batch, so "submit A, reopen the menu, start B" is reachable —
+    /// and A's completion must not close B's half-filled dialog.
+    private func closeTransitionWindow(_ expected: NSWindow?) {
+        guard let expected, transitionWindow === expected else { return }
         transitionWindow?.close()
         transitionWindow = nil
     }
@@ -1428,7 +1438,7 @@ extension AppDelegate {
         issueKey: String,
         actions: PRActionChoices,
         prStatus: PRActionsStatus,
-        completion: @escaping (PRActionTally) -> Void = { _ in }
+        completion: @escaping (PRActionTally) -> Void
     ) {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
         guard !token.isEmpty else {
@@ -1577,6 +1587,24 @@ extension AppDelegate {
             reviewFailed.map { "Review not submitted on \($0)" }
                 + mergeFailed.map { "Merge failed on \($0)" }
                 + assignFailed.map { "Assignee not set on \($0)" }
+        }
+
+        /// How this batch should be reported. A pure function so the distinction that matters —
+        /// "nothing ran" is not "something failed" — is decided in one tested place rather than by
+        /// whoever assembles the strings.
+        enum Report: Equatable {
+            /// Everything asked for landed.
+            case clean
+            /// The batch never started. Worth saying, but it is not a failure.
+            case nothingRan(reason: String)
+            /// Actions were attempted and did not land, one line each.
+            case failures([String])
+        }
+
+        var report: Report {
+            if let blockedReason { return .nothingRan(reason: blockedReason) }
+            let lines = failureLines
+            return lines.isEmpty ? .clean : .failures(lines)
         }
     }
 

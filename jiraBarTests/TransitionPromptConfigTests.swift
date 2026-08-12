@@ -430,8 +430,8 @@ final class PRActionsSummaryTests: XCTestCase {
 
     // MARK: - failureLines: what the still-open dialog shows
 
-    /// The partial case orc asked about: three linked PRs, the second one fails. The line has to
-    /// name that PR, not just say "1 failed".
+    /// The partial case: three linked PRs, the second one fails. The line has to name that PR,
+    /// not just say "1 failed".
     func testFailureLinesNameTheFailedPR() {
         var tally = AppDelegate.PRActionTally()
         tally.reviewOK = 2
@@ -453,13 +453,40 @@ final class PRActionsSummaryTests: XCTestCase {
         ])
     }
 
-    /// A batch that never started is not a batch that failed — no failure lines — but the reason
-    /// still has to reach the window rather than only the notification.
-    func testBlockedBatchHasNoFailureLinesButKeepsItsReason() {
-        let tally = AppDelegate.PRActionTally(blockedReason: "No GitHub token is set, so no PR action ran.")
+    // MARK: - report: nothing-ran is not failure
+
+    /// The distinction this exists to protect. A batch that never started — no token, no open linked
+    /// PRs — must not be reported as a failed action; it was never attempted. Conflating them put a
+    /// red "1 PR action did not" in the window for every ticket with no linked PR.
+    func testBlockedBatchReportsNothingRanRatherThanAFailure() {
+        let tally = AppDelegate.PRActionTally(blockedReason: "No open linked PRs were found, so no PR action ran.")
+
+        XCTAssertEqual(tally.report, .nothingRan(reason: "No open linked PRs were found, so no PR action ran."))
         XCTAssertTrue(tally.failureLines.isEmpty)
         XCTAssertEqual(tally.failureCount, 0)
-        XCTAssertEqual(tally.blockedReason, "No GitHub token is set, so no PR action ran.")
+    }
+
+    func testCleanBatchReportsClean() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewOK = 2
+        tally.mergeSkipped = 1
+        tally.assignNotTouched = 1
+        XCTAssertEqual(tally.report, .clean, "skips alone are still a clean run")
+    }
+
+    func testFailedBatchReportsItsLines() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewOK = 1
+        tally.reviewFailed = ["acme/api #2"]
+        XCTAssertEqual(tally.report, .failures(["Review not submitted on acme/api #2"]))
+    }
+
+    /// A blocked batch can't also have failures — nothing ran — but if the two ever coexisted the
+    /// report must not silently drop the reason.
+    func testBlockedReasonWinsOverFailureLines() {
+        var tally = AppDelegate.PRActionTally(blockedReason: "No GitHub token is set, so no PR action ran.")
+        tally.reviewFailed = ["acme/api #1"]
+        XCTAssertEqual(tally.report, .nothingRan(reason: "No GitHub token is set, so no PR action ran."))
     }
 
     func testNothingToReport() {
