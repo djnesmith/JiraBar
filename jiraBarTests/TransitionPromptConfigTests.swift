@@ -96,7 +96,7 @@ final class TransitionPromptConfigTests: XCTestCase {
           "id": "11111111-1111-1111-1111-111111111111",
           "transitionName": "Ready for Review",
           "includeComment": true,
-          "userFieldId": "customfield_10029",
+          "userFieldId": "customfield_99001",
           "userFieldLabel": "Reviewers",
           "userFieldAllowsMultiple": true,
           "userFieldDefaultsToCurrentUser": false,
@@ -109,7 +109,7 @@ final class TransitionPromptConfigTests: XCTestCase {
         }
         """)
         XCTAssertEqual(config.transitionName, "Ready for Review")
-        XCTAssertEqual(config.userFieldId, "customfield_10029")
+        XCTAssertEqual(config.userFieldId, "customfield_99001")
         XCTAssertFalse(config.enablePRApprove)
         XCTAssertFalse(config.enablePRRequestChanges)
         XCTAssertFalse(config.enablePRMerge)
