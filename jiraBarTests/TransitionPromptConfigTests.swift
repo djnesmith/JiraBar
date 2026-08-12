@@ -83,6 +83,11 @@ final class TransitionPromptConfigTests: XCTestCase {
         config = TransitionPromptConfig()
         config.enablePRAssigneeSync = true
         XCTAssertTrue(config.hasPRActions)
+
+        // Resolve-only is what makes the dialog's PR section render for a prompt with no other action.
+        config = TransitionPromptConfig()
+        config.enablePRResolveThreads = true
+        XCTAssertTrue(config.hasPRActions)
     }
 
     // MARK: - Decoding older saved settings
@@ -114,6 +119,7 @@ final class TransitionPromptConfigTests: XCTestCase {
         XCTAssertFalse(config.enablePRRequestChanges)
         XCTAssertFalse(config.enablePRMerge)
         XCTAssertFalse(config.enablePRAssigneeSync)
+        XCTAssertFalse(config.enablePRResolveThreads)
         XCTAssertEqual(config.prReviewAction, .none)
         XCTAssertFalse(config.hasPRActions)
     }
@@ -666,7 +672,7 @@ final class PRActionsSummaryTests: XCTestCase {
         XCTAssertTrue(tally.failureLines.isEmpty)
 
         tally.reviewFailed = ["o/r #1"]
-        tally.mergeFailed = ["o/r #2", "o/r #3"]
+        tally.mergeFailed = [(label: "o/r #2", reason: nil), (label: "o/r #3", reason: nil)]
         tally.assignFailed = ["o/r #4", "o/r #5", "o/r #6"]
         XCTAssertEqual(tally.failureCount, 6)
     }
@@ -681,7 +687,7 @@ final class PRActionsSummaryTests: XCTestCase {
     func testFailureLinesCoverAllThreeActions() {
         var tally = AppDelegate.PRActionTally()
         tally.reviewFailed = ["o/r #1"]
-        tally.mergeFailed = ["o/r #2"]
+        tally.mergeFailed = [(label: "o/r #2", reason: nil)]
         tally.assignFailed = ["o/r #3"]
         XCTAssertEqual(tally.failureLines, [
             "Review not submitted on o/r #1",
@@ -1108,5 +1114,152 @@ final class PerPRResolutionTests: XCTestCase {
 
         c.reviewComment = "needs a test"
         XCTAssertEqual(c.reviewEvent(for: .requestChanges), "REQUEST_CHANGES")
+    }
+}
+
+/// Resolving conversations, and the ordering that makes it worth doing.
+final class ResolveConversationsTests: XCTestCase {
+
+    func testResolveThreadsCountsAsWork() {
+        var choices = PRActionChoices.disabled
+        XCTAssertFalse(choices.hasWork)
+        choices.resolveThreads = true
+        XCTAssertTrue(choices.hasWork)
+    }
+
+    // MARK: - reading the thread page
+
+    func testOnlyUnresolvedThreadsAreCollected() {
+        let nodes: [[String: Any]] = [
+            ["id": "T1", "isResolved": false, "comments": ["nodes": [["author": ["login": "djnesmith"]]]]],
+            ["id": "T2", "isResolved": true, "comments": ["nodes": [["author": ["login": "jgerman"]]]]],
+        ]
+        let threads = GithubClient.unresolvedThreads(fromNodes: nodes)
+        XCTAssertEqual(threads.map(\.id), ["T1"])
+        XCTAssertEqual(threads.map(\.author), ["djnesmith"])
+    }
+
+    /// A deleted account leaves a null author. The thread still blocks the merge, so it must still be
+    /// collected rather than dropped.
+    func testThreadWithNoReadableAuthorIsStillCollected() {
+        let nodes: [[String: Any]] = [["id": "T1", "isResolved": false]]
+        let threads = GithubClient.unresolvedThreads(fromNodes: nodes)
+        XCTAssertEqual(threads.map(\.id), ["T1"])
+        XCTAssertEqual(threads.map(\.author), ["unknown"])
+    }
+
+    func testNodeWithoutAnIdIsSkipped() {
+        let nodes: [[String: Any]] = [["isResolved": false]]
+        XCTAssertTrue(GithubClient.unresolvedThreads(fromNodes: nodes).isEmpty)
+    }
+
+    // MARK: - naming why a merge failed
+
+    /// The case that prompted this: approved, no conflicts, refused for one stale-looking thread.
+    func testBlockedWithUnresolvedThreadsNamesThem() {
+        XCTAssertEqual(
+            GithubClient.mergeBlockReason(mergeStateStatus: "BLOCKED", unresolvedThreads: 1),
+            "1 unresolved conversation"
+        )
+        XCTAssertEqual(
+            GithubClient.mergeBlockReason(mergeStateStatus: "BLOCKED", unresolvedThreads: 3),
+            "3 unresolved conversations"
+        )
+    }
+
+    /// Same status, different cause — branch protection with nothing unresolved. The message must not
+    /// claim conversations are the problem.
+    func testBlockedWithNoUnresolvedThreadsPointsElsewhere() {
+        let reason = GithubClient.mergeBlockReason(mergeStateStatus: "BLOCKED", unresolvedThreads: 0)
+        XCTAssertNotNil(reason)
+        XCTAssertFalse(reason!.contains("conversation"), reason!)
+        XCTAssertTrue(reason!.contains("out of date"), reason!)
+    }
+
+    func testOtherStatusesEachGetTheirOwnReason() {
+        XCTAssertEqual(
+            GithubClient.mergeBlockReason(mergeStateStatus: "DIRTY", unresolvedThreads: 0),
+            "it conflicts with the base branch"
+        )
+        XCTAssertEqual(
+            GithubClient.mergeBlockReason(mergeStateStatus: "BEHIND", unresolvedThreads: 0),
+            "the branch is out of date with the base branch"
+        )
+        XCTAssertEqual(
+            GithubClient.mergeBlockReason(mergeStateStatus: "DRAFT", unresolvedThreads: 0),
+            "it is still a draft"
+        )
+    }
+
+    /// UNKNOWN means GitHub hasn't finished computing, which is not a refusal.
+    func testUnknownSaysItMayWorkShortly() {
+        let reason = GithubClient.mergeBlockReason(mergeStateStatus: "UNKNOWN", unresolvedThreads: 0)
+        XCTAssertTrue(reason!.contains("shortly"), reason ?? "nil")
+    }
+
+    func testNothingUsefulToSayYieldsNoReason() {
+        XCTAssertNil(GithubClient.mergeBlockReason(mergeStateStatus: nil, unresolvedThreads: 0))
+        XCTAssertNil(GithubClient.mergeBlockReason(mergeStateStatus: "CLEAN", unresolvedThreads: 0))
+    }
+
+    // MARK: - what the window and the notification say
+
+    func testMergeFailureLineCarriesTheReason() {
+        var tally = AppDelegate.PRActionTally()
+        tally.mergeFailed = [(label: "acme/api #698", reason: "1 unresolved conversation")]
+        XCTAssertEqual(tally.failureLines, ["Merge failed on acme/api #698: 1 unresolved conversation"])
+    }
+
+    /// No reason available must not produce a dangling colon.
+    func testMergeFailureLineWithoutAReasonIsUnchanged() {
+        var tally = AppDelegate.PRActionTally()
+        tally.mergeFailed = [(label: "acme/api #698", reason: nil)]
+        XCTAssertEqual(tally.failureLines, ["Merge failed on acme/api #698"])
+    }
+
+    func testFailedResolutionIsItsOwnFailureLine() {
+        var tally = AppDelegate.PRActionTally()
+        tally.resolveFailed = ["acme/api #698"]
+        XCTAssertEqual(tally.failureLines, ["Conversations not resolved on acme/api #698"])
+        XCTAssertEqual(tally.failureCount, 1)
+    }
+
+    /// Attribution, not a bare count: closing someone else's unanswered question should say whose.
+    func testSummaryNamesWhoseConversationsWereResolved() {
+        var choices = PRActionChoices.disabled
+        choices.resolveThreads = true
+        var tally = AppDelegate.PRActionTally()
+        tally.resolved = [(label: "acme/api #698", authors: ["djnesmith", "jgerman"])]
+
+        let text = AppDelegate.prActionsSummaryBody(
+            issueKey: "JB-1", actions: choices, candidateCount: 1,
+            plan: PRActionsStatus.ReviewPlan(), tally: tally
+        )
+        XCTAssertTrue(text.contains("resolved 2 conversations on acme/api #698 (djnesmith, jgerman)"), text)
+    }
+
+    /// A resolve-only prompt on a PR with nothing open must not report "no changes" — the action ran.
+    func testSummarySaysWhenThereWasNothingToResolve() {
+        var choices = PRActionChoices.disabled
+        choices.resolveThreads = true
+        let text = AppDelegate.prActionsSummaryBody(
+            issueKey: "JB-1", actions: choices, candidateCount: 1,
+            plan: PRActionsStatus.ReviewPlan(), tally: AppDelegate.PRActionTally()
+        )
+        XCTAssertTrue(text.contains("no conversations to resolve"), text)
+        XCTAssertFalse(text.contains("no changes"), text)
+    }
+
+    func testSummaryDeduplicatesRepeatAuthorsButKeepsTheCount() {
+        var choices = PRActionChoices.disabled
+        choices.resolveThreads = true
+        var tally = AppDelegate.PRActionTally()
+        tally.resolved = [(label: "acme/api #698", authors: ["djnesmith", "djnesmith"])]
+
+        let text = AppDelegate.prActionsSummaryBody(
+            issueKey: "JB-1", actions: choices, candidateCount: 1,
+            plan: PRActionsStatus.ReviewPlan(), tally: tally
+        )
+        XCTAssertTrue(text.contains("resolved 2 conversations on acme/api #698 (djnesmith)"), text)
     }
 }

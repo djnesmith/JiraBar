@@ -102,9 +102,12 @@ Each transition prompt can additionally enable **PR actions** that run against e
   - *Request changes* submits a REQUEST_CHANGES review, and its **comment is mandatory** — GitHub rejects a request-changes review with no body, so the dialog won't submit until you write one. Repeats are never skipped: the comment is the payload, and a ticket coming back a second time is exactly when you want another one.
   - Because it's one picker rather than two checkboxes, approving and requesting changes can't both be asked for.
 - **Merge** — merges with a configurable method (merge / squash / rebase); PRs whose repo disallows the chosen method are skipped and counted in the summary. **Unavailable in request-changes mode** — merging a PR you just asked for changes on is nonsense, so it's withdrawn rather than merely greyed out.
+- **Resolve open review conversations** — marks every unresolved review thread on the PR resolved. **All of them, including conversations you did not write and may not have answered.** It exists because a branch with `required_conversation_resolution` refuses to merge while any thread is open, and an outdated-looking thread still counts. The summary names how many were closed and whose they were, per PR.
 - **Sync Jira Assignee** — sets the ticket's Jira Assignee (mapped via the Jira → GitHub file) as the PR assignee, only when the PR has no assignee yet.
 
-Reviews go out first, then assignee-sync and merges, so GitHub's merge-eligibility check never races a just-submitted review.
+Reviews and conversation resolution go out first, then assignee-sync and merges. Resolution must precede the merge: a branch requiring conversation resolution refuses the merge outright rather than queueing behind it, and the batch does not retry. Reviews go first for the same class of reason — so GitHub's merge-eligibility check never races a just-submitted review.
+
+When a merge does fail, the window names the blocker GitHub reported rather than only that it failed — unresolved conversations (with a count), conflicts, a draft, a branch out of date with its base, or mergeability still being computed.
 
 **The dialog stays open until the PR actions finish**, and reports anything that didn't land, naming the PR — "the Jira transition WAS applied, but 1 PR action did not: Review not submitted on acme/api #2". The Jira transition is not rolled back, so retrying the transition isn't the fix; do it on the PR. A summary notification is also posted, leading with the failure count when something failed, but the window is the primary channel: a notification is missable and a closed window looks like success. A transition Jira *refuses* also keeps the window open, carrying Jira's own message.
 

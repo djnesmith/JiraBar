@@ -8,6 +8,7 @@ struct PRActionChoices {
     var merge: Bool
     var mergeMethod: String
     var syncAssignee: Bool
+    var resolveThreads: Bool = false
     /// Empty means `review` applies to every PR. The dialog seeds an entry per PR, so an empty map is
     /// what a caller with no PR list produces — not the everyday path.
     var reviewByPRURL: [String: PRReviewAction] = [:]
@@ -46,8 +47,10 @@ struct PRActionChoices {
 
     /// True when at least one PR action would be attempted.
     var hasWork: Bool {
-        review != .none || merge || syncAssignee || reviewByPRURL.values.contains { $0 != .none }
+        review != .none || merge || syncAssignee || resolveThreads
+            || reviewByPRURL.values.contains { $0 != .none }
     }
+
 }
 
 /// How a submit attempt ended. The dialog reacts differently to each, so this is deliberately not
@@ -322,6 +325,7 @@ struct TransitionDialog: View {
     @State private var prMerge: Bool = true
     @State private var prMergeMethod: String = "rebase"
     @State private var prSyncAssignee: Bool = true
+    @State private var prResolveThreads: Bool = true
     /// Runtime only: a choice about one PR today has no meaning next time, so none of this is persisted.
     @State private var perPRActions: [String: PRReviewAction] = [:]
     @State private var touchedPRs: Set<String> = []
@@ -441,6 +445,7 @@ struct TransitionDialog: View {
             merge: config.allowsPRMerge && prMerge,
             mergeMethod: prMergeMethod,
             syncAssignee: config.enablePRAssigneeSync && prSyncAssignee,
+            resolveThreads: config.enablePRResolveThreads && prResolveThreads,
             reviewByPRURL: perPRActions
         )
     }
@@ -482,6 +487,9 @@ struct TransitionDialog: View {
                     .frame(width: 180)
                     .disabled(!prMerge)
                 }
+            }
+            if config.enablePRResolveThreads {
+                Toggle("Resolve open review conversations", isOn: $prResolveThreads)
             }
             if config.enablePRAssigneeSync {
                 Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee)
@@ -1008,6 +1016,7 @@ struct TransitionDialog: View {
             if config.prReviewAction != .none { pr += (prReview ? 90 : 24) }
             if prReview { pr += CGFloat(prStatus.openPRs.count) * 46 }
             if config.allowsPRMerge { pr += 32 }
+            if config.enablePRResolveThreads { pr += 24 }
             if config.enablePRAssigneeSync { pr += 24 }
             h += pr
         }

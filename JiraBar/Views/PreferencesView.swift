@@ -656,6 +656,7 @@ private struct TransitionPromptRow: View {
                                 .disabled(!prompt.enablePRMerge)
                             }
                             .disabled(prompt.prReviewAction == .requestChanges)
+                            Toggle("Resolve open review conversations (all of them, including other people's)", isOn: $prompt.enablePRResolveThreads)
                             Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prompt.enablePRAssigneeSync)
                             Text("Runs after the Jira transition succeeds. Requires a GitHub Token.")
                                 .font(.footnote)

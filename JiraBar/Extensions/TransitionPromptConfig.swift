@@ -99,6 +99,11 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// GitHub file) as the PR assignee — only when the PR has no assignee yet.
     var enablePRAssigneeSync: Bool = false
 
+    /// When true, every unresolved review conversation on each linked open PR is resolved. Runs before
+    /// any merge: a branch with `required_conversation_resolution` refuses the merge outright, so
+    /// resolving afterwards would be too late to help.
+    var enablePRResolveThreads: Bool = false
+
     /// The review this transition submits, over the two stored flags. The setter writes them
     /// exclusively, so the Preferences picker can't produce a contradictory pair.
     ///
@@ -126,7 +131,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// True when this transition has any PR action to run — what gates the dialog's PR section
     /// and the status enrichment that feeds it.
     var hasPRActions: Bool {
-        prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync
+        prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync || enablePRResolveThreads
     }
 
     /// True when this prompt has at least one field that could be required. A comment-only prompt has
@@ -283,6 +288,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         case selectFieldId, selectFieldLabel, selectOptions
         case userFieldRequired, textFieldRequired, selectFieldRequired
         case enablePRApprove, enablePRRequestChanges, enablePRMerge, prMergeMethod, enablePRAssigneeSync
+        case enablePRResolveThreads
     }
 
     init(from decoder: Decoder) throws {
@@ -308,6 +314,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.enablePRMerge = try c.decodeIfPresent(Bool.self, forKey: .enablePRMerge) ?? false
         self.prMergeMethod = try c.decodeIfPresent(String.self, forKey: .prMergeMethod) ?? "rebase"
         self.enablePRAssigneeSync = try c.decodeIfPresent(Bool.self, forKey: .enablePRAssigneeSync) ?? false
+        self.enablePRResolveThreads = try c.decodeIfPresent(Bool.self, forKey: .enablePRResolveThreads) ?? false
     }
 }
 

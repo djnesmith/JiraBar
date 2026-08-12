@@ -41,6 +41,9 @@ struct GithubPRStatus {
     /// The PR's head branch name. Used by the "PRs Without Tickets" section to detect a Jira issue key in
     /// the branch when the title doesn't carry one.
     var headRefName: String?
+    /// "CLEAN" / "BLOCKED" / "BEHIND" / "DIRTY" / "DRAFT" / "UNSTABLE" / "UNKNOWN". Read after a merge
+    /// has failed, to name the blocker.
+    var mergeStateStatus: String?
     /// Whether the PR is a draft. GitHub treats drafts as open, so they arrive through the
     /// normal open-PR paths with nothing to distinguish them — this is what marks the row.
     var isDraft: Bool
@@ -58,6 +61,16 @@ public class GithubClient {
         ]
         if json { headers.add(.contentType("application/json")) }
         return headers
+    }
+
+    /// GraphQL wants plain JSON both ways, unlike the REST endpoints above.
+    private func graphqlHeaders(token: String) -> HTTPHeaders {
+        [
+            .authorization(bearerToken: token),
+            .accept("application/json"),
+            .contentType("application/json"),
+            .userAgent("JiraBar")
+        ]
     }
 
     func getLatestRelease(completion:@escaping (((LatestRelease?) -> Void))) -> Void {
@@ -103,6 +116,7 @@ public class GithubClient {
             rebaseMergeAllowed
             pullRequest(number: $number) {
               reviewDecision
+              mergeStateStatus
               merged
               mergedAt
               headRefName
@@ -129,18 +143,11 @@ public class GithubClient {
                 "number": number
             ]
         ]
-        let headers: HTTPHeaders = [
-            .authorization(bearerToken: token),
-            .accept("application/json"),
-            .contentType("application/json"),
-            .userAgent("JiraBar")
-        ]
-
         AF.request("https://api.github.com/graphql",
                    method: .post,
                    parameters: body,
                    encoding: JSONEncoding.default,
-                   headers: headers)
+                   headers: graphqlHeaders(token: token))
             .validate(statusCode: 200..<300)
             .responseData { response in
                 switch response.result {
@@ -180,6 +187,7 @@ public class GithubClient {
                     let rebaseMergeAllowed = (repoDict["rebaseMergeAllowed"] as? Bool) ?? false
                     let headRefName = prDict["headRefName"] as? String
                     let isDraft = (prDict["isDraft"] as? Bool) ?? false
+                    let mergeStateStatus = prDict["mergeStateStatus"] as? String
 
                     completion(GithubPRStatus(
                         reviewDecision: reviewDecision,
@@ -196,6 +204,7 @@ public class GithubClient {
                         squashMergeAllowed: squashMergeAllowed,
                         rebaseMergeAllowed: rebaseMergeAllowed,
                         headRefName: headRefName,
+                        mergeStateStatus: mergeStateStatus,
                         isDraft: isDraft
                     ))
                 case .failure(let error):
@@ -487,6 +496,153 @@ public class GithubClient {
     /// returns 405 when the method isn't allowed on that repo — the caller should have already
     /// consulted `GithubPRStatus.{merge|squash|rebase}MergeAllowed` and skipped the call in
     /// that case. Ignores non-github.com URLs.
+    /// One unresolved review thread: its node id, and who opened it.
+    struct ReviewThread {
+        let id: String
+        let author: String
+    }
+
+    /// Every unresolved review thread on the PR, following `pageInfo` to the end. nil on any failure —
+    /// resolving a partial set would leave the merge blocked by whatever was missed, which is the
+    /// failure this exists to remove.
+    func fetchUnresolvedReviewThreads(
+        url urlString: String,
+        token: String,
+        completion: @escaping ([ReviewThread]?) -> Void
+    ) {
+        guard !token.isEmpty, let (owner, repo, number) = GithubClient.parsePRURL(urlString) else {
+            completion(nil)
+            return
+        }
+        var collected: [ReviewThread] = []
+
+        func page(after cursor: String?) {
+            let query = """
+            query($owner: String!, $name: String!, $number: Int!, $after: String) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviewThreads(first: 100, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id
+                      isResolved
+                      comments(first: 1) { nodes { author { login } } }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            var variables: [String: Any] = ["owner": owner, "name": repo, "number": number]
+            if let cursor { variables["after"] = cursor }
+            AF.request(
+                "https://api.github.com/graphql",
+                method: .post,
+                parameters: ["query": query, "variables": variables],
+                encoding: JSONEncoding.default,
+                headers: graphqlHeaders(token: token)
+            )
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                switch response.result {
+                case .success(let data):
+                    guard
+                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                        let dataDict = json["data"] as? [String: Any],
+                        let repoDict = dataDict["repository"] as? [String: Any],
+                        let prDict = repoDict["pullRequest"] as? [String: Any],
+                        let threads = prDict["reviewThreads"] as? [String: Any],
+                        let nodes = threads["nodes"] as? [[String: Any]]
+                    else {
+                        completion(nil)
+                        return
+                    }
+                    collected.append(contentsOf: GithubClient.unresolvedThreads(fromNodes: nodes))
+                    let info = threads["pageInfo"] as? [String: Any]
+                    if (info?["hasNextPage"] as? Bool) == true, let next = info?["endCursor"] as? String {
+                        page(after: next)
+                    } else {
+                        completion(collected)
+                    }
+                case .failure(let error):
+                    print("github fetchUnresolvedReviewThreads: \(error)")
+                    completion(nil)
+                }
+            }
+        }
+        page(after: nil)
+    }
+
+    /// Picks the unresolved threads out of one page of nodes. Split out so the shape-handling is
+    /// testable: a thread with no readable author still has to be resolvable.
+    static func unresolvedThreads(fromNodes nodes: [[String: Any]]) -> [ReviewThread] {
+        nodes.compactMap { node in
+            guard (node["isResolved"] as? Bool) == false, let id = node["id"] as? String else { return nil }
+            let comments = (node["comments"] as? [String: Any])?["nodes"] as? [[String: Any]]
+            let author = (comments?.first?["author"] as? [String: Any])?["login"] as? String
+            return ReviewThread(id: id, author: author ?? "unknown")
+        }
+    }
+
+    /// Marks one review thread resolved. Reports success only when GitHub echoes the flipped flag, since
+    /// a GraphQL error arrives as a 200 with an `errors` array.
+    func resolveReviewThread(id: String, token: String, completion: @escaping (Bool) -> Void) {
+        guard !token.isEmpty, !id.isEmpty else {
+            completion(false)
+            return
+        }
+        let query = """
+        mutation($threadId: ID!) {
+          resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } }
+        }
+        """
+        AF.request(
+            "https://api.github.com/graphql",
+            method: .post,
+            parameters: ["query": query, "variables": ["threadId": id]],
+            encoding: JSONEncoding.default,
+            headers: graphqlHeaders(token: token)
+        )
+        .validate(statusCode: 200..<300)
+        .responseData { response in
+            switch response.result {
+            case .success(let data):
+                // A 200 carrying `errors` is still a failed mutation; only the flipped flag counts.
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let payload = (json?["data"] as? [String: Any])?["resolveReviewThread"] as? [String: Any]
+                let thread = payload?["thread"] as? [String: Any]
+                completion((thread?["isResolved"] as? Bool) ?? false)
+            case .failure(let error):
+                print("github resolveReviewThread: \(error)")
+                completion(false)
+            }
+        }
+    }
+
+    /// Why a merge was refused, phrased for the transition window, or nil when the status says nothing
+    /// useful. `BLOCKED` is the ambiguous one and the reason this exists: an approved, conflict-free PR
+    /// reports it both for unresolved conversations and for an out-of-date branch.
+    static func mergeBlockReason(mergeStateStatus: String?, unresolvedThreads: Int) -> String? {
+        switch mergeStateStatus?.uppercased() {
+        case "DIRTY":
+            return "it conflicts with the base branch"
+        case "DRAFT":
+            return "it is still a draft"
+        case "BEHIND":
+            return "the branch is out of date with the base branch"
+        case "UNKNOWN":
+            return "GitHub hadn't finished computing mergeability — it may work shortly"
+        case "BLOCKED":
+            if unresolvedThreads > 0 {
+                return "\(unresolvedThreads) unresolved conversation\(unresolvedThreads == 1 ? "" : "s")"
+            }
+            return "branch protection refused it — the branch may be out of date with the base branch, "
+                + "or a required review or check is missing"
+        default:
+            return nil
+        }
+    }
+
     func mergePR(
         url urlString: String,
         method: String,

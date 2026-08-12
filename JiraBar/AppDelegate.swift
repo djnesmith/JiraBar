@@ -1515,6 +1515,51 @@ extension AppDelegate {
             }
         }
 
+        // Resolution shares the first phase with reviews, which is what puts it before any merge: the
+        // barrier below is the only thing separating the two, and a branch requiring conversation
+        // resolution refuses a merge outright rather than queueing behind it.
+        if actions.resolveThreads {
+            for pr in candidates {
+                group.enter()
+                client.fetchUnresolvedReviewThreads(url: pr.url, token: token) { threads in
+                    guard let threads else {
+                        syncQueue.async {
+                            tally.resolveFailed.append(pr.label)
+                            group.leave()
+                        }
+                        return
+                    }
+                    guard !threads.isEmpty else {
+                        group.leave()
+                        return
+                    }
+                    // Sequential, not concurrent: GitHub's secondary rate limit targets parallel writes
+                    // to one repository, and a 403 here lands as "conversations not resolved" followed by
+                    // the merge failing for exactly the reason this feature removes.
+                    var closed: [String] = []
+                    var anyFailed = false
+                    var remaining = threads
+                    func resolveNext() {
+                        guard let thread = remaining.popLast() else {
+                            syncQueue.async {
+                                if !closed.isEmpty {
+                                    tally.resolved.append((label: pr.label, authors: closed))
+                                }
+                                if anyFailed { tally.resolveFailed.append(pr.label) }
+                                group.leave()
+                            }
+                            return
+                        }
+                        client.resolveReviewThread(id: thread.id, token: token) { ok in
+                            if ok { closed.append(thread.author) } else { anyFailed = true }
+                            resolveNext()
+                        }
+                    }
+                    resolveNext()
+                }
+            }
+        }
+
         // Reviews go out first; assignee sync + merges follow so they don't race a stale
         // "you haven't approved" merge-eligibility check on the GitHub side.
         group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
@@ -1559,9 +1604,24 @@ extension AppDelegate {
                         if prStatus.allowsMergeMethod(actions.mergeMethod, on: pr) {
                             secondPassGroup.enter()
                             client.mergePR(url: pr.url, method: actions.mergeMethod, token: token) { ok in
-                                syncQueue.async {
-                                    if ok { tally.mergeOK += 1 } else { tally.mergeFailed.append(pr.label) }
-                                    secondPassGroup.leave()
+                                guard !ok else {
+                                    syncQueue.async {
+                                        tally.mergeOK += 1
+                                        secondPassGroup.leave()
+                                    }
+                                    return
+                                }
+                                // Re-read rather than reuse the dialog's snapshot: resolution may have
+                                // just changed the very count that would be reported.
+                                client.fetchPRStatus(url: pr.url, token: token) { fresh in
+                                    let reason = GithubClient.mergeBlockReason(
+                                        mergeStateStatus: fresh?.mergeStateStatus,
+                                        unresolvedThreads: fresh?.unresolvedThreads ?? 0
+                                    )
+                                    syncQueue.async {
+                                        tally.mergeFailed.append((label: pr.label, reason: reason))
+                                        secondPassGroup.leave()
+                                    }
                                 }
                             }
                         } else {
@@ -1598,8 +1658,13 @@ extension AppDelegate {
         /// Labels ("owner/repo #12") of the PRs each action was attempted on and failed. Labels
         /// rather than counts because the dialog has to name which PR of the three didn't take.
         var reviewFailed: [String] = []
-        var mergeFailed: [String] = []
+        /// Merge failures with the blocker GitHub named, so the window can say why rather than only that.
+        var mergeFailed: [(label: String, reason: String?)] = []
         var assignFailed: [String] = []
+        /// Conversations resolved, per PR, with the authors whose threads were closed. Attribution is the
+        /// point: resolving someone else's unanswered question should not read as a bare count.
+        var resolved: [(label: String, authors: [String])] = []
+        var resolveFailed: [String] = []
         /// Set when the batch never started — no token, no open PRs. Not a failure of an action;
         /// the dialog reports it as a reason nothing ran.
         var blockedReason: String?
@@ -1607,16 +1672,21 @@ extension AppDelegate {
         var reviewFail: Int { reviewFailed.count }
         var mergeFail: Int { mergeFailed.count }
         var assignFail: Int { assignFailed.count }
+        var resolveFail: Int { resolveFailed.count }
 
         /// Actions that were attempted against GitHub and came back refused or unreachable.
         /// Deliberately excludes the skip counters: not attempting something is not failing at it.
-        var failureCount: Int { reviewFail + mergeFail + assignFail }
+        var failureCount: Int { reviewFail + mergeFail + assignFail + resolveFail }
 
         /// One line per failed action, naming the PR. This is what the dialog lists, so the
         /// partial case — three linked PRs, the second one fails — points at the right PR.
         var failureLines: [String] {
             reviewFailed.map { "Review not submitted on \($0)" }
-                + mergeFailed.map { "Merge failed on \($0)" }
+                + mergeFailed.map { failure in
+                    guard let reason = failure.reason else { return "Merge failed on \(failure.label)" }
+                    return "Merge failed on \(failure.label): \(reason)"
+                }
+                + resolveFailed.map { "Conversations not resolved on \($0)" }
                 + assignFailed.map { "Assignee not set on \($0)" }
         }
 
@@ -1670,6 +1740,17 @@ extension AppDelegate {
             parts.append("\(plan.stateUnknown.count) skipped: review state unreadable")
         }
         if !plan.skippedByChoice.isEmpty { parts.append("\(plan.skippedByChoice.count) skipped") }
+        if actions.resolveThreads {
+            for entry in tally.resolved {
+                let who = Array(Set(entry.authors)).sorted().joined(separator: ", ")
+                let n = entry.authors.count
+                parts.append("resolved \(n) conversation\(n == 1 ? "" : "s") on \(entry.label) (\(who))")
+            }
+            if tally.resolveFail > 0 { parts.append("\(tally.resolveFail) resolve failed") }
+            if tally.resolved.isEmpty && tally.resolveFail == 0 {
+                parts.append("no conversations to resolve")
+            }
+        }
         if actions.merge {
             let mergeAttempted = candidateCount - tally.mergeSkipped
             if mergeAttempted > 0 {
