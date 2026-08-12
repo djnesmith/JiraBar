@@ -152,3 +152,72 @@ final class AssigneeSegmentTests: XCTestCase {
         XCTAssertEqual(main.color, grey, "the status-grouped rows are all the user's own tickets")
     }
 }
+
+/// The label a user-field shortcut shows once its value is known. The defect risk here is not the string
+/// swap — it is that a FAILED read must not claim the field is empty.
+final class UserFieldMenuLabelTests: XCTestCase {
+
+    private func user(_ name: String) -> JiraUser { JiraUser(displayName: name) }
+
+    // MARK: - unknown is not empty
+
+    /// nil means the field read failed. Offering to "Add" would tell him nobody is on a ticket that may
+    /// well have someone, and he would act on it.
+    func testFailedReadKeepsTheConfiguredLabel() {
+        XCTAssertEqual(
+            AppDelegate.userFieldMenuLabel(configured: "Change Tester", users: nil),
+            "Change Tester"
+        )
+    }
+
+    func testSuccessfulEmptyReadOffersToAdd() {
+        XCTAssertEqual(
+            AppDelegate.userFieldMenuLabel(configured: "Change Tester", users: []),
+            "Add Tester"
+        )
+    }
+
+    func testPopulatedFieldKeepsTheConfiguredLabel() {
+        XCTAssertEqual(
+            AppDelegate.userFieldMenuLabel(configured: "Change Tester", users: [user("Alice Example")]),
+            "Change Tester"
+        )
+    }
+
+    // MARK: - deriving the "Add" form
+
+    func testChangePrefixIsSwapped() {
+        XCTAssertEqual(AppDelegate.addFormLabel("Change Tester"), "Add Tester")
+        XCTAssertEqual(AppDelegate.addFormLabel("Change Assignee"), "Add Assignee")
+        XCTAssertEqual(AppDelegate.addFormLabel("Change Reviewer"), "Add Reviewer")
+    }
+
+    /// Matching is case-insensitive, but the rest of the label keeps the case the user typed.
+    func testPrefixMatchIsCaseInsensitiveAndPreservesTheRemainder() {
+        XCTAssertEqual(AppDelegate.addFormLabel("change tester"), "Add tester")
+        XCTAssertEqual(AppDelegate.addFormLabel("CHANGE Tester"), "Add Tester")
+    }
+
+    func testSurroundingWhitespaceIsIgnored() {
+        XCTAssertEqual(AppDelegate.addFormLabel("  Change Tester  "), "Add Tester")
+    }
+
+    /// Labels are free text, so anything that isn't the prefix is left exactly as configured.
+    func testLabelsWithoutThePrefixAreUntouched() {
+        XCTAssertEqual(AppDelegate.addFormLabel("Reviewers"), "Reviewers")
+        XCTAssertEqual(AppDelegate.addFormLabel("Changes"), "Changes", "no space — not the prefix")
+        XCTAssertEqual(AppDelegate.addFormLabel("Exchange Tester"), "Exchange Tester")
+        XCTAssertEqual(AppDelegate.addFormLabel(""), "")
+    }
+
+    /// "Change " with nothing after it would otherwise become a bare "Add ".
+    func testPrefixWithNothingFollowingIsUntouched() {
+        XCTAssertEqual(AppDelegate.addFormLabel("Change "), "Change ")
+        XCTAssertEqual(AppDelegate.addFormLabel("Change"), "Change")
+    }
+
+    /// An unprefixed label still renders unchanged on an empty field — no invented wording.
+    func testEmptyFieldWithAnUnprefixedLabelIsUnchanged() {
+        XCTAssertEqual(AppDelegate.userFieldMenuLabel(configured: "Reviewers", users: []), "Reviewers")
+    }
+}

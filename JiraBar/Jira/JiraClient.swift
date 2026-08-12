@@ -611,9 +611,10 @@ public class JiraClient {
     }
 
     /// Fetches the current value(s) of a single user-picker field on an issue.
-    /// Returns an empty array when the field is genuinely null or missing, and nil when the
-    /// request itself failed (auth/network) — callers that pre-populate pickers or diff
-    /// against the current value must not mistake a failed read for an empty field.
+    /// Returns an empty array when the field is present and holds nobody, and nil when its value is
+    /// unknown — the request failed, or the field is not on this issue at all — because callers that
+    /// pre-populate pickers, diff against the current value, or offer to "add" must not mistake an
+    /// unknown value for an empty one.
     /// Works for both single-user fields (assignee) and multi-user custom fields.
     func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]?) -> Void) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)"
@@ -630,14 +631,7 @@ public class JiraClient {
                         completion(nil)
                         return
                     }
-                    let raw = fields[fieldId]
-                    if let arr = raw as? [[String: Any]] {
-                        completion(arr.compactMap(JiraClient.parseUser))
-                    } else if let obj = raw as? [String: Any] {
-                        completion([JiraClient.parseUser(obj)].compactMap { $0 })
-                    } else {
-                        completion([])
-                    }
+                    completion(JiraClient.fieldUsers(from: fields, fieldId: fieldId))
                 case .failure(let error):
                     print("\(url):  \(error)")
                     completion(nil)
@@ -664,6 +658,20 @@ public class JiraClient {
         updateIssueFields(issueKey: issueKey, fields: [fieldId: value]) { success, _ in
             completion(success)
         }
+    }
+
+    /// The users held by one field, or nil when the field's value is unknown.
+    ///
+    /// A field absent from `fields` is unknown, not empty: Jira omits the key entirely for a field that
+    /// is not on the issue's screen (verified against a live instance — asking for three field ids
+    /// returned only the two that applied, with no null for the third). An explicit null is a real
+    /// answer and yields no users.
+    static func fieldUsers(from fields: [String: Any], fieldId: String) -> [JiraUser]? {
+        guard let raw = fields[fieldId] else { return nil }
+        if raw is NSNull { return [] }
+        if let arr = raw as? [[String: Any]] { return arr.compactMap(parseUser) }
+        if let obj = raw as? [String: Any] { return [parseUser(obj)].compactMap { $0 } }
+        return nil
     }
 
     private static func parseUser(_ dict: [String: Any]) -> JiraUser? {

@@ -146,3 +146,48 @@ final class TransitionFieldRequirementsTests: XCTestCase {
         XCTAssertEqual(requirements.requiredFieldIds, ["resolution", "customfield_99002"])
     }
 }
+
+/// Reading a user-picker field's current value. The distinction that matters is unknown vs empty: only a
+/// field that is present and holds nobody may be reported as empty, because "empty" is what makes the
+/// menu offer to add someone and what makes a picker safe to submit.
+final class FieldUsersParsingTests: XCTestCase {
+
+    private let alice: [String: Any] = ["displayName": "Alice Example", "accountId": "a1"]
+
+    /// Jira omits the key entirely for a field that is not on the issue's screen — verified live. That is
+    /// unknown, not empty.
+    func testAbsentFieldIsUnknown() {
+        XCTAssertNil(JiraClient.fieldUsers(from: [:], fieldId: "customfield_99001"))
+        XCTAssertNil(
+            JiraClient.fieldUsers(from: ["customfield_other": [alice]], fieldId: "customfield_99001"),
+            "another field being present says nothing about this one"
+        )
+    }
+
+    /// An explicit null is a real answer: the field exists and holds nobody.
+    func testExplicitNullIsEmpty() {
+        XCTAssertEqual(JiraClient.fieldUsers(from: ["f": NSNull()], fieldId: "f")?.count, 0)
+    }
+
+    func testEmptyArrayIsEmpty() {
+        XCTAssertEqual(JiraClient.fieldUsers(from: ["f": [[String: Any]]()], fieldId: "f")?.count, 0)
+    }
+
+    func testMultiUserFieldReturnsEveryUser() {
+        let bob: [String: Any] = ["displayName": "Bob Example", "accountId": "b1"]
+        let users = JiraClient.fieldUsers(from: ["f": [alice, bob]], fieldId: "f")
+        XCTAssertEqual(users?.map(\.displayName), ["Alice Example", "Bob Example"])
+    }
+
+    /// A single-user field such as assignee arrives as an object rather than an array.
+    func testSingleUserFieldReturnsOneUser() {
+        let users = JiraClient.fieldUsers(from: ["assignee": alice], fieldId: "assignee")
+        XCTAssertEqual(users?.map(\.displayName), ["Alice Example"])
+    }
+
+    /// A shape we don't understand is unknown, not empty — the same rule as the absent key.
+    func testUnrecognisedShapeIsUnknown() {
+        XCTAssertNil(JiraClient.fieldUsers(from: ["f": "a string"], fieldId: "f"))
+        XCTAssertNil(JiraClient.fieldUsers(from: ["f": 42], fieldId: "f"))
+    }
+}

@@ -49,21 +49,25 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
         for target in targets {
             jiraClient.getIssueFieldUsers(issueKey: issueKey, fieldId: target.fieldId) { [weak self] users in
                 DispatchQueue.main.async {
-                    // nil (failed read) renders the same as empty — no user lines, non-destructive.
                     guard let self, let item = target.item else { return }
-                    item.attributedTitle = self.buildTitle(label: target.label, users: users ?? [], color: target.color ?? self.fallbackColor)
+                    item.attributedTitle = self.buildTitle(
+                        label: target.label, users: users, color: target.color ?? self.fallbackColor
+                    )
                 }
             }
         }
     }
 
-    /// Builds an attributed title: label on the first line, one user per subsequent line in the
+    /// Builds an attributed title: the resolved label (see `userFieldMenuLabel`) on the first line, one
+    /// user per subsequent line in the
     /// resolved color (per-shortcut override, else the ticket status color; falls back to the
     /// secondary label color when neither is set). Users get a slightly smaller font so the
     /// label remains the anchor.
-    private func buildTitle(label: String, users: [JiraUser], color: NSColor?) -> NSAttributedString {
-        let attr = NSMutableAttributedString(string: label)
-        guard !users.isEmpty else { return attr }
+    private func buildTitle(label: String, users: [JiraUser]?, color: NSColor?) -> NSAttributedString {
+        let attr = NSMutableAttributedString(
+            string: AppDelegate.userFieldMenuLabel(configured: label, users: users)
+        )
+        guard let users, !users.isEmpty else { return attr }
         // Two-space indent per line so the user names visually nest under the label rather
         // than aligning flush with it — reads as a sublist.
         let names = users.map { "  " + $0.displayName }.joined(separator: "\n")
@@ -531,6 +535,24 @@ extension AppDelegate {
         placeholder.addItem(waitingRow)
         item.submenu = placeholder
         return item
+    }
+
+    /// What a user-field shortcut should read once its value is known.
+    ///
+    /// nil `users` is a **failed read**, and unknown is not empty: it keeps the configured label rather
+    /// than claiming the field is free. Only a successful read of zero users may offer to add.
+    static func userFieldMenuLabel(configured: String, users: [JiraUser]?) -> String {
+        guard let users else { return configured }
+        return users.isEmpty ? addFormLabel(configured) : configured
+    }
+
+    /// "Change Tester" → "Add Tester". Shortcut labels are free text, so anything that isn't the
+    /// `Change ` prefix is left exactly as configured rather than guessed at.
+    static func addFormLabel(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "change "
+        guard trimmed.count > prefix.count, trimmed.lowercased().hasPrefix(prefix) else { return label }
+        return "Add " + trimmed.dropFirst(prefix.count)
     }
 
     /// Opt-in because green only means something in TODO, where the rule is "top-ranked *unassigned*
