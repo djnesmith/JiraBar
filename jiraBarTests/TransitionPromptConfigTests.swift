@@ -204,6 +204,37 @@ final class TransitionPromptConfigTests: XCTestCase {
         )
     }
 
+    /// Field ids are typed or pasted by hand and `fieldUpdates` trims them before posting, so the
+    /// requiredness comparison has to trim too — otherwise a stored trailing space renders the field
+    /// and silently never matches Jira's flag for it.
+    func testStoredFieldIdIsTrimmedBeforeMatchingJirasIds() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = " customfield_99002 "
+        config.userFieldLabel = "Testers"
+
+        XCTAssertTrue(config.hasUserField, "a padded id still renders the field")
+        XCTAssertTrue(
+            config.fieldIsRequired(config.userFieldId, manualFlag: false, jiraRequiredFieldIds: ["customfield_99002"])
+        )
+        XCTAssertEqual(
+            config.missingRequirements(
+                selectedUserCount: 0, textValue: "", selectValue: "",
+                jiraRequiredFieldIds: ["customfield_99002"]
+            ),
+            ["Select at least one testers — Testers is required."]
+        )
+    }
+
+    /// Case is not folded: these are distinct fields to Jira, and matching them would invent a
+    /// requirement that does not exist.
+    func testFieldIdMatchingIsCaseSensitive() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99002"
+        XCTAssertFalse(
+            config.fieldIsRequired(config.userFieldId, manualFlag: false, jiraRequiredFieldIds: ["CUSTOMFIELD_99002"])
+        )
+    }
+
     /// "At least one tester" is a COUNT. An empty multi-user picker satisfies presence and must
     /// still fail — that is the whole rule.
     func testRequiredUserFieldNeedsAtLeastOneSelection() {

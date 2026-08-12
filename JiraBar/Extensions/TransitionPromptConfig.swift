@@ -136,8 +136,12 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// Whether `fieldId` must be filled, from either source: Jira's own transition-screen flag, or
     /// this config's manual override. OR, not fallback — the two express different things and
     /// neither subsumes the other.
+    /// Trimmed before comparing, matching `fieldUpdates` — these ids are typed or pasted by hand, and
+    /// a stored trailing space would otherwise render the field while never matching Jira's flag for
+    /// it. Case is deliberately *not* folded: `resolution` and `Resolution` are different fields to
+    /// Jira, so lowercasing would invent matches.
     func fieldIsRequired(_ fieldId: String, manualFlag: Bool, jiraRequiredFieldIds: Set<String>) -> Bool {
-        manualFlag || jiraRequiredFieldIds.contains(fieldId)
+        manualFlag || jiraRequiredFieldIds.contains(fieldId.trimmingCharacters(in: .whitespaces))
     }
 
     /// Every required field that is still empty, phrased for the user. **All** of them, so fixing
