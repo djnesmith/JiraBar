@@ -1390,7 +1390,10 @@ extension AppDelegate {
         jiraClient.getIssueId(byKey: issueKey) { [weak self] issueId in
             guard let self else { return }
             guard let issueId else {
-                DispatchQueue.main.async { status.loading = false }
+                DispatchQueue.main.async {
+                    status.lookupFailed = true
+                    status.loading = false
+                }
                 return
             }
             self.jiraClient.getIssuePullRequests(issueId: issueId) { prs in
@@ -1418,6 +1421,8 @@ extension AppDelegate {
                                 isMerged: gh?.isMerged ?? false,
                                 viewerApproved: gh?.viewerLatestReviewState == "APPROVED",
                                 viewerRequestedChanges: gh?.viewerLatestReviewState == "CHANGES_REQUESTED",
+                                isDraft: gh?.isDraft ?? false,
+                                statesKnown: gh != nil,
                                 assignees: gh?.assignees ?? [],
                                 mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,
                                 squashMergeAllowed: gh?.squashMergeAllowed ?? false,
@@ -1476,23 +1481,24 @@ extension AppDelegate {
         // The denominator for the review summary: every candidate except the ones where the
         // review would add nothing. Empty when no review is going out at all, including the
         // blank-mandatory-comment case `reviewEvent` withholds.
-        let reviewTargets: [PRActionsStatus.LinkedPR] = actions.reviewEvent == nil
-            ? []
-            : candidates.filter { !prStatus.resubmissionIsRedundant(actions.review, on: $0) }
+        let reviewTargets: [PRActionsStatus.LinkedPR] = candidates.filter { pr in
+            let resolved = actions.review(forPRAt: pr.url)
+            guard actions.reviewEvent(for: resolved) != nil else { return false }
+            return !prStatus.resubmissionIsRedundant(resolved, on: pr)
+        }
 
         // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
         // reuse across all PRs.
         let mapPath = self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces)
         let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
 
-        if let event = actions.reviewEvent {
-            for pr in reviewTargets {
-                group.enter()
-                client.submitPRReview(url: pr.url, event: event, body: actions.trimmedReviewComment, token: token) { ok in
-                    syncQueue.async {
-                        if ok { tally.reviewOK += 1 } else { tally.reviewFailed.append(pr.label) }
-                        group.leave()
-                    }
+        for pr in reviewTargets {
+            guard let event = actions.reviewEvent(for: actions.review(forPRAt: pr.url)) else { continue }
+            group.enter()
+            client.submitPRReview(url: pr.url, event: event, body: actions.trimmedReviewComment, token: token) { ok in
+                syncQueue.async {
+                    if ok { tally.reviewOK += 1 } else { tally.reviewFailed.append(pr.label) }
+                    group.leave()
                 }
             }
         }

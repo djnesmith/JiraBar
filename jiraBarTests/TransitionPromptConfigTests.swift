@@ -448,6 +448,8 @@ final class PRActionsStatusTests: XCTestCase {
             isMerged: false,
             viewerApproved: approved,
             viewerRequestedChanges: requestedChanges,
+            isDraft: false,
+            statesKnown: true,
             assignees: [],
             mergeCommitAllowed: true,
             squashMergeAllowed: true,
@@ -875,5 +877,150 @@ final class SeenTransitionNamesTests: XCTestCase {
     func testMergingNothingNewIsStable() {
         let first = AppDelegate.mergedTransitionNames(existing: [], adding: ["Reopen", "Close"])
         XCTAssertEqual(AppDelegate.mergedTransitionNames(existing: first, adding: ["Close"]), first)
+    }
+}
+
+/// What each PR starts at when the dialog opens. This seeding IS the feature's safety: someone who
+/// hits Transition without reading the rows gets whatever this produced.
+final class PerPRSeedingTests: XCTestCase {
+
+    private func pr(
+        _ n: Int,
+        approved: Bool = false,
+        requestedChanges: Bool = false,
+        merged: Bool = false,
+        draft: Bool = false,
+        statesKnown: Bool = true
+    ) -> PRActionsStatus.LinkedPR {
+        PRActionsStatus.LinkedPR(
+            url: "https://github.com/o/r/pull/\(n)",
+            label: "o/r #\(n)",
+            isMerged: merged,
+            viewerApproved: approved,
+            viewerRequestedChanges: requestedChanges,
+            isDraft: draft,
+            statesKnown: statesKnown,
+            assignees: [],
+            mergeCommitAllowed: true,
+            squashMergeAllowed: true,
+            rebaseMergeAllowed: true
+        )
+    }
+
+    // MARK: - the agreed default: skip approved, but never drop it
+
+    func testRequestChangesSkipsAnApprovedPRAndActsOnTheRest() {
+        let prs = [pr(1, approved: true), pr(2, requestedChanges: true), pr(3)]
+        let seeded = PRActionsStatus.seedActions(blanket: .requestChanges, prs: prs)
+
+        XCTAssertEqual(seeded[prs[0].url], PRReviewAction.none, "approved earlier — skipped by default")
+        XCTAssertEqual(seeded[prs[1].url], .requestChanges, "a repeat is wanted; the comment is the payload")
+        XCTAssertEqual(seeded[prs[2].url], .requestChanges)
+        XCTAssertEqual(seeded.count, 3, "skipped is still listed, never dropped")
+    }
+
+    /// The skip is request-changes-only. Approving a PR you already approved is handled downstream by
+    /// resubmissionIsRedundant, so seeding must not double up and hide it from the row.
+    func testApproveSeedsEveryKnownPRIncludingOnesYouApproved() {
+        let prs = [pr(1, approved: true), pr(2)]
+        let seeded = PRActionsStatus.seedActions(blanket: .approve, prs: prs)
+        XCTAssertEqual(seeded[prs[0].url], .approve)
+        XCTAssertEqual(seeded[prs[1].url], .approve)
+    }
+
+    // MARK: - a PR whose state we could not read must never be acted on
+
+    /// Every flag on an unenriched PR is a default, not an observation. Seeding it with the blanket
+    /// action would silently supersede a review we cannot see.
+    func testUnknownStateIsSkippedEvenWhenItLooksUnreviewed() {
+        let prs = [pr(1, statesKnown: false), pr(2)]
+        let seeded = PRActionsStatus.seedActions(blanket: .requestChanges, prs: prs)
+        XCTAssertEqual(seeded[prs[0].url], PRReviewAction.none)
+        XCTAssertEqual(seeded[prs[1].url], .requestChanges)
+    }
+
+    func testMergedIsSkipped() {
+        let prs = [pr(1, merged: true)]
+        XCTAssertEqual(PRActionsStatus.seedActions(blanket: .approve, prs: prs)[prs[0].url], PRReviewAction.none)
+    }
+
+    func testNoReviewBlanketSeedsNothingToDo() {
+        let prs = [pr(1), pr(2)]
+        let seeded = PRActionsStatus.seedActions(blanket: .none, prs: prs)
+        XCTAssertEqual(Set(seeded.values), [PRReviewAction.none])
+    }
+
+    // MARK: - the caveats the rows show
+
+    func testSupersedeCaveatOnlyWhenRequestingChangesOverYourOwnApproval() {
+        XCTAssertEqual(
+            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true)),
+            "You approved this earlier — requesting changes will supersede that approval."
+        )
+        XCTAssertNil(PRActionsStatus.rowCaveat(action: .approve, on: pr(1, approved: true)))
+        XCTAssertNil(PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1)))
+    }
+
+    func testUnknownStateAndMergedCaveatsOutrankTheSupersedeOne() {
+        XCTAssertEqual(
+            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true, statesKnown: false)),
+            "Couldn't read this PR's review state — left alone."
+        )
+        XCTAssertEqual(
+            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true, merged: true)),
+            "Already merged."
+        )
+    }
+
+    func testRowStateReportsWhatIsKnown() {
+        XCTAssertEqual(PRActionsStatus.rowState(pr(1)), "open · no review from you")
+        XCTAssertEqual(PRActionsStatus.rowState(pr(1, approved: true)), "open · you approved")
+        XCTAssertEqual(PRActionsStatus.rowState(pr(1, requestedChanges: true)), "open · you requested changes")
+        XCTAssertEqual(PRActionsStatus.rowState(pr(1, draft: true)), "open · draft · no review from you")
+        XCTAssertEqual(PRActionsStatus.rowState(pr(1, statesKnown: false)), "state unknown")
+    }
+}
+
+/// Resolution of per-PR overrides against the blanket action. The empty-map case must behave exactly as
+/// it did before per-PR selection existed.
+final class PerPRResolutionTests: XCTestCase {
+
+    private func choices(_ review: PRReviewAction, overrides: [String: PRReviewAction] = [:]) -> PRActionChoices {
+        PRActionChoices(
+            review: review, reviewComment: "why", merge: false, mergeMethod: "rebase",
+            syncAssignee: false, reviewByPRURL: overrides
+        )
+    }
+
+    func testEmptyMapFallsBackToTheBlanketActionForEveryPR() {
+        let c = choices(.requestChanges)
+        XCTAssertEqual(c.review(forPRAt: "https://github.com/o/r/pull/1"), .requestChanges)
+        XCTAssertEqual(c.review(forPRAt: "anything"), .requestChanges)
+    }
+
+    func testOverrideWinsForItsOwnPROnly() {
+        let c = choices(.requestChanges, overrides: ["a": .none, "b": .approve])
+        XCTAssertEqual(c.review(forPRAt: "a"), PRReviewAction.none)
+        XCTAssertEqual(c.review(forPRAt: "b"), .approve)
+        XCTAssertEqual(c.review(forPRAt: "c"), .requestChanges, "unlisted PRs still follow the blanket")
+    }
+
+    func testHasWorkSeesAnOverrideEvenWhenTheBlanketIsNone() {
+        XCTAssertFalse(choices(.none).hasWork)
+        XCTAssertTrue(choices(.none, overrides: ["a": .requestChanges]).hasWork)
+        XCTAssertFalse(choices(.none, overrides: ["a": .none]).hasWork, "all-skip is no work")
+    }
+
+    /// The mandatory-comment guard must hold per resolved action, not only for the blanket one.
+    func testBlankCommentWithholdsARequestChangesOverride() {
+        var c = PRActionChoices(
+            review: .approve, reviewComment: "   ", merge: false, mergeMethod: "rebase",
+            syncAssignee: false, reviewByPRURL: ["a": .requestChanges]
+        )
+        XCTAssertEqual(c.reviewEvent(for: .approve), "APPROVE", "approve needs no body")
+        XCTAssertNil(c.reviewEvent(for: .requestChanges), "and the override is withheld, not sent bodyless")
+
+        c.reviewComment = "needs a test"
+        XCTAssertEqual(c.reviewEvent(for: .requestChanges), "REQUEST_CHANGES")
     }
 }
