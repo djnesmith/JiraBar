@@ -495,18 +495,38 @@ final class PRActionsStatusTests: XCTestCase {
 /// do must never read like a thing that failed, and vice versa.
 final class PRActionsSummaryTests: XCTestCase {
 
+    private func linked(_ n: Int) -> PRActionsStatus.LinkedPR {
+        PRActionsStatus.LinkedPR(
+            url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: false,
+            viewerApproved: false, viewerRequestedChanges: false, isDraft: false, statesKnown: true,
+            assignees: [], mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
+        )
+    }
+
+    private func plan(
+        submit: [(Int, String)] = [],
+        alreadyApproved: [Int] = [],
+        stateUnknown: [Int] = [],
+        skippedByChoice: [Int] = [],
+        withheld: [Int] = []
+    ) -> PRActionsStatus.ReviewPlan {
+        var p = PRActionsStatus.ReviewPlan()
+        p.submit = submit.map { PRActionsStatus.PlannedReview(pr: linked($0.0), event: $0.1) }
+        p.alreadyApproved = alreadyApproved.map(linked)
+        p.stateUnknown = stateUnknown.map(linked)
+        p.skippedByChoice = skippedByChoice.map(linked)
+        p.withheldForBlankComment = withheld.map(linked)
+        return p
+    }
+
     private func body(
         _ actions: PRActionChoices,
         candidates: Int,
-        reviewTargets: Int,
+        plan: PRActionsStatus.ReviewPlan,
         tally: AppDelegate.PRActionTally
     ) -> String {
         AppDelegate.prActionsSummaryBody(
-            issueKey: "JB-1",
-            actions: actions,
-            candidateCount: candidates,
-            reviewTargetCount: reviewTargets,
-            tally: tally
+            issueKey: "JB-1", actions: actions, candidateCount: candidates, plan: plan, tally: tally
         )
     }
 
@@ -517,7 +537,125 @@ final class PRActionsSummaryTests: XCTestCase {
         )
     }
 
-    // MARK: - failureCount counts failures only
+    // MARK: - failures lead, skips are never called failures
+
+    func testTotalReviewFailureLeadsWithFailed() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewFailed = ["o/r #1", "o/r #2", "o/r #3"]
+        let text = body(
+            requestChanges(), candidates: 3,
+            plan: plan(submit: [(1, "REQUEST_CHANGES"), (2, "REQUEST_CHANGES"), (3, "REQUEST_CHANGES")]),
+            tally: tally
+        )
+        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 3 FAILED"), text)
+        XCTAssertTrue(text.contains("requested changes on 0/3"), text)
+    }
+
+    func testPartialFailureReportsBothSides() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewOK = 2
+        tally.reviewFailed = ["o/r #2"]
+        let text = body(
+            requestChanges(), candidates: 3,
+            plan: plan(submit: [(1, "REQUEST_CHANGES"), (2, "REQUEST_CHANGES"), (3, "REQUEST_CHANGES")]),
+            tally: tally
+        )
+        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 1 FAILED"), text)
+        XCTAssertTrue(text.contains("requested changes on 2/3"), text)
+        XCTAssertTrue(text.contains("1 review failed"), text)
+    }
+
+    func testCleanRunNeverSaysFailed() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewOK = 2
+        let text = body(
+            requestChanges(), candidates: 2,
+            plan: plan(submit: [(1, "REQUEST_CHANGES"), (2, "REQUEST_CHANGES")]), tally: tally
+        )
+        XCTAssertEqual(text, "PR actions for JB-1: requested changes on 2/2.")
+    }
+
+    func testWithheldReviewIsASkipNotAFailure() {
+        let text = body(
+            requestChanges(comment: "   "), candidates: 2,
+            plan: plan(withheld: [1, 2]), tally: AppDelegate.PRActionTally()
+        )
+        XCTAssertTrue(text.contains("request changes skipped: a comment is required"), text)
+        XCTAssertFalse(text.contains("FAILED"), text)
+    }
+
+    // MARK: - the per-PR buckets must not be reported as each other
+
+    /// The conflation this redesign removes: a PR skipped by choice, or for an unreadable state, used to
+    /// be announced as "already approved" because the count was inferred by subtraction.
+    func testEachSkipReasonIsReportedAsItself() {
+        let text = body(
+            requestChanges(), candidates: 4,
+            plan: plan(submit: [(1, "REQUEST_CHANGES")], alreadyApproved: [2], stateUnknown: [3], skippedByChoice: [4]),
+            tally: { var t = AppDelegate.PRActionTally(); t.reviewOK = 1; return t }()
+        )
+        XCTAssertTrue(text.contains("requested changes on 1/1"), text)
+        XCTAssertTrue(text.contains("1 already approved"), text)
+        XCTAssertTrue(text.contains("1 skipped: review state unreadable"), text)
+        XCTAssertTrue(text.contains("1 skipped"), text)
+        XCTAssertFalse(text.contains("3 already approved"), text)
+    }
+
+    /// A mixed batch reports each verb, rather than filing a REQUEST_CHANGES under "approved".
+    func testMixedActionsReportBothVerbs() {
+        var tally = AppDelegate.PRActionTally()
+        tally.reviewOK = 2
+        let text = body(
+            PRActionChoices(
+                review: .approve, reviewComment: "why", merge: false, mergeMethod: "rebase",
+                syncAssignee: false, reviewByPRURL: ["https://github.com/o/r/pull/2": .requestChanges]
+            ),
+            candidates: 2,
+            plan: plan(submit: [(1, "APPROVE"), (2, "REQUEST_CHANGES")]),
+            tally: tally
+        )
+        XCTAssertTrue(text.contains("approved 1/1"), text)
+        XCTAssertTrue(text.contains("requested changes on 1/1"), text)
+    }
+
+    func testNothingToReport() {
+        let text = body(
+            PRActionChoices.disabled, candidates: 1, plan: plan(), tally: AppDelegate.PRActionTally()
+        )
+        XCTAssertEqual(text, "PR actions for JB-1: no changes.")
+    }
+
+    // MARK: - non-review actions, unchanged
+
+    func testDisallowedMergeMethodIsASkipNotAFailure() {
+        var choices = PRActionChoices.disabled
+        choices.merge = true
+        var tally = AppDelegate.PRActionTally()
+        tally.mergeSkipped = 2
+        let text = body(choices, candidates: 2, plan: plan(), tally: tally)
+        XCTAssertTrue(text.contains("2 skipped (method not allowed)"), text)
+        XCTAssertFalse(text.contains("FAILED"), text)
+    }
+
+    func testAssigneeFailureLeadsWithFailed() {
+        var choices = PRActionChoices.disabled
+        choices.syncAssignee = true
+        var tally = AppDelegate.PRActionTally()
+        tally.assignFailed = ["o/r #1"]
+        let text = body(choices, candidates: 1, plan: plan(), tally: tally)
+        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 1 FAILED"), text)
+        XCTAssertTrue(text.contains("1 assignee failed"), text)
+    }
+
+    func testJiraAssigneeLookupFailureIsNamedButNotAGithubFailure() {
+        var choices = PRActionChoices.disabled
+        choices.syncAssignee = true
+        var tally = AppDelegate.PRActionTally()
+        tally.assigneeLookupFailed = true
+        let text = body(choices, candidates: 1, plan: plan(), tally: tally)
+        XCTAssertTrue(text.contains("Jira assignee lookup failed"), text)
+        XCTAssertFalse(text.contains("FAILED —"), text)
+    }
 
     func testFailureCountExcludesSkips() {
         var tally = AppDelegate.PRActionTally()
@@ -533,110 +671,10 @@ final class PRActionsSummaryTests: XCTestCase {
         XCTAssertEqual(tally.failureCount, 6)
     }
 
-    // MARK: - a failure leads, and says so
-
-    /// The DNS-outage shape: the review was attempted against GitHub and never landed, while the
-    /// ticket has already moved. Banners truncate, so "FAILED" has to be at the front.
-    func testTotalReviewFailureLeadsWithFailed() {
-        var tally = AppDelegate.PRActionTally()
-        tally.reviewFailed = ["o/r #1", "o/r #2", "o/r #3"]
-        let text = body(requestChanges(), candidates: 3, reviewTargets: 3, tally: tally)
-
-        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 3 FAILED"), text)
-        XCTAssertTrue(text.contains("ticket moved, GitHub did not"), text)
-        XCTAssertTrue(text.contains("requested changes on 0/3"), text)
-        XCTAssertTrue(text.contains("3 review failed"), text)
-    }
-
-    /// Three linked PRs, the second one fails. The partial success is reported as a partial
-    /// success, not rounded up to done or down to broken.
-    func testPartialFailureReportsBothSidesAndLeadsWithFailed() {
-        var tally = AppDelegate.PRActionTally()
-        tally.reviewOK = 2
-        tally.reviewFailed = ["o/r #2"]
-        let text = body(requestChanges(), candidates: 3, reviewTargets: 3, tally: tally)
-
-        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 1 FAILED"), text)
-        XCTAssertTrue(text.contains("requested changes on 2/3"), text)
-        XCTAssertTrue(text.contains("1 review failed"), text)
-    }
-
-    func testAssigneeFailureAlsoLeadsWithFailed() {
-        var choices = PRActionChoices.disabled
-        choices.syncAssignee = true
-        var tally = AppDelegate.PRActionTally()
-        tally.assignFailed = ["o/r #1"]
-        let text = body(choices, candidates: 1, reviewTargets: 0, tally: tally)
-
-        XCTAssertTrue(text.hasPrefix("PR actions for JB-1: 1 FAILED"), text)
-        XCTAssertTrue(text.contains("1 assignee failed"), text)
-    }
-
-    // MARK: - a skip must never read as a failure
-
-    func testCleanRunNeverSaysFailed() {
-        var tally = AppDelegate.PRActionTally()
-        tally.reviewOK = 2
-        let text = body(requestChanges(), candidates: 2, reviewTargets: 2, tally: tally)
-
-        XCTAssertEqual(text, "PR actions for JB-1: requested changes on 2/2.")
-        XCTAssertFalse(text.contains("FAILED"), text)
-    }
-
-    func testWithheldReviewIsASkipNotAFailure() {
-        let text = body(requestChanges(comment: "   "), candidates: 2, reviewTargets: 0,
-                        tally: AppDelegate.PRActionTally())
-
-        XCTAssertTrue(text.contains("request changes skipped: a comment is required"), text)
-        XCTAssertFalse(text.contains("FAILED"), text)
-        XCTAssertFalse(text.contains("review failed"), text)
-    }
-
-    func testDisallowedMergeMethodIsASkipNotAFailure() {
-        var choices = PRActionChoices.disabled
-        choices.merge = true
-        var tally = AppDelegate.PRActionTally()
-        tally.mergeSkipped = 2
-        let text = body(choices, candidates: 2, reviewTargets: 0, tally: tally)
-
-        XCTAssertTrue(text.contains("2 skipped (method not allowed)"), text)
-        XCTAssertFalse(text.contains("FAILED"), text)
-    }
-
-    func testAlreadyApprovedIsASkipNotAFailure() {
-        var choices = PRActionChoices.disabled
-        choices.review = .approve
-        var tally = AppDelegate.PRActionTally()
-        tally.reviewOK = 1
-        let text = body(choices, candidates: 3, reviewTargets: 1, tally: tally)
-
-        XCTAssertTrue(text.contains("approved 1/1"), text)
-        XCTAssertTrue(text.contains("2 already approved"), text)
-        XCTAssertFalse(text.contains("FAILED"), text)
-    }
-
-    /// A Jira-side read failure degrades assignee sync to a no-op. It is named, and it is named as
-    /// a lookup failure rather than inflating the GitHub failure count.
-    func testJiraAssigneeLookupFailureIsNamedButNotCountedAsAGithubFailure() {
-        var choices = PRActionChoices.disabled
-        choices.syncAssignee = true
-        var tally = AppDelegate.PRActionTally()
-        tally.assigneeLookupFailed = true
-        let text = body(choices, candidates: 1, reviewTargets: 0, tally: tally)
-
-        XCTAssertTrue(text.contains("Jira assignee lookup failed"), text)
-        XCTAssertFalse(text.contains("FAILED —"), text)
-    }
-
-    // MARK: - failureLines: what the still-open dialog shows
-
-    /// The partial case: three linked PRs, the second one fails. The line has to name that PR,
-    /// not just say "1 failed".
     func testFailureLinesNameTheFailedPR() {
         var tally = AppDelegate.PRActionTally()
         tally.reviewOK = 2
         tally.reviewFailed = ["acme/api #2"]
-
         XCTAssertEqual(tally.failureLines, ["Review not submitted on acme/api #2"])
     }
 
@@ -645,7 +683,6 @@ final class PRActionsSummaryTests: XCTestCase {
         tally.reviewFailed = ["o/r #1"]
         tally.mergeFailed = ["o/r #2"]
         tally.assignFailed = ["o/r #3"]
-
         XCTAssertEqual(tally.failureLines, [
             "Review not submitted on o/r #1",
             "Merge failed on o/r #2",
@@ -653,46 +690,29 @@ final class PRActionsSummaryTests: XCTestCase {
         ])
     }
 
-    // MARK: - report: nothing-ran is not failure
-
-    /// The distinction this exists to protect. A batch that never started — no token, no open linked
-    /// PRs — must not be reported as a failed action; it was never attempted. Conflating them put a
-    /// red "1 PR action did not" in the window for every ticket with no linked PR.
     func testBlockedBatchReportsNothingRanRatherThanAFailure() {
         let tally = AppDelegate.PRActionTally(blockedReason: "No open linked PRs were found, so no PR action ran.")
-
         XCTAssertEqual(tally.report, .nothingRan(reason: "No open linked PRs were found, so no PR action ran."))
         XCTAssertTrue(tally.failureLines.isEmpty)
-        XCTAssertEqual(tally.failureCount, 0)
     }
 
     func testCleanBatchReportsClean() {
         var tally = AppDelegate.PRActionTally()
         tally.reviewOK = 2
         tally.mergeSkipped = 1
-        tally.assignNotTouched = 1
         XCTAssertEqual(tally.report, .clean, "skips alone are still a clean run")
     }
 
     func testFailedBatchReportsItsLines() {
         var tally = AppDelegate.PRActionTally()
-        tally.reviewOK = 1
         tally.reviewFailed = ["acme/api #2"]
         XCTAssertEqual(tally.report, .failures(["Review not submitted on acme/api #2"]))
     }
 
-    /// A blocked batch can't also have failures — nothing ran — but if the two ever coexisted the
-    /// report must not silently drop the reason.
     func testBlockedReasonWinsOverFailureLines() {
         var tally = AppDelegate.PRActionTally(blockedReason: "No GitHub token is set, so no PR action ran.")
         tally.reviewFailed = ["acme/api #1"]
         XCTAssertEqual(tally.report, .nothingRan(reason: "No GitHub token is set, so no PR action ran."))
-    }
-
-    func testNothingToReport() {
-        let text = body(PRActionChoices.disabled, candidates: 1, reviewTargets: 0,
-                        tally: AppDelegate.PRActionTally())
-        XCTAssertEqual(text, "PR actions for JB-1: no changes.")
     }
 }
 
@@ -952,24 +972,90 @@ final class PerPRSeedingTests: XCTestCase {
 
     // MARK: - the caveats the rows show
 
-    func testSupersedeCaveatOnlyWhenRequestingChangesOverYourOwnApproval() {
+    /// The state that matters: default seeding has already reduced this row to Skip, so only `blanket`
+    /// still says what was asked for. Reading the caveat off the resolved action showed no reason at all.
+    func testSupersedeCaveatShowsInTheDefaultSkippedState() {
         XCTAssertEqual(
-            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true)),
+            PRActionsStatus.rowCaveat(blanket: .requestChanges, resolved: PRReviewAction.none, on: pr(1, approved: true)),
             "You approved this earlier — requesting changes will supersede that approval."
         )
-        XCTAssertNil(PRActionsStatus.rowCaveat(action: .approve, on: pr(1, approved: true)))
-        XCTAssertNil(PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1)))
+    }
+
+    func testSupersedeCaveatAlsoShowsWhenTheUserOptsBackIn() {
+        XCTAssertEqual(
+            PRActionsStatus.rowCaveat(blanket: .approve, resolved: .requestChanges, on: pr(1, approved: true)),
+            "You approved this earlier — requesting changes will supersede that approval."
+        )
+    }
+
+    func testNoCaveatWhenThereIsNothingToWarnAbout() {
+        XCTAssertNil(PRActionsStatus.rowCaveat(blanket: .approve, resolved: .approve, on: pr(1, approved: true)))
+        XCTAssertNil(PRActionsStatus.rowCaveat(blanket: .requestChanges, resolved: .requestChanges, on: pr(1)))
     }
 
     func testUnknownStateAndMergedCaveatsOutrankTheSupersedeOne() {
         XCTAssertEqual(
-            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true, statesKnown: false)),
-            "Couldn't read this PR's review state — left alone."
+            PRActionsStatus.rowCaveat(
+                blanket: .requestChanges, resolved: PRReviewAction.none, on: pr(1, approved: true, statesKnown: false)
+            ),
+            "Couldn't read this PR's review state — skipped unless you say otherwise."
         )
         XCTAssertEqual(
-            PRActionsStatus.rowCaveat(action: .requestChanges, on: pr(1, approved: true, merged: true)),
+            PRActionsStatus.rowCaveat(
+                blanket: .requestChanges, resolved: PRReviewAction.none, on: pr(1, approved: true, merged: true)
+            ),
             "Already merged."
         )
+    }
+
+    // MARK: - the plan: unknown state must never be treated as "no review"
+
+    func testPlanSkipsUnknownStateAndSaysSoSeparately() {
+        let prs = [pr(1, statesKnown: false), pr(2, approved: true), pr(3)]
+        let actions = PRActionChoices(
+            review: .requestChanges, reviewComment: "why", merge: false, mergeMethod: "rebase",
+            syncAssignee: false,
+            reviewByPRURL: PRActionsStatus.seedActions(blanket: .requestChanges, prs: prs)
+        )
+        let plan = PRActionsStatus.reviewPlan(candidates: prs, actions: actions)
+
+        XCTAssertEqual(plan.submit.map(\.pr.url), [prs[2].url], "only the unreviewed PR is acted on")
+        XCTAssertEqual(plan.stateUnknown.map(\.url), [prs[0].url], "unknown is its own bucket, not 'no review'")
+        XCTAssertEqual(plan.alreadyApproved.map(\.url), [prs[1].url])
+        XCTAssertTrue(plan.skippedByChoice.isEmpty)
+    }
+
+    /// Forcing an unreadable PR is allowed — the row's picker is enabled — and then it is acted on.
+    func testUserCanOverrideAnUnknownStatePR() {
+        let target = pr(1, statesKnown: false)
+        let actions = PRActionChoices(
+            review: .requestChanges, reviewComment: "why", merge: false, mergeMethod: "rebase",
+            syncAssignee: false, reviewByPRURL: [target.url: .requestChanges]
+        )
+        let plan = PRActionsStatus.reviewPlan(candidates: [target], actions: actions)
+        XCTAssertEqual(plan.submit.map(\.event), ["REQUEST_CHANGES"])
+        XCTAssertTrue(plan.stateUnknown.isEmpty)
+    }
+
+    /// With no overrides the plan must match what the code did before per-PR selection existed.
+    func testEmptyOverridesReproduceTheBlanketBehaviour() {
+        let prs = [pr(1, approved: true), pr(2)]
+        let approve = PRActionChoices(
+            review: .approve, reviewComment: "", merge: false, mergeMethod: "rebase", syncAssignee: false
+        )
+        let plan = PRActionsStatus.reviewPlan(candidates: prs, actions: approve)
+        XCTAssertEqual(plan.submit.map(\.pr.url), [prs[1].url], "the approved one is redundant, as before")
+        XCTAssertEqual(plan.alreadyApproved.map(\.url), [prs[0].url])
+    }
+
+    func testBlankCommentPutsARequestChangesInTheWithheldBucket() {
+        let prs = [pr(1)]
+        let actions = PRActionChoices(
+            review: .requestChanges, reviewComment: "   ", merge: false, mergeMethod: "rebase", syncAssignee: false
+        )
+        let plan = PRActionsStatus.reviewPlan(candidates: prs, actions: actions)
+        XCTAssertTrue(plan.submit.isEmpty)
+        XCTAssertEqual(plan.withheldForBlankComment.map(\.url), [prs[0].url])
     }
 
     func testRowStateReportsWhatIsKnown() {

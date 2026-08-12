@@ -8,7 +8,8 @@ struct PRActionChoices {
     var merge: Bool
     var mergeMethod: String
     var syncAssignee: Bool
-    /// Empty means `review` applies to every PR — what the single-PR and same-action-for-all paths produce.
+    /// Empty means `review` applies to every PR. The dialog seeds an entry per PR, so an empty map is
+    /// what a caller with no PR list produces — not the everyday path.
     var reviewByPRURL: [String: PRReviewAction] = [:]
 
     static let disabled = PRActionChoices(
@@ -39,7 +40,8 @@ struct PRActionChoices {
     /// A review was asked for and withheld only because its mandatory comment is blank. The
     /// summary notification has to name that, rather than report it as a failed review.
     var reviewBlockedForEmptyComment: Bool {
-        review.requiresComment && trimmedReviewComment.isEmpty
+        guard trimmedReviewComment.isEmpty else { return false }
+        return review.requiresComment || reviewByPRURL.values.contains { $0.requiresComment }
     }
 
     /// True when at least one PR action would be attempted.
@@ -219,13 +221,62 @@ final class PRActionsStatus: ObservableObject {
     }
 
     /// Why a row is not doing what the blanket action says, or what it will override if switched on.
-    static func rowCaveat(action: PRReviewAction, on pr: LinkedPR) -> String? {
-        if !pr.statesKnown { return "Couldn't read this PR's review state — left alone." }
+    ///
+    /// Takes both actions because the interesting case is the default one, where `resolved` has already
+    /// been reduced to Skip and only `blanket` still says what was asked for.
+    static func rowCaveat(blanket: PRReviewAction, resolved: PRReviewAction, on pr: LinkedPR) -> String? {
+        if !pr.statesKnown { return "Couldn't read this PR's review state — skipped unless you say otherwise." }
         if pr.isMerged { return "Already merged." }
-        if pr.viewerApproved && action == .requestChanges {
+        if pr.viewerApproved && (blanket == .requestChanges || resolved == .requestChanges) {
             return "You approved this earlier — requesting changes will supersede that approval."
         }
         return nil
+    }
+
+    /// One PR and the review event it will receive.
+    struct PlannedReview {
+        let pr: LinkedPR
+        let event: String
+    }
+
+    /// What the batch is actually going to do, decided once so the run and the summary cannot disagree.
+    /// Every candidate lands in exactly one bucket.
+    struct ReviewPlan {
+        var submit: [PlannedReview] = []
+        /// Asked for, refused as adding nothing: a second approve, or the agreed skip of a PR you
+        /// approved when the blanket action is request-changes.
+        var alreadyApproved: [LinkedPR] = []
+        /// Not attempted because the PR's review state could not be read.
+        var stateUnknown: [LinkedPR] = []
+        var skippedByChoice: [LinkedPR] = []
+        /// Asked for, withheld because its mandatory comment is blank. Never silent.
+        var withheldForBlankComment: [LinkedPR] = []
+
+        /// One clause per verb, so a mixed batch is not reported under a single one.
+        var submittedEvents: [String] { Array(Set(submit.map(\.event))).sorted() }
+        func submitCount(for event: String) -> Int { submit.filter { $0.event == event }.count }
+    }
+
+    static func reviewPlan(candidates: [LinkedPR], actions: PRActionChoices) -> ReviewPlan {
+        var plan = ReviewPlan()
+        for pr in candidates {
+            let resolved = actions.review(forPRAt: pr.url)
+            switch resolved {
+            case .none:
+                if !pr.statesKnown { plan.stateUnknown.append(pr) }
+                else if pr.viewerApproved && actions.review == .requestChanges { plan.alreadyApproved.append(pr) }
+                else if actions.review != .none { plan.skippedByChoice.append(pr) }
+            case .approve where pr.viewerApproved:
+                plan.alreadyApproved.append(pr)
+            case .approve, .requestChanges:
+                if let event = actions.reviewEvent(for: resolved) {
+                    plan.submit.append(PlannedReview(pr: pr, event: event))
+                } else {
+                    plan.withheldForBlankComment.append(pr)
+                }
+            }
+        }
+        return plan
     }
 
     static func rowState(_ pr: LinkedPR) -> String {
@@ -273,7 +324,7 @@ struct TransitionDialog: View {
     @State private var prSyncAssignee: Bool = true
     /// Runtime only: a choice about one PR today has no meaning next time, so none of this is persisted.
     @State private var perPRActions: [String: PRReviewAction] = [:]
-    @State private var perPRMode: Bool = false
+    @State private var touchedPRs: Set<String> = []
     /// Jira's own rejection message from the last attempt — e.g. "Testers are required before
     /// moving into QA." Kept in the window because the notification is missable and the console
     /// line is invisible.
@@ -355,6 +406,7 @@ struct TransitionDialog: View {
             }
             // Seed the merge-method picker from the config-level default.
             prMergeMethod = config.prMergeMethod
+            seedPerPRActions()
         }
         .onChange(of: prStatus.openPRs.map(\.url)) { _ in seedPerPRActions() }
         .onChange(of: prReview) { _ in seedPerPRActions() }
@@ -381,10 +433,6 @@ struct TransitionDialog: View {
 
     /// Whether the per-PR list is offered at all. One PR renders exactly as it did before this existed —
     /// the everyday flow does not pay for the multi-PR case.
-    private var offersPerPR: Bool {
-        config.prReviewAction != .none && prStatus.openPRs.count > 1
-    }
-
     private var currentPRChoices: PRActionChoices {
         guard config.hasPRActions else { return .disabled }
         return PRActionChoices(
@@ -393,7 +441,7 @@ struct TransitionDialog: View {
             merge: config.allowsPRMerge && prMerge,
             mergeMethod: prMergeMethod,
             syncAssignee: config.enablePRAssigneeSync && prSyncAssignee,
-            reviewByPRURL: offersPerPR ? perPRActions : [:]
+            reviewByPRURL: perPRActions
         )
     }
 
@@ -412,14 +460,7 @@ struct TransitionDialog: View {
 
             if config.prReviewAction != .none {
                 Toggle(reviewToggleLabel, isOn: $prReview)
-                if prReview, offersPerPR {
-                    Picker("", selection: $perPRMode) {
-                        Text("Same action for every PR").tag(false)
-                        Text("Choose per PR").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                    .labelsHidden()
-                    .padding(.leading, 20)
+                if prReview, !prStatus.openPRs.isEmpty {
                     perPRRows
                 }
                 if prReview {
@@ -464,9 +505,11 @@ struct TransitionDialog: View {
                         }
                         .labelsHidden()
                         .frame(width: 150)
-                        .disabled(!perPRMode || !pr.statesKnown || pr.isMerged)
+                        .disabled(pr.isMerged)
                     }
-                    if let caveat = PRActionsStatus.rowCaveat(action: resolvedAction(for: pr), on: pr) {
+                    if let caveat = PRActionsStatus.rowCaveat(
+                        blanket: blanketAction, resolved: resolvedAction(for: pr), on: pr
+                    ) {
                         Text(caveat).font(.footnote).foregroundColor(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -483,7 +526,10 @@ struct TransitionDialog: View {
     private func binding(for pr: PRActionsStatus.LinkedPR) -> Binding<PRReviewAction> {
         Binding(
             get: { resolvedAction(for: pr) },
-            set: { perPRActions[pr.url] = $0 }
+            set: {
+                perPRActions[pr.url] = $0
+                touchedPRs.insert(pr.url)
+            }
         )
     }
 
@@ -850,9 +896,11 @@ struct TransitionDialog: View {
 
     // MARK: - Helpers
 
-    /// An untouched dialog always reflects the current blanket choice, so this re-runs when it changes.
+    /// Reseeds from the blanket action, keeping any row the user has set by hand. Without that, flipping
+    /// the review checkbox off and on would silently discard explicit choices.
     private func seedPerPRActions() {
-        perPRActions = PRActionsStatus.seedActions(blanket: blanketAction, prs: prStatus.openPRs)
+        let seeded = PRActionsStatus.seedActions(blanket: blanketAction, prs: prStatus.openPRs)
+        perPRActions = seeded.merging(perPRActions.filter { touchedPRs.contains($0.key) }) { _, chosen in chosen }
     }
 
     private func toggle(_ user: JiraUser) {
@@ -958,7 +1006,7 @@ struct TransitionDialog: View {
         if config.hasPRActions {
             var pr: CGFloat = 60 // headline + status summary
             if config.prReviewAction != .none { pr += (prReview ? 90 : 24) }
-            if prReview, offersPerPR { pr += 40 + CGFloat(prStatus.openPRs.count) * 34 }
+            if prReview { pr += CGFloat(prStatus.openPRs.count) * 46 }
             if config.allowsPRMerge { pr += 32 }
             if config.enablePRAssigneeSync { pr += 24 }
             h += pr

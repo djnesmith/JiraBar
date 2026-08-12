@@ -30,6 +30,23 @@ final class RecordingNotice {
 
 final class UserNoticeInjectionTests: XCTestCase {
 
+    /// A plan submitting `n` reviews, so these tests can stay about the delivered notification.
+    static func planSubmitting(_ n: Int, event: String) -> PRActionsStatus.ReviewPlan {
+        var plan = PRActionsStatus.ReviewPlan()
+        plan.submit = (1...n).map { i in
+            PRActionsStatus.PlannedReview(
+                pr: PRActionsStatus.LinkedPR(
+                    url: "https://github.com/o/r/pull/\(i)", label: "o/r #\(i)", isMerged: false,
+                    viewerApproved: false, viewerRequestedChanges: false, isDraft: false,
+                    statesKnown: true, assignees: [], mergeCommitAllowed: true,
+                    squashMergeAllowed: true, rebaseMergeAllowed: true
+                ),
+                event: event
+            )
+        }
+        return plan
+    }
+
     private var notice: RecordingNotice!
 
     override func setUp() {
@@ -65,7 +82,7 @@ final class UserNoticeInjectionTests: XCTestCase {
                 merge: false, mergeMethod: "rebase", syncAssignee: false
             ),
             candidateCount: 3,
-            reviewTargetCount: 3,
+            plan: Self.planSubmitting(3, event: "REQUEST_CHANGES"),
             tally: tally
         ))
 
@@ -86,7 +103,7 @@ final class UserNoticeInjectionTests: XCTestCase {
                 merge: false, mergeMethod: "rebase", syncAssignee: false
             ),
             candidateCount: 2,
-            reviewTargetCount: 2,
+            plan: Self.planSubmitting(2, event: "REQUEST_CHANGES"),
             tally: tally
         ))
 

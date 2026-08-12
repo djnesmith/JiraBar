@@ -1481,23 +1481,20 @@ extension AppDelegate {
         // The denominator for the review summary: every candidate except the ones where the
         // review would add nothing. Empty when no review is going out at all, including the
         // blank-mandatory-comment case `reviewEvent` withholds.
-        let reviewTargets: [PRActionsStatus.LinkedPR] = candidates.filter { pr in
-            let resolved = actions.review(forPRAt: pr.url)
-            guard actions.reviewEvent(for: resolved) != nil else { return false }
-            return !prStatus.resubmissionIsRedundant(resolved, on: pr)
-        }
+        let plan = PRActionsStatus.reviewPlan(candidates: candidates, actions: actions)
 
         // Assignee sync needs the mapped GitHub login of the Jira assignee. Look it up once and
         // reuse across all PRs.
         let mapPath = self.jiraGithubUserMapPath.trimmingCharacters(in: .whitespaces)
         let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
 
-        for pr in reviewTargets {
-            guard let event = actions.reviewEvent(for: actions.review(forPRAt: pr.url)) else { continue }
+        for planned in plan.submit {
             group.enter()
-            client.submitPRReview(url: pr.url, event: event, body: actions.trimmedReviewComment, token: token) { ok in
+            client.submitPRReview(
+                url: planned.pr.url, event: planned.event, body: actions.trimmedReviewComment, token: token
+            ) { ok in
                 syncQueue.async {
-                    if ok { tally.reviewOK += 1 } else { tally.reviewFailed.append(pr.label) }
+                    if ok { tally.reviewOK += 1 } else { tally.reviewFailed.append(planned.pr.label) }
                     group.leave()
                 }
             }
@@ -1567,7 +1564,7 @@ extension AppDelegate {
                     issueKey: issueKey,
                     actions: actions,
                     candidateCount: candidates.count,
-                    reviewTargetCount: reviewTargets.count,
+                    plan: plan,
                     tally: final
                 ))
                 completion(final)
@@ -1637,26 +1634,27 @@ extension AppDelegate {
         issueKey: String,
         actions: PRActionChoices,
         candidateCount: Int,
-        reviewTargetCount: Int,
+        plan: PRActionsStatus.ReviewPlan,
         tally: PRActionTally
     ) -> String {
         var parts: [String] = []
-        if actions.review != .none {
-            if actions.reviewBlockedForEmptyComment {
-                // Never silent: the review was withheld on purpose, not attempted and lost.
-                parts.append("request changes skipped: a comment is required")
-            } else {
-                if reviewTargetCount > 0 {
-                    let verb = actions.review == .requestChanges ? "requested changes on" : "approved"
-                    parts.append("\(verb) \(tally.reviewOK)/\(reviewTargetCount)")
-                    if tally.reviewFail > 0 { parts.append("\(tally.reviewFail) review failed") }
-                }
-                // Approvals are the only review we skip as redundant, so this can only
-                // ever be an already-approved count.
-                let alreadyApproved = candidateCount - reviewTargetCount
-                if alreadyApproved > 0 { parts.append("\(alreadyApproved) already approved") }
-            }
+        if !plan.withheldForBlankComment.isEmpty {
+            parts.append("request changes skipped: a comment is required")
         }
+        // One clause per verb: per-PR overrides mean a batch is no longer one verb applied N times, and
+        // reporting a REQUEST_CHANGES under "approved" would misstate what went out.
+        for event in plan.submittedEvents {
+            let attempted = plan.submitCount(for: event)
+            let verb = event == "REQUEST_CHANGES" ? "requested changes on" : "approved"
+            let ok = plan.submittedEvents.count == 1 ? tally.reviewOK : attempted - tally.reviewFail
+            parts.append("\(verb) \(max(ok, 0))/\(attempted)")
+        }
+        if tally.reviewFail > 0 { parts.append("\(tally.reviewFail) review failed") }
+        if !plan.alreadyApproved.isEmpty { parts.append("\(plan.alreadyApproved.count) already approved") }
+        if !plan.stateUnknown.isEmpty {
+            parts.append("\(plan.stateUnknown.count) skipped: review state unreadable")
+        }
+        if !plan.skippedByChoice.isEmpty { parts.append("\(plan.skippedByChoice.count) skipped") }
         if actions.merge {
             let mergeAttempted = candidateCount - tally.mergeSkipped
             if mergeAttempted > 0 {
