@@ -521,6 +521,8 @@ private struct TransitionPromptRow: View {
     let onDelete: () -> Void
 
     @State private var expanded: Bool = true
+    /// Transition names JiraBar has actually seen, used only to warn about a name that can never match.
+    @Default(.seenTransitionNames) var seenTransitionNames
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -541,6 +543,14 @@ private struct TransitionPromptRow: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
+            }
+
+            // The one thing standing between a near-miss name and a prompt that silently never opens.
+            if let warning = prompt.unknownTransitionNameWarning(seenNames: seenTransitionNames) {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if expanded {

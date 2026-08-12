@@ -564,6 +564,7 @@ extension AppDelegate {
         onPRsCollected: (([JiraPullRequest]) -> Void)?
     ) {
         jiraClient.getTransitionsByIssueKey(issueKey: issue.key) { transitions in
+            AppDelegate.rememberTransitionNames(transitions.map(\.name))
             let issueMenu = NSMenu()
             item.submenu = issueMenu
             if !transitions.isEmpty {
@@ -1672,6 +1673,31 @@ extension AppDelegate {
         }
         return "PR actions for \(issueKey): \(tally.failureCount) FAILED — "
             + "ticket moved, GitHub did not. \(summary)."
+    }
+
+    /// Accumulates the transition names seen on real tickets, so Preferences can warn about a prompt
+    /// configured with a name that will never match. Union, case-insensitive, capped — a workflow has
+    /// tens of transitions, not thousands, and an unbounded list in UserDefaults is its own bug.
+    static func rememberTransitionNames(_ names: [String]) {
+        guard !names.isEmpty else { return }
+        let existing = Defaults[.seenTransitionNames]
+        let merged = mergedTransitionNames(existing: existing, adding: names)
+        if merged != existing {
+            Defaults[.seenTransitionNames] = merged
+        }
+    }
+
+    /// Pure half, so the merge rules are testable: trimmed, blanks dropped, first spelling of a name
+    /// wins, sorted for a stable stored value, capped at 200.
+    static func mergedTransitionNames(existing: [String], adding: [String]) -> [String] {
+        var byFolded: [String: String] = [:]
+        for name in existing + adding {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let folded = trimmed.lowercased()
+            if byFolded[folded] == nil { byFolded[folded] = trimmed }
+        }
+        return Array(byFolded.values.sorted().prefix(200))
     }
 
     /// Generic Jira issue-key pattern (e.g. ABC-123). Deliberately not tied to any specific

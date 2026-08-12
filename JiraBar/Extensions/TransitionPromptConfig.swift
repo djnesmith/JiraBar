@@ -189,6 +189,50 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         return missing
     }
 
+    /// A warning for Preferences when this prompt's `transitionName` looks like a near-miss for a
+    /// transition JiraBar has actually seen — or nil, which is the usual answer.
+    ///
+    /// `matches` is plain string equality, so a name that is close but wrong opens no dialog and
+    /// reports nothing. The easiest way to get there is to type the *status* the transition moves to,
+    /// which is what Jira shows on the ticket: the transition is "Reopen", the status is "Reopened".
+    ///
+    /// **This deliberately says nothing when it merely fails to recognise a name.** `seenNames` is not
+    /// the workflow's transition list and cannot be: Jira's per-issue transitions endpoint returns only
+    /// what is reachable from each issue's *current* status, over however many issues the user's JQL
+    /// returns. A correctly-spelled prompt for a transition out of a status none of the current tickets
+    /// sit in would therefore be unrecognised forever — and "Reopen" is exactly that shape, since it is
+    /// reached from a closed status a working JQL usually excludes. Warning on absence of evidence would
+    /// tell users their correct configuration is wrong, and keep doing it after they fixed it.
+    ///
+    /// So a warning requires *positive* evidence: a seen name that the configured name extends. That is
+    /// the status-for-transition mistake and little else.
+    func unknownTransitionNameWarning(seenNames: [String]) -> String? {
+        let configured = transitionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !configured.isEmpty else { return nil }
+
+        let needle = configured.lowercased()
+        let seen = seenNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { (original: $0, folded: $0.lowercased()) }
+
+        guard !seen.contains(where: { $0.folded == needle }) else { return nil }
+
+        // Only this direction: a seen name that the configured name extends ("Reopen" → "Reopened").
+        // The reverse — configured being a prefix of a seen name — fires on every half-typed name and
+        // turns a correct "Close" into "did you mean Close Sprint?", so it is not evidence of anything.
+        // Closest by length, because the stored list is sorted and `first` would otherwise pick
+        // alphabetically among several relatives.
+        let suggestion = seen
+            .filter { needle.hasPrefix($0.folded) }
+            .min { ($0.folded.count, $0.original) > ($1.folded.count, $1.original) }?
+            .original
+        guard let suggestion else { return nil }
+
+        return "No transition named \"\(configured)\" has been seen on your tickets — did you mean "
+            + "\"\(suggestion)\"? This must be the transition's name, not the status it moves to."
+    }
+
     func matches(transitionName incoming: String) -> Bool {
         let a = incoming.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let b = transitionName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -279,4 +323,5 @@ struct TransitionSelectOption: Codable, Defaults.Serializable, Identifiable, Has
 extension Defaults.Keys {
     /// User-defined prompts keyed by transition name. Empty by default — opt-in feature.
     static let transitionPrompts = Key<[TransitionPromptConfig]>("transitionPrompts", default: [])
+
 }

@@ -451,6 +451,7 @@ struct BulkMoveDialog: View {
         if fetchingFor.contains(key) { return }
         fetchingFor.insert(key)
         client.getTransitionsByIssueKey(issueKey: key) { transitions in
+            AppDelegate.rememberTransitionNames(transitions.map(\.name))
             DispatchQueue.main.async {
                 self.transitionsByIssue[key] = transitions
                 self.fetchingFor.remove(key)

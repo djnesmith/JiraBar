@@ -87,9 +87,14 @@ enum TransitionOutcomeText {
 }
 
 /// The reasons a dialog's submit button is disabled, rendered the one way. Shared because the
-/// transition and bulk-move dialogs both gate on the same `missingRequirements`, and because the
-/// colour carries meaning: orange here means "this is why the button is dead", so a second
-/// hand-rolled copy is how that meaning drifts.
+/// transition and bulk-move dialogs both gate on the same `missingRequirements`, and because a second
+/// hand-rolled copy is how the styling drifts.
+///
+/// On the colour: orange across this app means "needs your attention before this does what you want" —
+/// used both for blockers like these and for non-blocking advisories (the current-user prefill notice
+/// below, the near-miss transition name in Preferences, `UserFieldDialog`'s warning). It is
+/// deliberately not red, which is reserved for something that already failed. Stated here because this
+/// is the most-read use of it.
 struct ValidationHints: View {
     let problems: [String]
 

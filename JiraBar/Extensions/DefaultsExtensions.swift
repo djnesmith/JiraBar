@@ -33,6 +33,17 @@ extension Defaults.Keys {
     /// Auth method for self-hosted Server. Defaults to .pat (modern default).
     static let serverAuthType = Key<JiraServerAuthType>("serverAuthType", default: .pat)
 
+    /// Transition names JiraBar has actually seen, accumulated from the per-issue transitions the menu
+    /// build already fetches. Read only by Preferences, to spot a prompt name that is a near-miss for a
+    /// real one.
+    ///
+    /// Not a workflow listing — Jira returns only what is reachable from each issue's current status —
+    /// so absence from this list proves nothing. See `unknownTransitionNameWarning`.
+    ///
+    /// Deliberately NOT included in settings backup/restore: it is an observation of one machine against
+    /// one Jira instance, and importing another's sightings would produce confident wrong suggestions.
+    static let seenTransitionNames = Key<[String]>("seenTransitionNames", default: [])
+
     /// User-supplied display order for status groups in the menu (case-insensitive match against
     /// Jira's `status.name`). Statuses not present in this list fall to the bottom, alphabetically.
     static let statusOrder = Key<[String]>("statusOrder", default: [])

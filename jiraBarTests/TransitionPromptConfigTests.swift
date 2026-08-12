@@ -763,3 +763,117 @@ final class TransitionOutcomeTextTests: XCTestCase {
         XCTAssertEqual(reason.report, .nothingRan(reason: "No open linked PRs were found, so no PR action ran."))
     }
 }
+
+/// A prompt whose name doesn't match any real transition opens no dialog and says nothing. The guard
+/// against that can only speak on POSITIVE evidence — a seen name the configured name extends —
+/// because JiraBar never sees the whole workflow: Jira returns only the transitions reachable from
+/// each fetched issue's current status. Warning on absence would call correct configs wrong.
+final class UnknownTransitionNameWarningTests: XCTestCase {
+
+    private func prompt(_ name: String) -> TransitionPromptConfig {
+        var config = TransitionPromptConfig()
+        config.transitionName = name
+        return config
+    }
+
+    private let seen = ["Close", "Ready for QA", "Ready for Review", "Reopen"]
+
+    // MARK: - the mistake it exists to catch
+
+    /// Typing the status name instead of the transition name.
+    func testStatusNameSuggestsTheTransitionName() {
+        let warning = prompt("Reopened").unknownTransitionNameWarning(seenNames: seen)
+        XCTAssertNotNil(warning)
+        XCTAssertTrue(warning!.contains("\"Reopened\""), warning!)
+        XCTAssertTrue(warning!.contains("did you mean \"Reopen\"?"), warning!)
+        XCTAssertTrue(warning!.contains("not the status it moves to"), warning!)
+    }
+
+    /// Among several relatives, the closest one — not whichever sorts first.
+    func testSuggestsTheLongestMatchingPrefix() {
+        let warning = prompt("Ready for Reviewing")
+            .unknownTransitionNameWarning(seenNames: ["Ready", "Ready for Review", "Ready for QA"])
+        XCTAssertNotNil(warning)
+        XCTAssertTrue(warning!.contains("\"Ready for Review\""), warning!)
+    }
+
+    // MARK: - silence, which is the usual and correct answer
+
+    func testExactMatchIsSilent() {
+        XCTAssertNil(prompt("Reopen").unknownTransitionNameWarning(seenNames: seen))
+    }
+
+    func testMatchIsCaseAndWhitespaceInsensitiveJustLikeMatches() {
+        XCTAssertNil(prompt("  reopen ").unknownTransitionNameWarning(seenNames: seen))
+        XCTAssertNil(prompt("READY FOR QA").unknownTransitionNameWarning(seenNames: seen))
+    }
+
+    /// The drift guard: anything `matches` accepts must never be warned about, whatever `matches`
+    /// later does with folding.
+    func testNothingMatchesIsEverWarnedAbout() {
+        for name in seen {
+            let config = prompt(name)
+            XCTAssertTrue(config.matches(transitionName: name))
+            XCTAssertNil(config.unknownTransitionNameWarning(seenNames: seen), name)
+        }
+    }
+
+    /// The whole point of the redesign: an unrecognised name is NOT evidence of a wrong one. "Reopen"
+    /// out of a closed status is invisible to a JQL scoped to open work, so silence is required.
+    func testUnrecognisedNameWithNoRelativeIsSilent() {
+        XCTAssertNil(prompt("Force Close").unknownTransitionNameWarning(seenNames: seen))
+        XCTAssertNil(prompt("Banana").unknownTransitionNameWarning(seenNames: seen))
+    }
+
+    /// A half-typed name must not accuse: nothing warns while the field is being filled in.
+    func testPartiallyTypedNameIsSilent() {
+        for typed in ["R", "Re", "Read", "Ready for"] {
+            XCTAssertNil(
+                prompt(typed).unknownTransitionNameWarning(seenNames: seen),
+                "\(typed) should be silent — it is a prefix OF a seen name, not an extension of one"
+            )
+        }
+    }
+
+    func testEmptyHistoryIsSilent() {
+        XCTAssertNil(prompt("Reopened").unknownTransitionNameWarning(seenNames: []))
+    }
+
+    /// Whitespace-only sightings are not evidence, and an empty folded name would otherwise prefix
+    /// everything. Unreachable through the app; a hand-edited defaults array is not.
+    func testBlankSightingsAreNotEvidence() {
+        XCTAssertNil(prompt("Reopened").unknownTransitionNameWarning(seenNames: ["", "   ", "\t"]))
+    }
+
+    func testBlankConfiguredNameIsSilent() {
+        XCTAssertNil(prompt("").unknownTransitionNameWarning(seenNames: seen))
+        XCTAssertNil(prompt("   ").unknownTransitionNameWarning(seenNames: seen))
+    }
+}
+
+final class SeenTransitionNamesTests: XCTestCase {
+
+    func testMergeIsAUnionThatKeepsTheFirstSpelling() {
+        let merged = AppDelegate.mergedTransitionNames(
+            existing: ["Reopen", "Close"], adding: ["reopen", "Ready for QA", "  Close  "]
+        )
+        XCTAssertEqual(merged, ["Close", "Ready for QA", "Reopen"], "sorted, deduped case-insensitively")
+    }
+
+    func testBlanksAreDropped() {
+        XCTAssertEqual(
+            AppDelegate.mergedTransitionNames(existing: [], adding: ["", "   ", "Reopen"]),
+            ["Reopen"]
+        )
+    }
+
+    func testCappedSoStoredDefaultsCannotGrowUnbounded() {
+        let many = (1...500).map { "Transition \($0)" }
+        XCTAssertEqual(AppDelegate.mergedTransitionNames(existing: [], adding: many).count, 200)
+    }
+
+    func testMergingNothingNewIsStable() {
+        let first = AppDelegate.mergedTransitionNames(existing: [], adding: ["Reopen", "Close"])
+        XCTAssertEqual(AppDelegate.mergedTransitionNames(existing: first, adding: ["Close"]), first)
+    }
+}

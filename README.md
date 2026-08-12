@@ -110,6 +110,12 @@ Reviews go out first, then assignee-sync and merges, so GitHub's merge-eligibili
 
 None of this runs on **Move Multiple Issues** — bulk move performs no PR actions at all.
 
+## Transition names, not status names
+
+Prompts match on the **transition's name**, not the status it moves to — the transition may be `Reopen` while the status it lands in is `Reopened`, and the status is what Jira shows on the ticket. Matching is plain equality, so a near-miss name opens no dialog and reports nothing.
+
+Preferences warns about the likeliest version of that mistake: a name that *extends* a transition JiraBar has actually seen (`Reopened` when it has seen `Reopen`). It stays quiet about a name it simply doesn't recognise, because it never sees your whole workflow — Jira only reports the transitions reachable from the current status of the tickets your query returned, so a correctly-named prompt for a transition out of some other status is unrecognisable and perfectly fine.
+
 ## Required fields
 
 Any configured field on a transition prompt can be marked **Required**, which disables the Transition button until it's filled — for a user picker, until at least one user is selected. The dialog lists everything outstanding at once, so you don't fix one thing to discover the next.
