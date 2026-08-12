@@ -205,33 +205,53 @@ public class JiraClient {
             .responseData { response in
                 switch response.result {
                 case .success(let data):
-                    guard
-                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                        let transitions = json["transitions"] as? [[String: Any]]
-                    else {
-                        completion(nil)
-                        return
-                    }
-                    // `transitionId` is a filter, not a guarantee of one element — match it back.
-                    let match = transitions.first { ($0["id"] as? String) == transitionId }
-                    guard let fields = match?["fields"] as? [String: Any] else {
-                        // The transition exists but exposes no screen fields: genuinely nothing
-                        // required, which is a known answer rather than a failed read.
-                        completion(match == nil ? nil : [])
-                        return
-                    }
-                    let required = fields.compactMap { key, value -> String? in
-                        guard let meta = value as? [String: Any],
-                              (meta["required"] as? Bool) == true
-                        else { return nil }
-                        return key
-                    }
-                    completion(Set(required))
+                    completion(JiraClient.requiredFieldIds(from: data, transitionId: transitionId))
                 case .failure(let error):
                     print("\(url):  \(error)")
                     completion(nil)
                 }
             }
+    }
+
+    /// Parses the `expand=transitions.fields` payload into the ids that transition marks required, or
+    /// nil when the answer can't be established. Split out from the request the same way
+    /// `extractErrorMessage` is: the nil-vs-empty-set distinction is the whole design and it needs to
+    /// be pinned by tests rather than reasoned about.
+    ///
+    /// nil (unknown, fail closed) for: unparseable JSON, a missing `transitions` array, the requested
+    /// transition absent from it, or a field entry whose `required` isn't a bool. Empty set (known,
+    /// nothing required) for: a transition present with no screen fields.
+    static func requiredFieldIds(from data: Data?, transitionId: String) -> Set<String>? {
+        guard
+            let data,
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let transitions = json["transitions"] as? [[String: Any]]
+        else { return nil }
+
+        // `transitionId` is a server-side filter, not a guarantee of one element — match it back.
+        // Absent means the transition is no longer offered, which is not an answer about its fields.
+        guard let match = transitions.first(where: { ($0["id"] as? String) == transitionId }) else {
+            return nil
+        }
+        // Present with no fields at all is a real answer: nothing on the screen to require.
+        guard let fields = match["fields"] as? [String: Any] else { return [] }
+
+        var required: Set<String> = []
+        for (key, value) in fields {
+            guard let meta = value as? [String: Any] else { return nil }
+            // Absent `required` is Jira omitting it, which the docs treat as false. A present but
+            // non-bool value is a shape we don't understand — unknown, so fail closed rather than
+            // quietly reading it as not-required.
+            switch meta["required"] {
+            case nil:
+                continue
+            case let flag as Bool:
+                if flag { required.insert(key) }
+            default:
+                return nil
+            }
+        }
+        return required
     }
 
     /// Outcome of a transition attempt.

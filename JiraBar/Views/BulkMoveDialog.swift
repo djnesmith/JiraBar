@@ -152,10 +152,13 @@ struct BulkMoveDialog: View {
 
             Spacer(minLength: 0)
 
+            requirementsSection
+
             footer
         }
         .padding(16)
-        .frame(width: 600, height: 700)
+        .frame(width: 600)
+        .frame(minHeight: 700)
         .onAppear {
             // Pre-pick the first status that has issues.
             if fromStatus.isEmpty, let first = availableFromStatuses.first {
@@ -396,8 +399,39 @@ struct BulkMoveDialog: View {
         }
     }
 
+    @ViewBuilder
+    private var requirementsSection: some View {
+        if !missingRequirements.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(missingRequirements, id: \.self) { problem in
+                    Text(problem)
+                        .font(.footnote).foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
     private var canSubmit: Bool {
-        !checkedKeys.isEmpty && !selectedTransitionName.isEmpty
+        !checkedKeys.isEmpty && !selectedTransitionName.isEmpty && missingRequirements.isEmpty
+    }
+
+    /// The same required-field gate the single-issue dialog uses. This dialog renders the same
+    /// prompt config's fields and submits through the same `config.fieldUpdates`, so without this a
+    /// bulk move sends an empty required picker into the refusal the gate exists to prevent.
+    ///
+    /// Manual flags only — no `jiraRequiredFieldIds`. Jira's own flags are per-issue metadata and a
+    /// bulk move spans many issues; fetching them for each one would put a round trip per ticket in
+    /// front of the dialog. The manual half needs no network, and it is the half that expresses the
+    /// workflow-validator rules a bulk move is most likely to trip.
+    private var missingRequirements: [String] {
+        guard let config = matchingPromptConfig else { return [] }
+        return config.missingRequirements(
+            selectedUserCount: pickedUsers.count,
+            textValue: freeText,
+            selectValue: selectValue,
+            jiraRequiredFieldIds: []
+        )
     }
 
     // MARK: - State transitions

@@ -220,8 +220,9 @@ final class TransitionPromptConfigTests: XCTestCase {
             config.missingRequirements(
                 selectedUserCount: 0, textValue: "", selectValue: "",
                 jiraRequiredFieldIds: ["customfield_99002"]
-            ),
-            ["Select at least one testers — Testers is required."]
+            ).count,
+            1,
+            "a padded id must still match Jira's flag"
         )
     }
 
@@ -240,10 +241,11 @@ final class TransitionPromptConfigTests: XCTestCase {
     func testRequiredUserFieldNeedsAtLeastOneSelection() {
         let config = gated(manualRequired: true)
 
-        XCTAssertEqual(
-            config.missingRequirements(selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: []),
-            ["Select at least one testers — Testers is required."]
+        let missing = config.missingRequirements(
+            selectedUserCount: 0, textValue: "", selectValue: "", jiraRequiredFieldIds: []
         )
+        XCTAssertEqual(missing.count, 1)
+        XCTAssertTrue(missing[0].contains("Testers"), missing[0])
         XCTAssertTrue(
             config.missingRequirements(selectedUserCount: 1, textValue: "", selectValue: "", jiraRequiredFieldIds: []).isEmpty,
             "one is enough"
@@ -297,7 +299,7 @@ final class TransitionPromptConfigTests: XCTestCase {
 
         XCTAssertEqual(missing.count, 3, "all three, in field order: \(missing)")
         XCTAssertEqual(missing, [
-            "Select at least one testers — Testers is required.",
+            "Testers is required — select at least one.",
             "Fill in QA Notes — it is required.",
             "Choose a Resolution — it is required.",
         ])

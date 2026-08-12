@@ -510,7 +510,9 @@ struct TransitionDialog: View {
                 // Fail closed. Unknown is not false: guessing "nothing is required" would hand back
                 // the silent failure this whole change removes. Cheap, too — if Jira is unreachable
                 // for the metadata it is unreachable for the transition.
-                problems.append("Couldn't check which fields Jira requires. Reopen the dialog to retry.")
+                // Also covers "the transition came back absent", which happens when someone else moved
+            // the ticket first — hence "may no longer be available" rather than just "retry".
+            problems.append("Couldn't confirm which fields Jira requires — the transition may no longer be available. Close and reopen the dialog.")
             }
         }
         problems.append(contentsOf: config.missingRequirements(
@@ -549,9 +551,15 @@ struct TransitionDialog: View {
     @ViewBuilder
     private var validationSection: some View {
         if !transitionApplied, prefillSatisfiesRequirementSilently {
-            Text("\(config.userFieldLabel) is required and was prefilled with you — change it if someone else should be named.")
-                .font(.footnote).foregroundColor(.orange)
-                .fixedSize(horizontal: false, vertical: true)
+            // Blue, not the orange below: orange means "this is why the button is disabled", and
+            // this line is the opposite — the requirement is satisfied, just not by a decision.
+            // The two can appear together, so they must not look the same.
+            Label(
+                "\(config.userFieldLabel) is required and was prefilled with you — change it if someone else should be named.",
+                systemImage: "info.circle"
+            )
+            .font(.footnote).foregroundColor(.accentColor)
+            .fixedSize(horizontal: false, vertical: true)
         }
         if !transitionApplied, !validationProblems.isEmpty {
             VStack(alignment: .leading, spacing: 2) {

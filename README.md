@@ -97,11 +97,26 @@ A notification summarizes what happened per PR, and lists any Jira users that do
 
 Each transition prompt can additionally enable **PR actions** that run against every open linked GitHub PR after the transition commits:
 
-- **Approve** — submits an APPROVE review (with an optional comment); PRs you've already approved are skipped. The dialog pre-fetches state and shows "You've approved N/M open PRs" so you know before submitting.
-- **Merge** — merges with a configurable method (merge / squash / rebase); PRs whose repo disallows the chosen method are skipped and counted in the summary.
+- **Review** — a three-way choice per transition: don't review, **Approve**, or **Request changes**.
+  - *Approve* submits an APPROVE review with an optional comment; PRs you've already approved are skipped. The dialog pre-fetches state and shows "You've approved N/M open PRs" so you know before submitting.
+  - *Request changes* submits a REQUEST_CHANGES review, and its **comment is mandatory** — GitHub rejects a request-changes review with no body, so the dialog won't submit until you write one. Repeats are never skipped: the comment is the payload, and a ticket coming back a second time is exactly when you want another one.
+  - Because it's one picker rather than two checkboxes, approving and requesting changes can't both be asked for.
+- **Merge** — merges with a configurable method (merge / squash / rebase); PRs whose repo disallows the chosen method are skipped and counted in the summary. **Unavailable in request-changes mode** — merging a PR you just asked for changes on is nonsense, so it's withdrawn rather than merely greyed out.
 - **Sync Jira Assignee** — sets the ticket's Jira Assignee (mapped via the Jira → GitHub file) as the PR assignee, only when the PR has no assignee yet.
 
-Approvals go out first, then assignee-sync and merges, so GitHub's merge-eligibility check never races a just-submitted approval. One summary notification reports counts per action.
+Reviews go out first, then assignee-sync and merges, so GitHub's merge-eligibility check never races a just-submitted review.
+
+**The dialog stays open until the PR actions finish**, and reports anything that didn't land, naming the PR — "the Jira transition WAS applied, but 1 PR action did not: Review not submitted on acme/api #2". The Jira transition is not rolled back, so retrying the transition isn't the fix; do it on the PR. A summary notification is also posted, leading with the failure count when something failed, but the window is the primary channel: a notification is missable and a closed window looks like success. A transition Jira *refuses* also keeps the window open, carrying Jira's own message.
+
+None of this runs on **Move Multiple Issues** — bulk move performs no PR actions at all.
+
+## Required fields
+
+Any configured field on a transition prompt can be marked **Required**, which disables the Transition button until it's filled — for a user picker, until at least one user is selected. The dialog lists everything outstanding at once, so you don't fix one thing to discover the next.
+
+JiraBar also reads Jira's own required-field flags for the transition being submitted (`expand=transitions.fields`, once, when the dialog opens) and honours those too. The two are OR'd, and both are needed: a rule enforced by a **workflow validator** — "Testers are required before moving into QA." — reports `required: false` on the transition screen while still rejecting the transition, so only the manual flag can express it. Conversely Jira's flags catch screen-required fields you never marked locally.
+
+If the metadata can't be read, requiredness is *unknown* rather than empty and the button stays disabled with a reason. Guessing "nothing is required" would just move the failure to Jira. Prompts with no fields at all are never gated by this.
 
 ### Mapping file format
 

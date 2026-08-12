@@ -582,9 +582,9 @@ private struct TransitionPromptRow: View {
                             TextField("Field id (e.g. resolution or customfield_10300)", text: $prompt.selectFieldId)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                             TextField("Label (e.g. Resolution)", text: $prompt.selectFieldLabel)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
                             Toggle("Required — block the transition unless an option is chosen",
                                    isOn: $prompt.selectFieldRequired)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
 
                             HStack {
                                 Text("Options").font(.subheadline)

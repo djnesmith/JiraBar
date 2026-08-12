@@ -129,9 +129,15 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync
     }
 
-    /// True when this prompt renders at least one field that could be required. A comment-only
-    /// prompt has nothing to gate, so unknown requiredness must not block it.
-    var hasGatableField: Bool { hasUserField || hasTextField || hasSelectField }
+    /// True when this prompt has at least one field that could be required. A comment-only prompt has
+    /// nothing to gate, so unknown requiredness must not block it.
+    ///
+    /// Uses id-only for the select field, matching `missingRequirements` rather than `hasSelectField`
+    /// — a configured-but-optionless select can still be required, and that is precisely the case
+    /// that needs saying out loud, so it must not skip the metadata read.
+    var hasGatableField: Bool {
+        hasUserField || hasTextField || !selectFieldId.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     /// Whether `fieldId` must be filled, from either source: Jira's own transition-screen flag, or
     /// this config's manual override. OR, not fallback — the two express different things and
@@ -159,7 +165,9 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         if hasUserField,
            fieldIsRequired(userFieldId, manualFlag: userFieldRequired, jiraRequiredFieldIds: jiraRequiredFieldIds),
            selectedUserCount < 1 {
-            missing.append("Select at least one \(userFieldLabel.lowercased()) — \(userFieldLabel) is required.")
+            // Not "at least one \(label.lowercased())": these labels are plural by nature
+            // ("Reviewers", "Testers", the default "Users"), and singularizing them reads wrong.
+            missing.append("\(userFieldLabel) is required — select at least one.")
         }
         if hasTextField,
            fieldIsRequired(textFieldId, manualFlag: textFieldRequired, jiraRequiredFieldIds: jiraRequiredFieldIds),
