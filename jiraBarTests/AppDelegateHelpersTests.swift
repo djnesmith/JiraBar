@@ -257,13 +257,43 @@ final class OwnershipSegmentsTests: XCTestCase {
 
     // MARK: - the rendered line
 
+    /// Every segment is "label: name", so the line reads as one pattern rather than two.
     func testAssignedAndReviewedReadsAsOneLine() {
         let segments = AppDelegate.ownershipSegments(
             assignees: ["djnesmith"],
             pendingReviewers: ["alice"],
             reviews: [review("jgerman", "APPROVED")]
         )
-        XCTAssertEqual(line(segments), "assignee: djnesmith · jgerman approved · alice pending")
+        XCTAssertEqual(line(segments), "assignee: djnesmith · approved: jgerman · pending: alice")
+    }
+
+    /// Reviewers sharing a state are named once under it, as the assignee segment already does for two
+    /// assignees.
+    func testReviewersSharingAStateAreGrouped() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: [],
+            pendingReviewers: ["bob"],
+            reviews: [review("jgerman", "APPROVED"), review("alice", "APPROVED")]
+        )
+        XCTAssertEqual(line(segments), "unassigned · approved: jgerman, alice · pending: bob")
+    }
+
+    /// Groups keep the order their state was first seen in, so nothing reshuffles as reviews arrive.
+    func testStateGroupsKeepFirstSeenOrder() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: ["d"],
+            pendingReviewers: ["p"],
+            reviews: [
+                review("a", "CHANGES_REQUESTED"),
+                review("b", "APPROVED"),
+                review("c", "CHANGES_REQUESTED"),
+                review("e", "COMMENTED"),
+            ]
+        )
+        XCTAssertEqual(
+            line(segments),
+            "assignee: d · requested changes: a, c · approved: b · commented: e · pending: p"
+        )
     }
 
     func testNobodyHomeIsSaidRatherThanOmitted() {
@@ -290,7 +320,7 @@ final class OwnershipSegmentsTests: XCTestCase {
             pendingReviewers: [],
             reviews: [review("a", "APPROVED"), review("b", "CHANGES_REQUESTED"), review("c", "COMMENTED")]
         )
-        XCTAssertEqual(line(segments), "assignee: d · a approved · b requested changes · c commented")
+        XCTAssertEqual(line(segments), "assignee: d · approved: a · requested changes: b · commented: c")
     }
 
     /// A dismissed review carries no signal, and a state GitHub adds later must not render raw.
@@ -300,7 +330,7 @@ final class OwnershipSegmentsTests: XCTestCase {
             pendingReviewers: ["x"],
             reviews: [review("a", "DISMISSED"), review("b", "SOMETHING_NEW")]
         )
-        XCTAssertEqual(line(segments), "assignee: d · x pending")
+        XCTAssertEqual(line(segments), "assignee: d · pending: x")
     }
 
     /// Dropped states with nothing pending still has to say something about reviewers.
@@ -329,13 +359,21 @@ final class OwnershipSegmentsTests: XCTestCase {
         XCTAssertEqual(colour(of: "alice", in: segments), NSColor.systemYellow)
     }
 
+    /// Grouped names are one run, so the colour covers the whole list rather than only the first.
+    func testGroupedNamesShareOneColouredRun() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: [], pendingReviewers: [], reviews: [review("a", "APPROVED"), review("b", "APPROVED")]
+        )
+        XCTAssertEqual(colour(of: "a, b", in: segments), NSColor.systemYellow)
+    }
+
     func testReviewStateWordsStayMetadataGrey() {
         let segments = AppDelegate.ownershipSegments(
             assignees: ["d"],
             pendingReviewers: ["x"],
             reviews: [review("a", "APPROVED"), review("b", "CHANGES_REQUESTED")]
         )
-        for word in [" approved", " requested changes", " pending"] {
+        for word in ["approved: ", "requested changes: ", "pending: "] {
             XCTAssertEqual(colour(of: word, in: segments), AppDelegate.ownershipMetadata, word)
         }
     }
@@ -380,6 +418,14 @@ final class OwnershipSegmentsTests: XCTestCase {
     }
 
     // MARK: - state wording
+
+    /// A mapped state word colliding with the pending label would merge two groups into one. The grouping
+    /// merges by word, so this is a safety net rather than the only defence.
+    func testNoMappedStateWordCollidesWithThePendingLabel() {
+        for state in ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"] {
+            XCTAssertNotEqual(AppDelegate.reviewStateWord(state), AppDelegate.pendingStateWord, state)
+        }
+    }
 
     func testReviewStateWordCoversTheStatesWorthShowing() {
         XCTAssertEqual(AppDelegate.reviewStateWord("APPROVED"), "approved")

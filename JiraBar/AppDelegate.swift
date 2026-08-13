@@ -573,21 +573,34 @@ extension AppDelegate {
             ])
         }
 
-        let reviewerSegmentStart = segments.count
+        // Grouped by state rather than one segment per reviewer, so a shared state is named once —
+        // "approved: jgerman, alice" — and each segment reads "label: name" like the assignee one above.
+        // An ordered array rather than a dictionary: the groups appear in the order their state was first
+        // seen, and merging by word means a pending group cannot duplicate a review group of the same name.
+        var grouped: [(word: String, logins: [String])] = []
+        func group(_ word: String, _ login: String) {
+            if let index = grouped.firstIndex(where: { $0.word == word }) {
+                grouped[index].logins.append(login)
+            } else {
+                grouped.append((word: word, logins: [login]))
+            }
+        }
         for review in reviews ?? [] {
             guard let word = Self.reviewStateWord(review.state) else { continue }
-            // The state stays grey: line 3 already carries the PR's review decision in the state palette,
-            // whose approved green is near-identical to systemGreen, so colouring it here would make one
-            // line say green twice for two unrelated things.
-            segments.append([
-                (text: review.login, color: .systemYellow),
-                (text: " " + word, color: Self.ownershipMetadata),
-            ])
+            group(word, review.login)
         }
         for login in pendingReviewers ?? [] {
+            group(Self.pendingStateWord, login)
+        }
+
+        let reviewerSegmentStart = segments.count
+        for entry in grouped {
+            // The state word stays grey. Line 3 already renders the review decision at #2DA44E, which is
+            // near-identical to systemGreen, so colouring this label would put two indistinguishable
+            // greens on one line meaning different things.
             segments.append([
-                (text: login, color: .systemYellow),
-                (text: " pending", color: Self.ownershipMetadata),
+                (text: entry.word + ": ", color: Self.ownershipMetadata),
+                (text: entry.logins.joined(separator: ", "), color: .systemYellow),
             ])
         }
 
@@ -605,6 +618,9 @@ extension AppDelegate {
 
     /// Nobody is on it. Amber rather than grey so an unowned PR still catches the eye.
     static let ownershipAbsent = NSColor(hex: "#BF6900")
+
+    /// State word for reviewers who were asked and haven't answered.
+    static let pendingStateWord = "pending"
 
     /// nil for states that carry no signal worth a row — DISMISSED, and anything GitHub adds later.
     static func reviewStateWord(_ state: String) -> String? {
