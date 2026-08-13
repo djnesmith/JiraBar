@@ -1107,6 +1107,14 @@ extension AppDelegate {
                     completion: done
                 )
             },
+            resolveThreadAuthors: { [weak self] url, done in
+                guard let self else { return done([]) }
+                let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
+                guard !token.isEmpty else { return done([]) }
+                GithubClient().fetchUnresolvedReviewThreads(url: url, token: token) { threads in
+                    done((threads ?? []).map(\.author))
+                }
+            },
             onCancel: { [weak self] in
                 self?.transitionWindow?.close()
                 self?.transitionWindow = nil
@@ -1576,6 +1584,7 @@ extension AppDelegate {
                                 viewerApproved: gh?.viewerLatestReviewState == "APPROVED",
                                 viewerRequestedChanges: gh?.viewerLatestReviewState == "CHANGES_REQUESTED",
                                 isDraft: gh?.isDraft ?? false,
+                                unresolvedThreads: gh?.unresolvedThreads,
                                 statesKnown: gh != nil,
                                 assignees: gh?.assignees ?? [],
                                 mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,

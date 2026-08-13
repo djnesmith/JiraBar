@@ -656,7 +656,16 @@ private struct TransitionPromptRow: View {
                                 .disabled(!prompt.enablePRMerge)
                             }
                             .disabled(prompt.prReviewAction == .requestChanges)
-                            Toggle("Resolve open review conversations (all of them, including other people's)", isOn: $prompt.enablePRResolveThreads)
+                            Picker("Resolve open review conversations:", selection: $prompt.prResolveThreads) {
+                                Text("Never").tag(PRResolveThreadsMode.never)
+                                Text("Always").tag(PRResolveThreadsMode.always)
+                                Text("Ask when there are any").tag(PRResolveThreadsMode.ask)
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 360)
+                            Text("Resolves all of them, including other people's. \"Ask\" offers a checkbox in the dialog, unticked, only when the linked PRs actually have open conversations.")
+                                .font(.footnote).foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                             Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prompt.enablePRAssigneeSync)
                             Text("Runs after the Jira transition succeeds. Requires a GitHub Token.")
                                 .font(.footnote)

@@ -26,6 +26,17 @@ enum PRReviewAction: Hashable {
     var requiresComment: Bool { self == .requestChanges }
 }
 
+/// When a transition resolves open review conversations. `.ask` is the one that only offers the choice
+/// when there is something to resolve.
+///
+/// Deliberately not `Codable`: the two `Bool`s behind it are what persist, so a settings file can never
+/// carry an unknown case.
+enum PRResolveThreadsMode: Hashable {
+    case never
+    case always
+    case ask
+}
+
 /// Per-transition prompt configuration. Generic by design — users define which transition names
 /// open a prompt and which custom fields to expose. Nothing in this struct is specific to any
 /// particular Jira workflow or instance.
@@ -99,10 +110,11 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// GitHub file) as the PR assignee — only when the PR has no assignee yet.
     var enablePRAssigneeSync: Bool = false
 
-    /// When true, every unresolved review conversation on each linked open PR is resolved. Runs before
-    /// any merge: a branch with `required_conversation_resolution` refuses the merge outright, so
-    /// resolving afterwards would be too late to help.
+    /// Backing store for `prResolveThreads == .always`. Read `prResolveThreads` instead.
     var enablePRResolveThreads: Bool = false
+
+    /// Backing store for `prResolveThreads == .ask`. Read `prResolveThreads` instead.
+    var enablePRAskResolveThreads: Bool = false
 
     /// The review this transition submits, over the two stored flags. The setter writes them
     /// exclusively, so the Preferences picker can't produce a contradictory pair.
@@ -121,6 +133,22 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         }
     }
 
+    /// When a transition resolves the open review conversations on its linked PRs.
+    ///
+    /// Over two stored flags for the same reason `prReviewAction` is: a settings file can never carry an
+    /// unknown case whose decode would fail and take the whole prompt array with it. A hand-edited file
+    /// can set both, and `.ask` wins — resolving only what was ticked is the harmless failure.
+    var prResolveThreads: PRResolveThreadsMode {
+        get {
+            if enablePRAskResolveThreads { return .ask }
+            return enablePRResolveThreads ? .always : .never
+        }
+        set {
+            enablePRResolveThreads = (newValue == .always)
+            enablePRAskResolveThreads = (newValue == .ask)
+        }
+    }
+
     /// Merging a PR you just asked for changes on is nonsense, so request-changes mode withdraws
     /// the merge action outright. Computed rather than validated on save so it holds for every
     /// input path, including a hand-edited settings file.
@@ -131,7 +159,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     /// True when this transition has any PR action to run — what gates the dialog's PR section
     /// and the status enrichment that feeds it.
     var hasPRActions: Bool {
-        prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync || enablePRResolveThreads
+        prReviewAction != .none || allowsPRMerge || enablePRAssigneeSync || prResolveThreads != .never
     }
 
     /// True when this prompt has at least one field that could be required. A comment-only prompt has
@@ -288,7 +316,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         case selectFieldId, selectFieldLabel, selectOptions
         case userFieldRequired, textFieldRequired, selectFieldRequired
         case enablePRApprove, enablePRRequestChanges, enablePRMerge, prMergeMethod, enablePRAssigneeSync
-        case enablePRResolveThreads
+        case enablePRResolveThreads, enablePRAskResolveThreads
     }
 
     init(from decoder: Decoder) throws {
@@ -315,6 +343,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.prMergeMethod = try c.decodeIfPresent(String.self, forKey: .prMergeMethod) ?? "rebase"
         self.enablePRAssigneeSync = try c.decodeIfPresent(Bool.self, forKey: .enablePRAssigneeSync) ?? false
         self.enablePRResolveThreads = try c.decodeIfPresent(Bool.self, forKey: .enablePRResolveThreads) ?? false
+        self.enablePRAskResolveThreads = try c.decodeIfPresent(Bool.self, forKey: .enablePRAskResolveThreads) ?? false
     }
 }
 

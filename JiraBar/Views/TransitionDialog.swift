@@ -99,6 +99,44 @@ enum TransitionOutcomeText {
     static let prActionsDidNotRun = "The Jira transition was applied."
 }
 
+/// Whether to offer resolving open review conversations, and what the offer says. One implementation for
+/// both dialogs, so the single-issue and bulk wording cannot drift.
+enum PRResolveOffer {
+    /// One PR's unresolved conversations. `authors` may be empty while the names are still loading, or if
+    /// that read failed — the offer stands either way, since the count is what it is about.
+    struct Candidate: Equatable {
+        let prLabel: String
+        let unresolved: Int
+        var authors: [String] = []
+    }
+
+    /// Only PRs with something to resolve. A PR whose enrichment failed has a nil count and is excluded:
+    /// unknown is not "has conversations", and it must not conjure a checkbox.
+    static func candidates(from prs: [PRActionsStatus.LinkedPR]) -> [Candidate] {
+        prs.compactMap { pr in
+            guard let unresolved = pr.unresolvedThreads, unresolved > 0, !pr.isMerged else { return nil }
+            return Candidate(prLabel: pr.label, unresolved: unresolved)
+        }
+    }
+
+    /// The checkbox label, or nil when there is nothing to offer — which is what keeps a clean PR free of
+    /// a control that would always be there and usually mean nothing.
+    ///
+    /// One PR names whose conversations they are; several report the spread instead, because a list of
+    /// names across a dozen PRs neither fits nor helps.
+    static func label(for candidates: [Candidate]) -> String? {
+        let total = candidates.reduce(0) { $0 + $1.unresolved }
+        guard total > 0 else { return nil }
+        let conversations = "\(total) open conversation\(total == 1 ? "" : "s")"
+        guard candidates.count == 1 else {
+            return "Resolve \(conversations) across \(candidates.count) PRs"
+        }
+        let authors = Array(Set(candidates[0].authors)).sorted()
+        guard !authors.isEmpty else { return "Resolve \(conversations)" }
+        return "Resolve \(conversations) (\(authors.joined(separator: ", ")))"
+    }
+}
+
 /// The reasons a dialog's submit button is disabled, rendered the one way. Shared because the
 /// transition and bulk-move dialogs both gate on the same `missingRequirements`, and because a second
 /// hand-rolled copy is how the styling drifts.
@@ -153,6 +191,9 @@ final class PRActionsStatus: ObservableObject {
         let viewerApproved: Bool
         let viewerRequestedChanges: Bool
         let isDraft: Bool
+        /// Unresolved review threads on this PR, or nil when the enrichment failed — unknown, which must
+        /// not read as "nothing to resolve".
+        let unresolvedThreads: Int?
         /// False when the GitHub enrichment for this PR failed. Every other flag is then a default,
         /// not an observation — so nothing may be decided from them.
         let statesKnown: Bool
@@ -308,6 +349,9 @@ struct TransitionDialog: View {
     /// Jira's own required-field metadata for this transition, filled in after open.
     @ObservedObject var requirements: TransitionFieldRequirements
     let onSubmit: (String, [JiraUser], String, String, Bool, PRActionChoices, @escaping (TransitionSubmitOutcome) -> Void) -> Void
+    /// Supplies the logins behind a PR's unresolved conversations. Injected so the view never holds the
+    /// GitHub token.
+    let resolveThreadAuthors: (String, @escaping ([String]) -> Void) -> Void
     let onCancel: () -> Void
 
     @State private var comment: String = ""
@@ -326,6 +370,10 @@ struct TransitionDialog: View {
     @State private var prMergeMethod: String = "rebase"
     @State private var prSyncAssignee: Bool = true
     @State private var prResolveThreads: Bool = true
+    /// Unchecked on purpose: ticking it claims he addressed the feedback, so he has to say so.
+    @State private var resolveAsked: Bool = false
+    /// Thread authors per PR url, filled in after the counts land. Absent names never withhold the offer.
+    @State private var resolveAuthors: [String: [String]] = [:]
     /// Runtime only: a choice about one PR today has no meaning next time, so none of this is persisted.
     @State private var perPRActions: [String: PRReviewAction] = [:]
     @State private var touchedPRs: Set<String> = []
@@ -412,7 +460,10 @@ struct TransitionDialog: View {
             prMergeMethod = config.prMergeMethod
             seedPerPRActions()
         }
-        .onChange(of: prStatus.openPRs.map(\.url)) { _ in seedPerPRActions() }
+        .onChange(of: prStatus.openPRs.map(\.url)) { _ in
+            seedPerPRActions()
+            loadResolveAuthors()
+        }
         .onChange(of: prReview) { _ in seedPerPRActions() }
     }
 
@@ -431,12 +482,34 @@ struct TransitionDialog: View {
 
     /// The PR-action choices as the dialog currently stands. Built here, not only in `submit()`, so
     /// the submit gate and the inline hint test the same value the batch will actually run on.
+    /// nil when there is nothing to resolve, which is what keeps the checkbox off a clean PR.
+    private var resolveOfferLabel: String? {
+        let candidates = PRResolveOffer.candidates(from: prStatus.openPRs).map { candidate in
+            var withAuthors = candidate
+            withAuthors.authors = resolveAuthors[
+                prStatus.openPRs.first { $0.label == candidate.prLabel }?.url ?? ""
+            ] ?? []
+            return withAuthors
+        }
+        return PRResolveOffer.label(for: candidates)
+    }
+
     private var blanketAction: PRReviewAction {
         prReview ? config.prReviewAction : .none
     }
 
     /// Whether the per-PR list is offered at all. One PR renders exactly as it did before this existed —
     /// the everyday flow does not pay for the multi-PR case.
+    /// The two triggers meet here and cannot double-fire: a prompt is either always-resolve or ask, never
+    /// both, so only one of these can be true.
+    private var resolveThreadsRequested: Bool {
+        switch config.prResolveThreads {
+        case .never:  return false
+        case .always: return prResolveThreads
+        case .ask:    return resolveAsked && resolveOfferLabel != nil
+        }
+    }
+
     private var currentPRChoices: PRActionChoices {
         guard config.hasPRActions else { return .disabled }
         return PRActionChoices(
@@ -445,7 +518,7 @@ struct TransitionDialog: View {
             merge: config.allowsPRMerge && prMerge,
             mergeMethod: prMergeMethod,
             syncAssignee: config.enablePRAssigneeSync && prSyncAssignee,
-            resolveThreads: config.enablePRResolveThreads && prResolveThreads,
+            resolveThreads: resolveThreadsRequested,
             reviewByPRURL: perPRActions
         )
     }
@@ -488,8 +561,11 @@ struct TransitionDialog: View {
                     .disabled(!prMerge)
                 }
             }
-            if config.enablePRResolveThreads {
+            if config.prResolveThreads == .always {
                 Toggle("Resolve open review conversations", isOn: $prResolveThreads)
+            }
+            if config.prResolveThreads == .ask, let offer = resolveOfferLabel {
+                Toggle(offer, isOn: $resolveAsked)
             }
             if config.enablePRAssigneeSync {
                 Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee)
@@ -906,6 +982,20 @@ struct TransitionDialog: View {
 
     /// Reseeds from the blanket action, keeping any row the user has set by hand. Without that, flipping
     /// the review checkbox off and on would silently discard explicit choices.
+    /// Names for the offer, one call per PR that actually has unresolved conversations — nothing is asked
+    /// for a clean ticket, and a failure leaves the offer standing on its count.
+    private func loadResolveAuthors() {
+        guard config.prResolveThreads == .ask else { return }
+        for candidate in PRResolveOffer.candidates(from: prStatus.openPRs) {
+            guard let pr = prStatus.openPRs.first(where: { $0.label == candidate.prLabel }),
+                  resolveAuthors[pr.url] == nil
+            else { continue }
+            resolveThreadAuthors(pr.url) { authors in
+                DispatchQueue.main.async { resolveAuthors[pr.url] = authors }
+            }
+        }
+    }
+
     private func seedPerPRActions() {
         let seeded = PRActionsStatus.seedActions(blanket: blanketAction, prs: prStatus.openPRs)
         perPRActions = seeded.merging(perPRActions.filter { touchedPRs.contains($0.key) }) { _, chosen in chosen }

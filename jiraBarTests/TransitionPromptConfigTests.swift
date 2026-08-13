@@ -455,6 +455,7 @@ final class PRActionsStatusTests: XCTestCase {
             viewerApproved: approved,
             viewerRequestedChanges: requestedChanges,
             isDraft: false,
+            unresolvedThreads: 0,
             statesKnown: true,
             assignees: [],
             mergeCommitAllowed: true,
@@ -504,7 +505,7 @@ final class PRActionsSummaryTests: XCTestCase {
     private func linked(_ n: Int) -> PRActionsStatus.LinkedPR {
         PRActionsStatus.LinkedPR(
             url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: false,
-            viewerApproved: false, viewerRequestedChanges: false, isDraft: false, statesKnown: true,
+            viewerApproved: false, viewerRequestedChanges: false, isDraft: false, unresolvedThreads: 0, statesKnown: true,
             assignees: [], mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
         )
     }
@@ -925,6 +926,7 @@ final class PerPRSeedingTests: XCTestCase {
             viewerApproved: approved,
             viewerRequestedChanges: requestedChanges,
             isDraft: draft,
+            unresolvedThreads: statesKnown ? 0 : nil,
             statesKnown: statesKnown,
             assignees: [],
             mergeCommitAllowed: true,
@@ -1387,5 +1389,133 @@ final class BulkPRActionsSummaryTests: XCTestCase {
             AppDelegate.bulkPRActionsSummary(moved: 1, jiraFailures: [], prResults: []),
             "Moved 1 issue"
         )
+    }
+}
+
+/// The conditional resolve offer. One implementation feeds both dialogs, so these are the only place the
+/// wording is decided.
+final class PRResolveOfferTests: XCTestCase {
+
+    private func pr(_ n: Int, unresolved: Int?, merged: Bool = false) -> PRActionsStatus.LinkedPR {
+        PRActionsStatus.LinkedPR(
+            url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: merged,
+            viewerApproved: false, viewerRequestedChanges: false, isDraft: false,
+            unresolvedThreads: unresolved, statesKnown: unresolved != nil, assignees: [],
+            mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
+        )
+    }
+
+    // MARK: - no offer when there is nothing to resolve
+
+    /// A control that is always there but usually meaningless is noise.
+    func testNoOfferOnACleanPR() {
+        XCTAssertNil(PRResolveOffer.label(for: PRResolveOffer.candidates(from: [pr(1, unresolved: 0)])))
+    }
+
+    func testNoOfferWithNoPRsAtAll() {
+        XCTAssertNil(PRResolveOffer.label(for: PRResolveOffer.candidates(from: [])))
+    }
+
+    /// A failed enrichment has an unknown count. Unknown is not "has conversations", so no checkbox — and
+    /// per the rule, the transition still works.
+    func testUnknownCountConjuresNoOffer() {
+        XCTAssertTrue(PRResolveOffer.candidates(from: [pr(1, unresolved: nil)]).isEmpty)
+        XCTAssertNil(PRResolveOffer.label(for: PRResolveOffer.candidates(from: [pr(1, unresolved: nil)])))
+    }
+
+    func testMergedPRsAreExcluded() {
+        XCTAssertTrue(PRResolveOffer.candidates(from: [pr(1, unresolved: 3, merged: true)]).isEmpty)
+    }
+
+    // MARK: - single-issue wording
+
+    /// The real case: Tradeswell/data-service-manager#285 — 3 unresolved, all jgerman's, two of them
+    /// outdated, which still count because an outdated thread still blocks the merge.
+    func testOnePRNamesTheCountAndWhose() {
+        var candidate = PRResolveOffer.candidates(from: [pr(285, unresolved: 3)])
+        candidate[0].authors = ["jgerman", "jgerman", "jgerman"]
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 3 open conversations (jgerman)")
+    }
+
+    func testAuthorsAreDedupedAndSorted() {
+        var candidate = PRResolveOffer.candidates(from: [pr(1, unresolved: 4)])
+        candidate[0].authors = ["jgerman", "alice", "jgerman"]
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 4 open conversations (alice, jgerman)")
+    }
+
+    /// Names may still be loading, or their read may have failed. The offer stands on the count.
+    func testOfferStandsWithoutAuthors() {
+        let candidate = PRResolveOffer.candidates(from: [pr(1, unresolved: 2)])
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 2 open conversations")
+    }
+
+    func testSingularConversation() {
+        let candidate = PRResolveOffer.candidates(from: [pr(1, unresolved: 1)])
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 1 open conversation")
+    }
+
+    // MARK: - bulk wording
+
+    /// Across tickets the names neither fit nor help, so it reports the spread instead.
+    func testSeveralPRsReportTheSpreadNotTheNames() {
+        var candidates = PRResolveOffer.candidates(from: [
+            pr(1, unresolved: 3), pr(2, unresolved: 2), pr(3, unresolved: 2),
+        ])
+        candidates[0].authors = ["jgerman"]
+        XCTAssertEqual(PRResolveOffer.label(for: candidates), "Resolve 7 open conversations across 3 PRs")
+    }
+
+    /// PRs with nothing open don't inflate the PR count.
+    func testOnlyPRsWithConversationsCount() {
+        let candidates = PRResolveOffer.candidates(from: [
+            pr(1, unresolved: 3), pr(2, unresolved: 0), pr(3, unresolved: nil), pr(4, unresolved: 4),
+        ])
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertEqual(PRResolveOffer.label(for: candidates), "Resolve 7 open conversations across 2 PRs")
+    }
+}
+
+/// The tri-state that reconciles the standing per-prompt setting with the in-dialog offer.
+final class PRResolveThreadsModeTests: XCTestCase {
+
+    func testDefaultsToNever() {
+        XCTAssertEqual(TransitionPromptConfig().prResolveThreads, .never)
+    }
+
+    func testSetterIsExclusive() {
+        var config = TransitionPromptConfig()
+        config.prResolveThreads = .always
+        XCTAssertTrue(config.enablePRResolveThreads)
+        XCTAssertFalse(config.enablePRAskResolveThreads)
+
+        config.prResolveThreads = .ask
+        XCTAssertFalse(config.enablePRResolveThreads)
+        XCTAssertTrue(config.enablePRAskResolveThreads)
+
+        config.prResolveThreads = .never
+        XCTAssertFalse(config.enablePRResolveThreads)
+        XCTAssertFalse(config.enablePRAskResolveThreads)
+    }
+
+    /// A hand-edited file can set both. Ask wins: nothing is resolved without a tick.
+    func testBothFlagsResolveToAsk() {
+        var config = TransitionPromptConfig()
+        config.enablePRResolveThreads = true
+        config.enablePRAskResolveThreads = true
+        XCTAssertEqual(config.prResolveThreads, .ask)
+    }
+
+    /// Settings written before "ask" existed keep resolving unconditionally.
+    func testSettingsWrittenBeforeAskExistedStillMeanAlways() throws {
+        let config = try JSONDecoder().decode(TransitionPromptConfig.self, from: Data("""
+        { "transitionName": "Ready for QA", "enablePRResolveThreads": true }
+        """.utf8))
+        XCTAssertEqual(config.prResolveThreads, .always)
+    }
+
+    func testAskCountsAsAPRAction() {
+        var config = TransitionPromptConfig()
+        config.prResolveThreads = .ask
+        XCTAssertTrue(config.hasPRActions, "the dialog's PR section has to render to show the offer")
     }
 }

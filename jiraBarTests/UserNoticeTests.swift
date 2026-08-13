@@ -38,7 +38,7 @@ final class UserNoticeInjectionTests: XCTestCase {
                 pr: PRActionsStatus.LinkedPR(
                     url: "https://github.com/o/r/pull/\(i)", label: "o/r #\(i)", isMerged: false,
                     viewerApproved: false, viewerRequestedChanges: false, isDraft: false,
-                    statesKnown: true, assignees: [], mergeCommitAllowed: true,
+                    unresolvedThreads: 0, statesKnown: true, assignees: [], mergeCommitAllowed: true,
                     squashMergeAllowed: true, rebaseMergeAllowed: true
                 ),
                 event: event

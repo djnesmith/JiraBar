@@ -426,7 +426,7 @@ struct BulkMoveDialog: View {
             merge: config.allowsPRMerge && prMerge,
             mergeMethod: config.prMergeMethod,
             syncAssignee: config.enablePRAssigneeSync && prSyncAssignee,
-            resolveThreads: config.enablePRResolveThreads && prResolveThreads
+            resolveThreads: config.prResolveThreads == .always && prResolveThreads
         )
     }
 
@@ -460,7 +460,7 @@ struct BulkMoveDialog: View {
                 if config.allowsPRMerge {
                     Toggle("Merge linked open PRs via \(config.prMergeMethod)", isOn: $prMerge)
                 }
-                if config.enablePRResolveThreads {
+                if config.prResolveThreads == .always {
                     Toggle("Resolve open review conversations", isOn: $prResolveThreads)
                 }
                 if config.enablePRAssigneeSync {
