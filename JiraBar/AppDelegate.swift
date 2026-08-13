@@ -537,57 +537,83 @@ extension AppDelegate {
         return item
     }
 
-    /// The "who owns this" line for a PR row: who it is assigned to, and where its reviews stand.
+    /// One coloured run of text inside a segment of the ownership line.
+    typealias OwnershipRun = (text: String, color: NSColor)
+
+    /// The "who owns this" line for a PR row, as segments the caller joins with a separator. A segment is
+    /// itself a list of runs so a reviewer's name and their review state can differ in colour.
     ///
     /// Empty for a nil status, and the reviewer half is omitted when the reviewer connections were
     /// absent: "unassigned" and "no reviewers" are claims, and a read that didn't arrive cannot support
-    /// them. Returns (text, hex) pieces for the caller to join, as line 3 does.
-    static func ownershipPieces(status: GithubPRStatus?) -> [(String, String)] {
+    /// them.
+    static func ownershipSegments(status: GithubPRStatus?) -> [[OwnershipRun]] {
         guard let status else { return [] }
-        return ownershipPieces(
+        return ownershipSegments(
             assignees: status.assignees,
             pendingReviewers: status.pendingReviewers,
             reviews: status.reviews
         )
     }
 
-    static func ownershipPieces(
+    static func ownershipSegments(
         assignees: [String],
         pendingReviewers: [String]?,
         reviews: [PRReview]?
-    ) -> [(String, String)] {
-        var pieces: [(String, String)] = []
+    ) -> [[OwnershipRun]] {
+        // Green for "someone is on this" is the meaning the TODO rows already gave systemGreen; yellow
+        // answers the same question for the other role.
+        var segments: [[OwnershipRun]] = []
         if assignees.isEmpty {
-            pieces.append(("unassigned", "#BF6900"))
+            segments.append([(text: "unassigned", color: Self.ownershipAbsent)])
         } else {
-            let label = assignees.count == 1 ? "assignee" : "assignees"
-            pieces.append(("\(label): \(assignees.joined(separator: ", "))", "#888888"))
+            let label = assignees.count == 1 ? "assignee: " : "assignees: "
+            segments.append([
+                (text: label, color: Self.ownershipMetadata),
+                (text: assignees.joined(separator: ", "), color: .systemGreen),
+            ])
         }
 
-        let assigneePieceCount = pieces.count
+        let reviewerSegmentStart = segments.count
         for review in reviews ?? [] {
-            switch review.state.uppercased() {
-            case "APPROVED":
-                pieces.append(("\(review.login) approved", "#2DA44E"))
-            case "CHANGES_REQUESTED":
-                pieces.append(("\(review.login) requested changes", "#CF222E"))
-            case "COMMENTED":
-                pieces.append(("\(review.login) commented", "#888888"))
-            default:
-                break // DISMISSED and anything new carry no signal worth a row
-            }
+            guard let word = Self.reviewStateWord(review.state) else { continue }
+            // The state stays grey: line 3 already carries the PR's review decision in the state palette,
+            // whose approved green is near-identical to systemGreen, so colouring it here would make one
+            // line say green twice for two unrelated things.
+            segments.append([
+                (text: review.login, color: .systemYellow),
+                (text: " " + word, color: Self.ownershipMetadata),
+            ])
         }
         for login in pendingReviewers ?? [] {
-            pieces.append(("\(login) pending", "#888888"))
+            segments.append([
+                (text: login, color: .systemYellow),
+                (text: " pending", color: Self.ownershipMetadata),
+            ])
         }
 
-        // Keyed on what actually rendered, not on the input arrays: a PR whose only review was dismissed
-        // has reviews and yet nothing to show, and a silent gap there reads as "didn't load". Withheld
-        // entirely when either connection was missing, since then nothing is known to report.
-        if pieces.count == assigneePieceCount, reviews != nil, pendingReviewers != nil {
-            pieces.append(("no reviewers", "#BF6900"))
+        // Keyed on what actually rendered rather than on the input arrays: a PR whose only review was
+        // dismissed has reviews and yet nothing to show for them, and a silent gap reads as "didn't load".
+        // Withheld entirely when either connection was absent, since then nothing is known to report.
+        if segments.count == reviewerSegmentStart, reviews != nil, pendingReviewers != nil {
+            segments.append([(text: "no reviewers", color: Self.ownershipAbsent)])
         }
-        return pieces
+        return segments
+    }
+
+    /// The grey the rest of a PR row's metadata uses.
+    static let ownershipMetadata = NSColor(hex: "#888888")
+
+    /// Nobody is on it. Amber rather than grey so an unowned PR still catches the eye.
+    static let ownershipAbsent = NSColor(hex: "#BF6900")
+
+    /// nil for states that carry no signal worth a row — DISMISSED, and anything GitHub adds later.
+    static func reviewStateWord(_ state: String) -> String? {
+        switch state.uppercased() {
+        case "APPROVED":          return "approved"
+        case "CHANGES_REQUESTED": return "requested changes"
+        case "COMMENTED":         return "commented"
+        default:                  return nil
+        }
     }
 
     /// What a user-field shortcut should read once its value is known.
@@ -615,7 +641,7 @@ extension AppDelegate {
         displayName: String?,
         highlightAssigned: Bool
     ) -> (text: String, color: NSColor) {
-        let grey = NSColor(hex: "#888888")
+        let grey = Self.ownershipMetadata
         guard let displayName else { return ("Unassigned", grey) }
         return (displayName, highlightAssigned ? .systemGreen : grey)
     }
@@ -2037,12 +2063,16 @@ extension AppDelegate {
         }
 
         if showOwnership {
-            let pieces = AppDelegate.ownershipPieces(status: ghStatus)
-            if !pieces.isEmpty {
+            let segments = AppDelegate.ownershipSegments(status: ghStatus)
+            if !segments.isEmpty {
                 title.appendNewLine()
-                for (index, piece) in pieces.enumerated() {
-                    if index > 0 { title.appendString(string: " · ", color: "#888888") }
-                    title.appendString(string: piece.0, color: piece.1)
+                for (index, segment) in segments.enumerated() {
+                    if index > 0 {
+                        title.appendString(string: " · ", color: AppDelegate.ownershipMetadata)
+                    }
+                    for run in segment {
+                        title.appendString(string: run.text, color: run.color)
+                    }
                 }
             }
         }

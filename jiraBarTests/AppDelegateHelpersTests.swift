@@ -225,120 +225,168 @@ final class UserFieldMenuLabelTests: XCTestCase {
 
 /// The ownership line on a "PRs Without Tickets" row — the one section with no ticket context, so the
 /// only place "who owns this?" is unanswerable from the menu.
-final class OwnershipPiecesTests: XCTestCase {
+final class OwnershipSegmentsTests: XCTestCase {
 
     private func review(_ login: String, _ state: String) -> PRReview {
         PRReview(login: login, state: state)
     }
 
-    private func text(_ pieces: [(String, String)]) -> [String] { pieces.map(\.0) }
+    /// The rendered line, as the menu joins it.
+    private func line(_ segments: [[AppDelegate.OwnershipRun]]) -> String {
+        segments.map { $0.map(\.text).joined() }.joined(separator: " · ")
+    }
+
+    private func colour(of text: String, in segments: [[AppDelegate.OwnershipRun]]) -> NSColor? {
+        segments.flatMap { $0 }.first { $0.text == text }?.color
+    }
 
     // MARK: - an absent read may not claim anything
 
     /// nil status means the GitHub read failed or there is no token. "unassigned" would be a claim.
     func testNilStatusRendersNoLineAtAll() {
-        XCTAssertTrue(AppDelegate.ownershipPieces(status: nil).isEmpty)
+        XCTAssertTrue(AppDelegate.ownershipSegments(status: nil).isEmpty)
     }
 
-    /// The reviewer half is withheld when the connections were missing from the response — a partial
-    /// read must not turn into "no reviewers".
+    /// A partial read must not turn into "no reviewers".
     func testAbsentReviewerConnectionsWithholdTheReviewerHalf() {
-        let pieces = AppDelegate.ownershipPieces(
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["djnesmith"], pendingReviewers: nil, reviews: nil
         )
-        XCTAssertEqual(text(pieces), ["assignee: djnesmith"], "no reviewer claim either way")
+        XCTAssertEqual(line(segments), "assignee: djnesmith")
     }
 
-    // MARK: - nobody home must be said, not omitted
+    // MARK: - the rendered line
 
-    /// A blank reads as "didn't load". Only a successful read reaches this function, so it can assert.
-    func testNoAssigneeSaysUnassigned() {
-        let pieces = AppDelegate.ownershipPieces(
-            assignees: [], pendingReviewers: ["jgerman"], reviews: []
-        )
-        XCTAssertEqual(text(pieces).first, "unassigned")
-    }
-
-    func testNoReviewersSaysSo() {
-        let pieces = AppDelegate.ownershipPieces(assignees: ["djnesmith"], pendingReviewers: [], reviews: [])
-        XCTAssertEqual(text(pieces), ["assignee: djnesmith", "no reviewers"])
-    }
-
-    func testSingleAndMultipleAssigneesAreLabelledDifferently() {
-        XCTAssertEqual(
-            text(AppDelegate.ownershipPieces(assignees: ["a"], pendingReviewers: ["x"], reviews: [])).first,
-            "assignee: a"
-        )
-        XCTAssertEqual(
-            text(AppDelegate.ownershipPieces(assignees: ["a", "b"], pendingReviewers: ["x"], reviews: [])).first,
-            "assignees: a, b"
-        )
-    }
-
-    // MARK: - reviewed and merely-asked are different facts
-
-    func testCompletedReviewsAndPendingRequestsBothAppear() {
-        let pieces = AppDelegate.ownershipPieces(
+    func testAssignedAndReviewedReadsAsOneLine() {
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["djnesmith"],
             pendingReviewers: ["alice"],
             reviews: [review("jgerman", "APPROVED")]
         )
-        XCTAssertEqual(text(pieces), ["assignee: djnesmith", "jgerman approved", "alice pending"])
+        XCTAssertEqual(line(segments), "assignee: djnesmith · jgerman approved · alice pending")
+    }
+
+    func testNobodyHomeIsSaidRatherThanOmitted() {
+        XCTAssertEqual(
+            line(AppDelegate.ownershipSegments(assignees: [], pendingReviewers: [], reviews: [])),
+            "unassigned · no reviewers"
+        )
+    }
+
+    func testSingleAndMultipleAssigneesAreLabelledDifferently() {
+        XCTAssertEqual(
+            line(AppDelegate.ownershipSegments(assignees: ["a"], pendingReviewers: [], reviews: [])),
+            "assignee: a · no reviewers"
+        )
+        XCTAssertEqual(
+            line(AppDelegate.ownershipSegments(assignees: ["a", "b"], pendingReviewers: [], reviews: [])),
+            "assignees: a, b · no reviewers"
+        )
     }
 
     func testEachReviewStateGetsItsOwnWording() {
-        let pieces = AppDelegate.ownershipPieces(
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["d"],
             pendingReviewers: [],
-            reviews: [
-                review("a", "APPROVED"),
-                review("b", "CHANGES_REQUESTED"),
-                review("c", "COMMENTED"),
-            ]
+            reviews: [review("a", "APPROVED"), review("b", "CHANGES_REQUESTED"), review("c", "COMMENTED")]
         )
-        XCTAssertEqual(
-            text(pieces),
-            ["assignee: d", "a approved", "b requested changes", "c commented"]
-        )
+        XCTAssertEqual(line(segments), "assignee: d · a approved · b requested changes · c commented")
     }
 
-    /// A dismissed review carries no signal, and an unknown future state must not render raw.
+    /// A dismissed review carries no signal, and a state GitHub adds later must not render raw.
     func testDismissedAndUnknownStatesAreDropped() {
-        let pieces = AppDelegate.ownershipPieces(
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["d"],
             pendingReviewers: ["x"],
             reviews: [review("a", "DISMISSED"), review("b", "SOMETHING_NEW")]
         )
-        XCTAssertEqual(text(pieces), ["assignee: d", "x pending"])
+        XCTAssertEqual(line(segments), "assignee: d · x pending")
     }
 
-    /// Only dropped states plus no pending requests still has to say something about reviewers.
+    /// Dropped states with nothing pending still has to say something about reviewers.
     func testAllStatesDroppedFallsBackToNoReviewers() {
-        let pieces = AppDelegate.ownershipPieces(
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["d"], pendingReviewers: [], reviews: [review("a", "DISMISSED")]
         )
-        XCTAssertEqual(text(pieces).last, "no reviewers", "a dismissed-only PR is not silently reviewer-less")
+        XCTAssertEqual(line(segments), "assignee: d · no reviewers")
     }
 
-    // MARK: - colours come from the existing palette
+    // MARK: - one colour per role, and adaptive
 
-    func testAllEmptySaysBothThings() {
-        XCTAssertEqual(
-            text(AppDelegate.ownershipPieces(assignees: [], pendingReviewers: [], reviews: [])),
-            ["unassigned", "no reviewers"]
+    func testAssigneeNameIsSystemGreenAndTheLabelIsNot() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: ["djnesmith"], pendingReviewers: [], reviews: []
         )
+        XCTAssertEqual(colour(of: "djnesmith", in: segments), NSColor.systemGreen)
+        XCTAssertEqual(colour(of: "assignee: ", in: segments), AppDelegate.ownershipMetadata)
     }
 
-    func testReviewStateColoursAreTheSameHexesLine3Uses() {
-        let pieces = AppDelegate.ownershipPieces(
+    func testReviewerNameIsSystemYellowWhetherTheyReviewedOrNot() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: [], pendingReviewers: ["alice"], reviews: [review("jgerman", "APPROVED")]
+        )
+        XCTAssertEqual(colour(of: "jgerman", in: segments), NSColor.systemYellow)
+        XCTAssertEqual(colour(of: "alice", in: segments), NSColor.systemYellow)
+    }
+
+    func testReviewStateWordsStayMetadataGrey() {
+        let segments = AppDelegate.ownershipSegments(
             assignees: ["d"],
             pendingReviewers: ["x"],
             reviews: [review("a", "APPROVED"), review("b", "CHANGES_REQUESTED")]
         )
-        let byText = Dictionary(uniqueKeysWithValues: pieces.map { ($0.0, $0.1) })
-        XCTAssertEqual(byText["a approved"], "#2DA44E")
-        XCTAssertEqual(byText["b requested changes"], "#CF222E")
-        XCTAssertEqual(byText["x pending"], "#888888")
-        XCTAssertEqual(byText["assignee: d"], "#888888")
+        for word in [" approved", " requested changes", " pending"] {
+            XCTAssertEqual(colour(of: word, in: segments), AppDelegate.ownershipMetadata, word)
+        }
+    }
+
+    /// Nobody-is-on-it keeps its amber, which is deliberately not the metadata grey and not a role colour.
+    func testAbsenceIsAmberAndDistinctFromBothRoleColours() {
+        let segments = AppDelegate.ownershipSegments(assignees: [], pendingReviewers: [], reviews: [])
+        XCTAssertEqual(colour(of: "unassigned", in: segments), AppDelegate.ownershipAbsent)
+        XCTAssertEqual(colour(of: "no reviewers", in: segments), AppDelegate.ownershipAbsent)
+        XCTAssertNotEqual(AppDelegate.ownershipAbsent, AppDelegate.ownershipMetadata)
+        XCTAssertNotEqual(AppDelegate.ownershipAbsent, NSColor.systemGreen)
+        XCTAssertNotEqual(AppDelegate.ownershipAbsent, NSColor.systemYellow)
+    }
+
+    /// The role colours must actually resolve differently per appearance — that is the whole reason for
+    /// using system colours over the hexes the rest of the row uses.
+    func testRoleColoursResolveDifferentlyInLightAndDark() {
+        let segments = AppDelegate.ownershipSegments(
+            assignees: ["d"], pendingReviewers: ["x"], reviews: []
+        )
+        for name in ["d", "x"] {
+            guard let color = colour(of: name, in: segments) else { return XCTFail("no colour for \(name)") }
+            XCTAssertNotEqual(
+                Self.srgb(color, .aqua), Self.srgb(color, .darkAqua),
+                "\(name)'s colour is fixed and cannot adapt to a dark menu"
+            )
+        }
+        // The amber is deliberately a fixed hex, so it is the control: same value in both.
+        XCTAssertEqual(
+            Self.srgb(AppDelegate.ownershipAbsent, .aqua),
+            Self.srgb(AppDelegate.ownershipAbsent, .darkAqua)
+        )
+    }
+
+    private static func srgb(_ color: NSColor, _ appearance: NSAppearance.Name) -> [CGFloat] {
+        var out: [CGFloat] = []
+        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+            guard let s = color.usingColorSpace(.sRGB) else { return }
+            out = [s.redComponent, s.greenComponent, s.blueComponent]
+        }
+        return out
+    }
+
+    // MARK: - state wording
+
+    func testReviewStateWordCoversTheStatesWorthShowing() {
+        XCTAssertEqual(AppDelegate.reviewStateWord("APPROVED"), "approved")
+        XCTAssertEqual(AppDelegate.reviewStateWord("changes_requested"), "requested changes")
+        XCTAssertEqual(AppDelegate.reviewStateWord("COMMENTED"), "commented")
+        XCTAssertNil(AppDelegate.reviewStateWord("DISMISSED"))
+        XCTAssertNil(AppDelegate.reviewStateWord("PENDING"))
+        XCTAssertNil(AppDelegate.reviewStateWord(""))
     }
 }
