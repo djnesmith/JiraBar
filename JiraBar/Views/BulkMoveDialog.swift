@@ -18,9 +18,20 @@ struct BulkMoveDialog: View {
     /// Reports the per-key outcome so the caller can fan out the GitHub mirror when
     /// `updateGithub` is true. `users` is the shared reviewer selection applied to every
     /// successfully transitioned issue.
-    let onSubmit: (_ successfulKeys: [String], _ users: [JiraUser], _ failureCount: Int, _ updateGithub: Bool) -> Void
+    let onSubmit: (
+        _ successfulKeys: [String],
+        _ users: [JiraUser],
+        _ failures: [(key: String, reason: String?)],
+        _ updateGithub: Bool,
+        _ prActions: PRActionChoices
+    ) -> Void
     let onCancel: () -> Void
 
+    @State private var prReview: Bool = true
+    @State private var prReviewComment: String = ""
+    @State private var prMerge: Bool = true
+    @State private var prSyncAssignee: Bool = true
+    @State private var prResolveThreads: Bool = true
     @State private var fromStatus: String = ""
     @State private var checkedKeys: Set<String> = []
     /// issueKey -> transitions available on that issue (fetched lazily).
@@ -151,6 +162,8 @@ struct BulkMoveDialog: View {
             }
 
             Spacer(minLength: 0)
+
+            prActionsSection
 
             requirementsSection
 
@@ -403,6 +416,60 @@ struct BulkMoveDialog: View {
         ValidationHints(problems: missingRequirements)
     }
 
+    /// The batch's PR-action choices, from the same config the single-issue dialog uses. No per-PR rows:
+    /// see the report — a dozen PRs across five tickets is not a grid anyone acts on.
+    private var currentPRChoices: PRActionChoices {
+        guard let config = matchingPromptConfig, config.hasPRActions else { return .disabled }
+        return PRActionChoices(
+            review: prReview ? config.prReviewAction : .none,
+            reviewComment: prReviewComment,
+            merge: config.allowsPRMerge && prMerge,
+            mergeMethod: config.prMergeMethod,
+            syncAssignee: config.enablePRAssigneeSync && prSyncAssignee,
+            resolveThreads: config.enablePRResolveThreads && prResolveThreads
+        )
+    }
+
+    @ViewBuilder
+    private var prActionsSection: some View {
+        if let config = matchingPromptConfig, config.hasPRActions {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("PR actions").font(.headline)
+                Text("Applied to every ticket that moves, one ticket at a time.")
+                    .font(.footnote).foregroundColor(.secondary)
+                if config.prReviewAction != .none {
+                    Toggle(
+                        config.prReviewAction == .requestChanges
+                            ? "Request changes on linked open PRs"
+                            : "Approve linked open PRs",
+                        isOn: $prReview
+                    )
+                    if prReview {
+                        TextField(
+                            config.prReviewAction.requiresComment
+                                ? "Review comment (required)"
+                                : "Approval comment (optional)",
+                            text: $prReviewComment,
+                            axis: .vertical
+                        )
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .lineLimit(2...4)
+                        .padding(.leading, 20)
+                    }
+                }
+                if config.allowsPRMerge {
+                    Toggle("Merge linked open PRs via \(config.prMergeMethod)", isOn: $prMerge)
+                }
+                if config.enablePRResolveThreads {
+                    Toggle("Resolve open review conversations", isOn: $prResolveThreads)
+                }
+                if config.enablePRAssigneeSync {
+                    Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prSyncAssignee)
+                }
+            }
+        }
+    }
+
     private var canSubmit: Bool {
         !checkedKeys.isEmpty && !selectedTransitionName.isEmpty && missingRequirements.isEmpty
     }
@@ -417,7 +484,11 @@ struct BulkMoveDialog: View {
     /// workflow-validator rules a bulk move is most likely to trip.
     private var missingRequirements: [String] {
         guard let config = matchingPromptConfig else { return [] }
-        return config.missingRequirements(
+        var problems: [String] = []
+        if currentPRChoices.reviewBlockedForEmptyComment {
+            problems.append("Write a review comment — GitHub rejects a request-changes review without one.")
+        }
+        return problems + config.missingRequirements(
             selectedUserCount: pickedUsers.count,
             textValue: freeText,
             selectValue: selectValue,
@@ -515,7 +586,8 @@ struct BulkMoveDialog: View {
 
         var index = 0
         var successfulKeys: [String] = []
-        var failureCount = 0
+        var failures: [(key: String, reason: String?)] = []
+        let prActions = currentPRChoices
         // Snapshot the shared user list + mirror flag before submit — the dialog's @State
         // could otherwise be reset by the time the last callback fires.
         let sharedUsers = Array(pickedUsers)
@@ -523,14 +595,14 @@ struct BulkMoveDialog: View {
 
         func processNext() {
             if index >= keys.count {
-                onSubmit(successfulKeys, sharedUsers, failureCount, shouldMirror)
+                onSubmit(successfulKeys, sharedUsers, failures, shouldMirror, prActions)
                 return
             }
             let key = keys[index]
             progress = "Transitioning \(index + 1) of \(keys.count): \(key)"
             guard let transitions = transitionsByIssue[key],
                   let target = transitions.first(where: { $0.name == transitionName }) else {
-                failureCount += 1
+                failures.append((key: key, reason: "\(transitionName) is not available on this issue"))
                 index += 1
                 processNext()
                 return
@@ -541,13 +613,15 @@ struct BulkMoveDialog: View {
                 comment: effectiveComment,
                 fieldUpdates: updates
             ) { result in
-                let success: Bool
-                if case .success = result { success = true } else { success = false }
                 DispatchQueue.main.async {
-                    if success {
+                    switch result {
+                    case .success:
                         successfulKeys.append(key)
-                    } else {
-                        failureCount += 1
+                    case .failed(let message, let fieldsAlreadyWritten):
+                        // Jira's own words rather than a count. `fieldsAlreadyWritten` matters: the field
+                        // PUT precedes the transition POST, so a refusal can leave values persisted.
+                        let suffix = fieldsAlreadyWritten ? " (field values were saved)" : ""
+                        failures.append((key: key, reason: (message ?? "Jira gave no reason") + suffix))
                     }
                     index += 1
                     processNext()

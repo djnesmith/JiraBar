@@ -1217,11 +1217,28 @@ final class ResolveConversationsTests: XCTestCase {
         XCTAssertEqual(tally.failureLines, ["Merge failed on acme/api #698"])
     }
 
-    func testFailedResolutionIsItsOwnFailureLine() {
+    /// Partial success must read as neither total failure nor total success.
+    func testPartialResolutionSaysHowManyClosedBeforeItStopped() {
         var tally = AppDelegate.PRActionTally()
-        tally.resolveFailed = ["acme/api #698"]
-        XCTAssertEqual(tally.failureLines, ["Conversations not resolved on acme/api #698"])
+        tally.resolveFailed = [(label: "acme/api #698", closed: 2, total: 3)]
+        XCTAssertEqual(
+            tally.failureLines,
+            ["Resolved only 2 of 3 conversations on acme/api #698"]
+        )
         XCTAssertEqual(tally.failureCount, 1)
+    }
+
+    func testNoneResolvedSaysZeroOfTheTotal() {
+        var tally = AppDelegate.PRActionTally()
+        tally.resolveFailed = [(label: "acme/api #698", closed: 0, total: 3)]
+        XCTAssertEqual(tally.failureLines, ["Resolved 0 of 3 conversations on acme/api #698"])
+    }
+
+    /// A failed read of the thread list is a different sentence from a failed resolve.
+    func testUnreadableConversationsSayThat() {
+        var tally = AppDelegate.PRActionTally()
+        tally.resolveFailed = [(label: "acme/api #698", closed: 0, total: 0)]
+        XCTAssertEqual(tally.failureLines, ["Couldn't read the conversations on acme/api #698"])
     }
 
     /// Attribution, not a bare count: closing someone else's unanswered question should say whose.
@@ -1261,5 +1278,114 @@ final class ResolveConversationsTests: XCTestCase {
             plan: PRActionsStatus.ReviewPlan(), tally: tally
         )
         XCTAssertTrue(text.contains("resolved 2 conversations on acme/api #698 (djnesmith)"), text)
+    }
+}
+
+/// The batch summary a bulk move posts. Built from the same tallies the single-issue path renders, so a
+/// batch cannot describe a PR action differently from a single move.
+final class BulkPRActionsSummaryTests: XCTestCase {
+
+    private func tally(reviewOK: Int = 0, reviewFailed: [String] = [], blocked: String? = nil) -> AppDelegate.PRActionTally {
+        var t = AppDelegate.PRActionTally(blockedReason: blocked)
+        t.reviewOK = reviewOK
+        t.reviewFailed = reviewFailed
+        return t
+    }
+
+    /// A clean run stays quiet — one line, no wall of text.
+    func testCleanBatchReportsOnlyTheMoveCount() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 5, jiraFailures: [],
+            prResults: [("DATA-1", tally(reviewOK: 2)), ("DATA-2", tally(reviewOK: 1))]
+        )
+        XCTAssertEqual(text, "Moved 5 issues", "a clean ticket contributes no line")
+    }
+
+    /// Problems lead and the total is explicit, because a banner truncates and "Moved 3 issues" is the
+    /// one line that carries nothing.
+    func testProblemsLeadWithAnExplicitTotal() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 3,
+            jiraFailures: [("DATA-9", "Testers are required before moving into QA.")],
+            prResults: [("DATA-1", tally(reviewFailed: ["acme/api #7"]))]
+        )
+        XCTAssertTrue(text.hasPrefix("2 PROBLEMS — Moved 3 issues:"), text)
+        XCTAssertTrue(text.contains("DATA-9 not moved: Testers are required"), text)
+        XCTAssertTrue(text.contains("DATA-1: Review not submitted on acme/api #7"), text)
+    }
+
+    /// Mixed outcomes stay legible: which ticket didn't move, and which ticket's PR didn't get actioned.
+    func testMixedOutcomesAreAttributedSeparately() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 2,
+            jiraFailures: [("DATA-9", "Testers are required before moving into QA.")],
+            prResults: [
+                ("DATA-1", tally(reviewOK: 1)),
+                ("DATA-2", tally(reviewFailed: ["acme/web #3"])),
+            ]
+        )
+        XCTAssertEqual(text, """
+        2 PROBLEMS — Moved 2 issues:
+        DATA-9 not moved: Testers are required before moving into QA.
+        DATA-2: Review not submitted on acme/web #3
+        """)
+    }
+
+    func testSingularProblem() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 1, jiraFailures: [("DATA-9", nil)], prResults: []
+        )
+        XCTAssertTrue(text.hasPrefix("1 PROBLEM — Moved 1 issue:"), text)
+    }
+
+    /// The defect this replaces: "Moved 3, failed 2" with no reason for either failure.
+    func testJiraFailuresCarryTheirReasonAndNameTheirTicket() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 3,
+            jiraFailures: [
+                ("DATA-9", "Testers are required before moving into QA."),
+                ("DATA-8", nil),
+            ],
+            prResults: []
+        )
+        XCTAssertEqual(text, """
+        2 PROBLEMS — Moved 3 issues:
+        DATA-9 not moved: Testers are required before moving into QA.
+        DATA-8 not moved
+        """)
+    }
+
+    /// A per-PR failure is attributed to its ticket, so five tickets' worth of PRs stay tellable apart.
+    func testPRFailuresAreAttributedToTheirTicket() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 2, jiraFailures: [],
+            prResults: [
+                ("DATA-1", tally(reviewOK: 1)),
+                ("DATA-2", tally(reviewFailed: ["acme/api #7"])),
+            ]
+        )
+        XCTAssertEqual(text, """
+        1 PROBLEM — Moved 2 issues:
+        DATA-2: Review not submitted on acme/api #7
+        """)
+    }
+
+    /// "Nothing ran" is reported as itself, not as a failure and not silently.
+    func testATicketWhereNothingRanSaysWhy() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            moved: 1, jiraFailures: [],
+            prResults: [("DATA-1", tally(blocked: "No open linked PRs were found, so no PR action ran."))]
+        )
+        XCTAssertEqual(text, """
+        1 PROBLEM — Moved 1 issue:
+        DATA-1: No open linked PRs were found, so no PR action ran.
+        """)
+    }
+
+    func testSingularMoveCount() {
+        XCTAssertEqual(
+            AppDelegate.bulkPRActionsSummary(moved: 1, jiraFailures: [], prResults: []),
+            "Moved 1 issue"
+        )
     }
 }

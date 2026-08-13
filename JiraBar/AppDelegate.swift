@@ -880,30 +880,39 @@ extension AppDelegate {
             showMirrorFor: { [weak self] fieldId in
                 self?.shouldShowGithubMirrorCheckbox(forJiraFieldId: fieldId) ?? false
             },
-            onSubmit: { [weak self] successfulKeys, users, failure, updateGithub in
+            onSubmit: { [weak self] successfulKeys, users, failures, updateGithub, prActions in
                 DispatchQueue.main.async {
-                    let success = successfulKeys.count
-                    let message: String
-                    if failure == 0 {
-                        message = "Moved \(success) issue\(success == 1 ? "" : "s")"
-                    } else if success == 0 {
-                        message = "Move failed for all \(failure) issue\(failure == 1 ? "" : "s")"
-                    } else {
-                        message = "Moved \(success), failed \(failure)"
-                    }
-                    sendNotification(body: message)
                     self?.bulkMoveWindow?.close()
                     self?.bulkMoveWindow = nil
                     self?.refreshMenu()
 
-                    if updateGithub, let self {
-                        // Fan out the GitHub mirror after the bulk move commits — one call per
-                        // successfully-transitioned issue, each posting its own summary
-                        // notification (issues without a linked PR are already handled gracefully
-                        // by `mirrorReviewersToGithub`).
+                    let mirrorReviewers: () -> Void = {
+                        guard updateGithub, let self else { return }
+                        // One call per successfully-transitioned issue, each posting its own summary
+                        // notification (issues without a linked PR are handled gracefully by
+                        // `mirrorReviewersToGithub`).
                         for key in successfulKeys {
                             self.mirrorReviewersToGithub(issueKey: key, jiraReviewers: users)
                         }
+                    }
+
+                    guard let self, prActions.hasWork, !successfulKeys.isEmpty else {
+                        mirrorReviewers()
+                        sendNotification(body: AppDelegate.bulkPRActionsSummary(
+                            moved: successfulKeys.count, jiraFailures: failures, prResults: []
+                        ))
+                        return
+                    }
+                    // The moves are done and the window has closed, so the PR work reports through the
+                    // notification — one summary for the batch rather than one per ticket.
+                    // The mirror runs after the batch rather than alongside it: both write to the same
+                    // repositories, and overlapping them is the concurrent-writes-to-one-repo shape the
+                    // batch is sequential to avoid.
+                    self.applyPRActionsForBatch(issueKeys: successfulKeys, actions: prActions) { results in
+                        sendNotification(body: AppDelegate.bulkPRActionsSummary(
+                            moved: successfulKeys.count, jiraFailures: failures, prResults: results
+                        ))
+                        mirrorReviewers()
                     }
                 }
             },
@@ -1496,7 +1505,14 @@ extension AppDelegate {
     /// linked open GitHub PRs, enriches each via GraphQL (approval state, current assignees,
     /// repo merge-methods), and reports whether the Jira ticket's assignee is the current user.
     /// All updates land on the main thread since `PRActionsStatus` drives SwiftUI.
-    private func populatePRActionsStatus(_ status: PRActionsStatus, issueKey: String) {
+    /// `completion` fires once, on the main queue, when the GitHub side has settled — which is what the
+    /// bulk batch sequences on. The Jira assignee/display fetch above is deliberately not awaited: it
+    /// only fills view-model fields, and `applyPRActions` re-reads the assignee itself.
+    private func populatePRActionsStatus(
+        _ status: PRActionsStatus,
+        issueKey: String,
+        completion: @escaping () -> Void = {}
+    ) {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
 
         // Jira side: assignee display + is-me check. Independent of GitHub, fires in parallel.
@@ -1520,11 +1536,16 @@ extension AppDelegate {
 
         // GitHub side: linked PRs + enrichment. Everything below no-ops without a token.
         jiraClient.getIssueId(byKey: issueKey) { [weak self] issueId in
-            guard let self else { return }
+            // A deallocated delegate must still release a batch that is waiting on this.
+            guard let self else {
+                DispatchQueue.main.async { completion() }
+                return
+            }
             guard let issueId else {
                 DispatchQueue.main.async {
                     status.lookupFailed = true
                     status.loading = false
+                    completion()
                 }
                 return
             }
@@ -1537,6 +1558,7 @@ extension AppDelegate {
                         DispatchQueue.main.async {
                             status.openPRs = []
                             status.loading = false
+                            completion()
                         }
                         return
                     }
@@ -1569,36 +1591,121 @@ extension AppDelegate {
                     group.notify(queue: .main) {
                         status.openPRs = openGithub.compactMap { results[$0.url] }
                         status.loading = false
+                        completion()
                     }
                 }
             }
         }
     }
 
-    /// Runs the transition dialog's PR-actions choices against every open linked PR: submits the
-    /// chosen review (APPROVE or REQUEST_CHANGES), merges using the chosen method (skipping any
-    /// repo that disallows it), and sets the Jira Assignee as PR Assignee when the PR has none.
-    /// Uses the dialog's already-enriched `PRActionsStatus` so we don't re-fetch per action.
+    /// Runs a batch's PR actions, ticket by ticket. See `applyPRActionsForBatch`.
+    /// Runs the PR actions for a batch of tickets, one ticket at a time, through the same
+    /// `applyPRActions` the single-issue path uses.
     ///
-    /// Posts a single summary notification when the batch is done, and hands the same outcome to
-    /// `completion` on the main queue so the still-open dialog can show which PRs failed. The Jira
-    /// transition has already been applied by the time this runs, so a failure here can't be left
-    /// to a notification the user may never look at.
+    /// Sequential by ticket on purpose. A bulk move across several tickets in one repository is exactly
+    /// the shape GitHub's secondary rate limit targets — concurrent writes to a single repo — and the
+    /// failure it produces is a 403 that reads as "the action didn't happen", which is what this whole
+    /// area exists to stop. Ordering *within* a ticket (resolve before merge) is unchanged because it
+    /// lives inside `applyPRActions`; this introduces no second ordering.
+    private func applyPRActionsForBatch(
+        issueKeys: [String],
+        actions: PRActionChoices,
+        completion: @escaping ([(key: String, tally: PRActionTally)]) -> Void
+    ) {
+        var results: [(key: String, tally: PRActionTally)] = []
+        var remaining = issueKeys
+
+        func next() {
+            guard !remaining.isEmpty else {
+                completion(results)
+                return
+            }
+            let key = remaining.removeFirst()
+            let status = PRActionsStatus()
+            // Reuses the single path's enrichment, so the two cannot disagree about a PR's state.
+            populatePRActionsStatus(status, issueKey: key) { [weak self] in
+                guard let self else {
+                    completion(results)
+                    return
+                }
+                // Seeded per ticket, with the same rules the single dialog seeds by: a PR already
+                // approved is skipped when the blanket action is request-changes, and one whose review
+                // state could not be read is skipped rather than acted on blind. Without this the batch
+                // would resolve every PR to the blanket action and supersede his own approvals.
+                var seeded = actions
+                seeded.reviewByPRURL = PRActionsStatus.seedActions(
+                    blanket: actions.review, prs: status.openPRs
+                )
+                self.applyPRActions(
+                    issueKey: key, actions: seeded, prStatus: status, notify: false
+                ) { tally in
+                    results.append((key: key, tally: tally))
+                    next()
+                }
+            }
+        }
+        next()
+    }
+
+    /// One line per ticket that had something to report, plus the Jira-side failures. Built from the same
+    /// tallies the single path renders, so a batch cannot describe an action differently.
+    static func bulkPRActionsSummary(
+        moved: Int,
+        jiraFailures: [(key: String, reason: String?)],
+        prResults: [(key: String, tally: PRActionTally)]
+    ) -> String {
+        var problems: [String] = []
+        for failure in jiraFailures {
+            if let reason = failure.reason {
+                problems.append("\(failure.key) not moved: \(reason)")
+            } else {
+                problems.append("\(failure.key) not moved")
+            }
+        }
+        for result in prResults {
+            switch result.tally.report {
+            case .clean:
+                continue
+            case .nothingRan(let reason):
+                problems.append("\(result.key): \(reason)")
+            case .failures(let failureLines):
+                for line in failureLines {
+                    problems.append("\(result.key): \(line)")
+                }
+            }
+        }
+        let moveLine = "Moved \(moved) issue\(moved == 1 ? "" : "s")"
+        guard !problems.isEmpty else { return moveLine }
+        // The count of problems leads, because a banner truncates and "Moved 3 issues" is the one line
+        // that carries nothing. The total is explicit so a clipped list still says how much is missing.
+        return (["\(problems.count) PROBLEM\(problems.count == 1 ? "" : "S") — \(moveLine):"] + problems)
+            .joined(separator: "\n")
+    }
+
     private func applyPRActions(
         issueKey: String,
         actions: PRActionChoices,
         prStatus: PRActionsStatus,
+        notify: Bool = true,
         completion: @escaping (PRActionTally) -> Void
     ) {
         let token = self.gitHubToken.trimmingCharacters(in: .whitespaces)
         guard !token.isEmpty else {
-            sendNotification(body: "PR actions skipped for \(issueKey): no GitHub token set.")
+            if notify { sendNotification(body: "PR actions skipped for \(issueKey): no GitHub token set.") }
             completion(PRActionTally(blockedReason: "No GitHub token is set, so no PR action ran."))
             return
         }
         let candidates = prStatus.openPRs.filter { !$0.isMerged }
+        guard !prStatus.lookupFailed else {
+            // Empty because the lookup failed is not empty because there is nothing there. The single
+            // dialog blocks submit on this; a batch has already moved the ticket, so it reports instead.
+            let reason = "Couldn't look up this ticket's linked PRs, so no PR action ran."
+            if notify { sendNotification(body: "PR actions for \(issueKey): \(reason)") }
+            completion(PRActionTally(blockedReason: reason))
+            return
+        }
         guard !candidates.isEmpty else {
-            sendNotification(body: "PR actions skipped for \(issueKey): no open linked PRs.")
+            if notify { sendNotification(body: "PR actions skipped for \(issueKey): no open linked PRs.") }
             completion(PRActionTally(blockedReason: "No open linked PRs were found, so no PR action ran."))
             return
         }
@@ -1641,7 +1748,9 @@ extension AppDelegate {
                 client.fetchUnresolvedReviewThreads(url: pr.url, token: token) { threads in
                     guard let threads else {
                         syncQueue.async {
-                            tally.resolveFailed.append(pr.label)
+                            // total 0 means the read itself failed, which is a different sentence from
+                            // "we tried and some didn't take".
+                            tally.resolveFailed.append((label: pr.label, closed: 0, total: 0))
                             group.leave()
                         }
                         return
@@ -1662,7 +1771,11 @@ extension AppDelegate {
                                 if !closed.isEmpty {
                                     tally.resolved.append((label: pr.label, authors: closed))
                                 }
-                                if anyFailed { tally.resolveFailed.append(pr.label) }
+                                if anyFailed {
+                                    tally.resolveFailed.append(
+                                        (label: pr.label, closed: closed.count, total: threads.count)
+                                    )
+                                }
                                 group.leave()
                             }
                             return
@@ -1752,13 +1865,13 @@ extension AppDelegate {
             secondPassGroup.notify(queue: .main) {
                 // Barrier read: drains every pending mutation before anything reports.
                 let final = syncQueue.sync { tally }
-                sendNotification(body: AppDelegate.prActionsSummaryBody(
+                if notify { sendNotification(body: AppDelegate.prActionsSummaryBody(
                     issueKey: issueKey,
                     actions: actions,
                     candidateCount: candidates.count,
                     plan: plan,
                     tally: final
-                ))
+                )) }
                 completion(final)
             }
         }
@@ -1781,7 +1894,9 @@ extension AppDelegate {
         /// Conversations resolved, per PR, with the authors whose threads were closed. Attribution is the
         /// point: resolving someone else's unanswered question should not read as a bare count.
         var resolved: [(label: String, authors: [String])] = []
-        var resolveFailed: [String] = []
+        /// A PR where resolution stopped short, with how many threads it had and how many closed before
+        /// it did. Partial success must not read as either total failure or total success.
+        var resolveFailed: [(label: String, closed: Int, total: Int)] = []
         /// Set when the batch never started — no token, no open PRs. Not a failure of an action;
         /// the dialog reports it as a reason nothing ran.
         var blockedReason: String?
@@ -1803,7 +1918,15 @@ extension AppDelegate {
                     guard let reason = failure.reason else { return "Merge failed on \(failure.label)" }
                     return "Merge failed on \(failure.label): \(reason)"
                 }
-                + resolveFailed.map { "Conversations not resolved on \($0)" }
+                + resolveFailed.map { failure in
+                    guard failure.total > 0 else {
+                        return "Couldn't read the conversations on \(failure.label)"
+                    }
+                    guard failure.closed > 0 else {
+                        return "Resolved 0 of \(failure.total) conversations on \(failure.label)"
+                    }
+                    return "Resolved only \(failure.closed) of \(failure.total) conversations on \(failure.label)"
+                }
                 + assignFailed.map { "Assignee not set on \($0)" }
         }
 
