@@ -121,19 +121,24 @@ struct BulkMoveDialog: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            // Scrolls above a pinned footer rather than growing without limit. With PR actions, a prompt's
+            // fields and a long issue list all showing, this dialog is taller than a laptop display — and
+            // the one thing that must never be pushed off is the button it exists for.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    header
 
             fromStatusSection
 
-            if !fromStatus.isEmpty {
+                    if !fromStatus.isEmpty {
                 issueListSection
-            }
+                    }
 
-            if !checkedKeys.isEmpty {
+                    if !checkedKeys.isEmpty {
                 toStatusSection
-            }
+                    }
 
-            if let config = matchingPromptConfig {
+                    if let config = matchingPromptConfig {
                 if config.hasUserField {
                     userPickerSection(config: config)
                 }
@@ -143,27 +148,28 @@ struct BulkMoveDialog: View {
                 if config.hasTextField {
                     textFieldSection(config: config)
                 }
-            }
+                    }
 
-            if !selectedTransitionName.isEmpty {
+                    if !selectedTransitionName.isEmpty {
                 commentSection
-            }
+                    }
 
-            if showGithubMirrorCheckbox {
+                    if showGithubMirrorCheckbox {
                 Toggle("Also update GitHub PRs for every moved issue: assign me, add selected users as reviewers", isOn: $updateGithub)
                     .font(.footnote)
-            }
+                    }
 
-            if submitting {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text(progress).font(.footnote).foregroundColor(.secondary)
+                    if submitting {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text(progress).font(.footnote).foregroundColor(.secondary)
+                        }
+                    }
+
+                    prActionsSection
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Spacer(minLength: 0)
-
-            prActionsSection
 
             requirementsSection
 
@@ -171,7 +177,7 @@ struct BulkMoveDialog: View {
         }
         .padding(16)
         .frame(width: 600)
-        .frame(minHeight: 700)
+        .frame(minHeight: 700, maxHeight: .infinity)
         .onAppear {
             // Pre-pick the first status that has issues.
             if fromStatus.isEmpty, let first = availableFromStatuses.first {

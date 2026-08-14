@@ -99,6 +99,48 @@ enum TransitionOutcomeText {
     static let prActionsDidNotRun = "The Jira transition was applied."
 }
 
+/// Warns that a merge will be refused for unresolved conversations, before the button is pressed.
+///
+/// Keyed on `mergeStateStatus == "BLOCKED"` together with unresolved threads, rather than on the repo's
+/// `required_conversation_resolution` setting. Both were available — his token can read branch protection
+/// on the repos that have it on — and the verdict beats the rule:
+///
+/// - Reading protection needs admin, so it 403s for most tokens this app will ever hold, and a repo whose
+///   settings cannot be read is not a repo that requires resolution. The fallback would be this anyway.
+/// - It costs nothing: `mergeStateStatus` and `unresolvedThreads` both already ride the per-PR enrichment.
+/// - The setting says what the rule is; `BLOCKED` says GitHub is refusing this PR now, which is the thing
+///   worth warning about. A repo with the rule on and every thread resolved is not `BLOCKED`.
+///
+/// Anything other than `BLOCKED` — including `UNKNOWN`, which is GitHub still computing — produces no
+/// warning. Unknown must not warn falsely.
+enum MergeBlockWarning {
+
+    /// The line to show, or nil when there is nothing to warn about.
+    ///
+    /// Silent when no merge is requested, and silent when the resolve action is already going to run: the
+    /// threads are about to be resolved, so the merge is not the one that fails.
+    static func label(
+        prs: [PRActionsStatus.LinkedPR],
+        mergeRequested: Bool,
+        resolveRequested: Bool
+    ) -> String? {
+        guard mergeRequested, !resolveRequested else { return nil }
+        let blocked = prs.filter { pr in
+            guard !pr.isMerged, let unresolved = pr.unresolvedThreads, unresolved > 0 else { return false }
+            return pr.mergeStateStatus?.uppercased() == "BLOCKED"
+        }
+        guard !blocked.isEmpty else { return nil }
+
+        let total = blocked.reduce(0) { $0 + ($1.unresolvedThreads ?? 0) }
+        let conversations = "\(total) unresolved conversation\(total == 1 ? "" : "s")"
+        let where_ = blocked.count == 1
+            ? blocked[0].prLabelForWarning
+            : "\(blocked.count) PRs"
+        return "GitHub will refuse the merge on \(where_): \(conversations). "
+            + "Turn on \"Resolve open review conversations\" for this transition, or resolve them on the PR."
+    }
+}
+
 /// Whether to offer resolving open review conversations, and what the offer says. One implementation for
 /// both dialogs, so the single-issue and bulk wording cannot drift.
 enum PRResolveOffer {
@@ -194,6 +236,10 @@ final class PRActionsStatus: ObservableObject {
         /// Unresolved review threads on this PR, or nil when the enrichment failed — unknown, which must
         /// not read as "nothing to resolve".
         let unresolvedThreads: Int?
+        /// GitHub's own mergeability verdict, or nil when the enrichment failed.
+        let mergeStateStatus: String?
+
+        var prLabelForWarning: String { label }
         /// False when the GitHub enrichment for this PR failed. Every other flag is then a default,
         /// not an observation — so nothing may be decided from them.
         let statesKnown: Bool
@@ -494,6 +540,16 @@ struct TransitionDialog: View {
         return PRResolveOffer.label(for: candidates)
     }
 
+    /// Advisory rather than a gate: the transition is the point and the merge is one of its side effects,
+    /// so this says what will happen instead of refusing to proceed.
+    private var mergeBlockWarning: String? {
+        MergeBlockWarning.label(
+            prs: prStatus.openPRs,
+            mergeRequested: currentPRChoices.merge,
+            resolveRequested: resolveThreadsRequested
+        )
+    }
+
     private var blanketAction: PRReviewAction {
         prReview ? config.prReviewAction : .none
     }
@@ -566,6 +622,11 @@ struct TransitionDialog: View {
             }
             if config.prResolveThreads == .ask, let offer = resolveOfferLabel {
                 Toggle(offer, isOn: $resolveAsked)
+            }
+            if let warning = mergeBlockWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if config.enablePRAssigneeSync {
                 Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee)

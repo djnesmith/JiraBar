@@ -456,6 +456,7 @@ final class PRActionsStatusTests: XCTestCase {
             viewerRequestedChanges: requestedChanges,
             isDraft: false,
             unresolvedThreads: 0,
+            mergeStateStatus: nil,
             statesKnown: true,
             assignees: [],
             mergeCommitAllowed: true,
@@ -505,7 +506,7 @@ final class PRActionsSummaryTests: XCTestCase {
     private func linked(_ n: Int) -> PRActionsStatus.LinkedPR {
         PRActionsStatus.LinkedPR(
             url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: false,
-            viewerApproved: false, viewerRequestedChanges: false, isDraft: false, unresolvedThreads: 0, statesKnown: true,
+            viewerApproved: false, viewerRequestedChanges: false, isDraft: false, unresolvedThreads: 0, mergeStateStatus: nil, statesKnown: true,
             assignees: [], mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
         )
     }
@@ -927,6 +928,7 @@ final class PerPRSeedingTests: XCTestCase {
             viewerRequestedChanges: requestedChanges,
             isDraft: draft,
             unresolvedThreads: statesKnown ? 0 : nil,
+            mergeStateStatus: nil,
             statesKnown: statesKnown,
             assignees: [],
             mergeCommitAllowed: true,
@@ -1400,7 +1402,7 @@ final class PRResolveOfferTests: XCTestCase {
         PRActionsStatus.LinkedPR(
             url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: merged,
             viewerApproved: false, viewerRequestedChanges: false, isDraft: false,
-            unresolvedThreads: unresolved, statesKnown: unresolved != nil, assignees: [],
+            unresolvedThreads: unresolved, mergeStateStatus: nil, statesKnown: unresolved != nil, assignees: [],
             mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
         )
     }
@@ -1517,5 +1519,86 @@ final class PRResolveThreadsModeTests: XCTestCase {
         var config = TransitionPromptConfig()
         config.prResolveThreads = .ask
         XCTAssertTrue(config.hasPRActions, "the dialog's PR section has to render to show the offer")
+    }
+}
+
+/// Warning that a merge will be refused for unresolved conversations, before the button is pressed.
+final class MergeBlockWarningTests: XCTestCase {
+
+    private func pr(
+        _ n: Int, unresolved: Int?, mergeState: String?, merged: Bool = false
+    ) -> PRActionsStatus.LinkedPR {
+        PRActionsStatus.LinkedPR(
+            url: "https://github.com/o/r/pull/\(n)", label: "o/r #\(n)", isMerged: merged,
+            viewerApproved: false, viewerRequestedChanges: false, isDraft: false,
+            unresolvedThreads: unresolved, mergeStateStatus: mergeState, statesKnown: unresolved != nil,
+            assignees: [], mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true
+        )
+    }
+
+    private func warn(_ prs: [PRActionsStatus.LinkedPR], merge: Bool = true, resolve: Bool = false) -> String? {
+        MergeBlockWarning.label(prs: prs, mergeRequested: merge, resolveRequested: resolve)
+    }
+
+    // MARK: - the case it exists for
+
+    /// A repo with required_conversation_resolution reports BLOCKED while any thread is open, however the
+    /// reviews stand. That is the merge that fails today only after the transition has been applied.
+    func testBlockedWithUnresolvedConversationsWarnsAndSaysWhatToDo() {
+        let warning = warn([pr(698, unresolved: 2, mergeState: "BLOCKED")])
+        XCTAssertNotNil(warning)
+        XCTAssertTrue(warning!.contains("o/r #698"), warning!)
+        XCTAssertTrue(warning!.contains("2 unresolved conversations"), warning!)
+        XCTAssertTrue(warning!.contains("Resolve open review conversations"), warning!)
+        XCTAssertTrue(warning!.contains("resolve them on the PR"), warning!)
+    }
+
+    func testSeveralBlockedPRsReportTheSpread() {
+        let warning = warn([
+            pr(1, unresolved: 2, mergeState: "BLOCKED"),
+            pr(2, unresolved: 1, mergeState: "BLOCKED"),
+        ])
+        XCTAssertTrue(warning!.contains("2 PRs"), warning!)
+        XCTAssertTrue(warning!.contains("3 unresolved conversations"), warning!)
+    }
+
+    func testSingularConversation() {
+        let warning = warn([pr(1, unresolved: 1, mergeState: "BLOCKED")])!
+        XCTAssertTrue(warning.contains("1 unresolved conversation."), warning)
+        XCTAssertFalse(warning.contains("1 unresolved conversations"), warning)
+    }
+
+    // MARK: - silence, which is most of the time
+
+    /// Nothing to warn about when the resolve action is already going to run — the threads are about to go.
+    func testSilentWhenResolveIsAlreadyRequested() {
+        XCTAssertNil(warn([pr(1, unresolved: 2, mergeState: "BLOCKED")], resolve: true))
+    }
+
+    func testSilentWhenNoMergeIsRequested() {
+        XCTAssertNil(warn([pr(1, unresolved: 2, mergeState: "BLOCKED")], merge: false))
+    }
+
+    /// A repo without the requirement is not BLOCKED by open threads, so unresolved alone must not warn.
+    func testSilentWhenGitHubIsNotBlockingTheMerge() {
+        XCTAssertNil(warn([pr(1, unresolved: 3, mergeState: "CLEAN")]))
+        XCTAssertNil(warn([pr(1, unresolved: 3, mergeState: "BEHIND")]))
+    }
+
+    /// UNKNOWN is GitHub still computing mergeability, and nil is a failed read. Neither is evidence.
+    func testUnknownAndUnreadStatesNeverWarn() {
+        XCTAssertNil(warn([pr(1, unresolved: 3, mergeState: "UNKNOWN")]))
+        XCTAssertNil(warn([pr(1, unresolved: 3, mergeState: nil)]))
+        XCTAssertNil(warn([pr(1, unresolved: nil, mergeState: "BLOCKED")]))
+    }
+
+    /// BLOCKED for some other reason — a missing approval, an out-of-date branch — is not this warning's
+    /// business, and telling him to resolve conversations there would be wrong advice.
+    func testBlockedWithNoOpenConversationsDoesNotWarn() {
+        XCTAssertNil(warn([pr(1, unresolved: 0, mergeState: "BLOCKED")]))
+    }
+
+    func testMergedPRsAreIgnored() {
+        XCTAssertNil(warn([pr(1, unresolved: 2, mergeState: "BLOCKED", merged: true)]))
     }
 }

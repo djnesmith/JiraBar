@@ -955,15 +955,29 @@ extension AppDelegate {
     ) {
         self[keyPath: keyPath]?.close()
 
+        // Resizable so the window can follow its content. Without this a SwiftUI `.frame(minHeight:)`
+        // cannot take effect: a non-resizable window keeps its content rect and clips instead, which is
+        // how the bulk dialog ended up shorter than the section it had grown.
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = title
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: view)
+
+        // Growth stops at the screen. A dialog taller than the display would put its footer — and the
+        // button the dialog exists for — somewhere unreachable.
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+            window.maxSize = NSSize(width: visible.width, height: visible.height)
+            let fitted = window.contentView?.fittingSize ?? size
+            window.setContentSize(NSSize(
+                width: min(max(size.width, fitted.width), visible.width),
+                height: min(max(size.height, fitted.height), visible.height)
+            ))
+        }
         window.center()
 
         self[keyPath: keyPath] = window
@@ -1684,6 +1698,7 @@ extension AppDelegate {
                                 viewerRequestedChanges: gh?.viewerLatestReviewState == "CHANGES_REQUESTED",
                                 isDraft: gh?.isDraft ?? false,
                                 unresolvedThreads: gh?.unresolvedThreads,
+                                mergeStateStatus: gh?.mergeStateStatus,
                                 statesKnown: gh != nil,
                                 assignees: gh?.assignees ?? [],
                                 mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,
