@@ -465,7 +465,7 @@ extension AppDelegate {
         return pending
     }
 
-    /// Adds the Recently Approved section: the PRs whose latest review from this user is an approval,
+    /// Adds the "Recently Approved PRs" section: the PRs whose latest review from this user is an approval,
     /// newest-updated first.
     ///
     /// Built entirely on first open. It costs a search plus one enrichment per candidate, and this is a
@@ -480,7 +480,7 @@ extension AppDelegate {
         guard !orgs.isEmpty, !token.isEmpty else { return }
 
         let separator = NSMenuItem.separator()
-        let header = AppDelegate.makeSectionHeader(title: "Recently Approved", symbolName: "hand.thumbsup")
+        let header = AppDelegate.makeSectionHeader(title: "Recently Approved PRs", symbolName: "hand.thumbsup")
         menu.addItem(separator)
         menu.addItem(header)
 

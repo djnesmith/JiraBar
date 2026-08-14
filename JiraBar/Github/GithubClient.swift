@@ -405,7 +405,7 @@ public class GithubClient {
         }
     }
 
-    /// Search behind the "Recently Approved" section: PRs the user has reviewed, newest-updated first.
+    /// Search behind the "Recently Approved PRs" section: PRs the user has reviewed, newest-updated first.
     ///
     /// `reviewed-by` rather than an approved-only qualifier because GitHub has none — `review:approved` is
     /// the PR's overall decision, not the viewer's own review. The approval filter therefore happens after

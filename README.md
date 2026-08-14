@@ -82,11 +82,11 @@ The ordering is yours — put it in the query. Use **`ORDER BY statusCategoryCha
 
 The default query is scoped to you but not to any project, because `statusCategory = Done` means different things in different workflows — a status like "General Availability" can count as Done and surface tickets nobody would call closed. If you work across projects, add `AND project in (ABC, DEF)`.
 
-## Recently Approved section
+## Recently Approved PRs section
 
-A `Recently Approved` entry lists the PRs **you** most recently approved — your review activity, not your authored work — newest-**updated** first, so a PR you approved days ago and someone pushed to this morning sits at the top. Rows are the usual PR rows, so merged and closed states and their colours come free.
+A `Recently Approved PRs` entry lists the PRs **you** most recently approved — your review activity, not your authored work — newest-**updated** first, so a PR you approved days ago and someone pushed to this morning sits at the top. Rows are the usual PR rows, so merged and closed states and their colours come free.
 
-Scoped by **GitHub Search Orgs** and requires a GitHub Token; both are the settings the PRs Without Tickets section already uses, so there is no query to configure. Toggle it with **Show Recently Approved section** and cap it with **Recently Approved Max Results** (default 10).
+Scoped by **GitHub Search Orgs** and requires a GitHub Token; both are the settings the PRs Without Tickets section already uses, so there is no query to configure. Toggle it with **Show Recently Approved PRs section** and cap it with **Recently Approved PRs Max Results** (default 10).
 
 GitHub has no search qualifier for "the viewer approved it" — `review:approved` is the PR's overall decision, not yours — so the search asks for `reviewed-by:@me` and the approval is checked per PR afterwards. That means PRs you only commented on, or requested changes on and never came back to, are filtered out; a PR you requested changes on and later approved stays in, because what counts is your *latest* review.
 

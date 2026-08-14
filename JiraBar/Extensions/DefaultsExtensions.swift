@@ -119,10 +119,12 @@ extension Defaults.Keys {
     )
     static let recentlyClosedMaxResults = Key<String>("recentlyClosedMaxResults", default: "10")
 
-    /// How many recently-approved PRs to list. The section is scoped by GitHub Search Orgs, the same
+    /// How many PRs the "Recently Approved PRs" section lists. Scoped by GitHub Search Orgs, the same
     /// setting PRs Without Tickets uses, so it needs no query of its own.
+    ///
+    /// The stored key keeps its original spelling: renaming it would orphan any value already saved.
     static let recentlyApprovedMaxResults = Key<String>("recentlyApprovedMaxResults", default: "10")
-    /// Whether to show the Recently Approved section at all.
+    /// Whether to show the "Recently Approved PRs" section at all.
     static let showRecentlyApprovedSection = Key<Bool>("showRecentlyApprovedSection", default: true)
 
     /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is
