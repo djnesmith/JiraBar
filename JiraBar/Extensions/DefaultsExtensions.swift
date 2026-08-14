@@ -119,6 +119,12 @@ extension Defaults.Keys {
     )
     static let recentlyClosedMaxResults = Key<String>("recentlyClosedMaxResults", default: "10")
 
+    /// How many recently-approved PRs to list. The section is scoped by GitHub Search Orgs, the same
+    /// setting PRs Without Tickets uses, so it needs no query of its own.
+    static let recentlyApprovedMaxResults = Key<String>("recentlyApprovedMaxResults", default: "10")
+    /// Whether to show the Recently Approved section at all.
+    static let showRecentlyApprovedSection = Key<Bool>("showRecentlyApprovedSection", default: true)
+
     /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is
     /// assigned to, or has been asked to review, minus any associated with a Jira ticket.
     /// Default on — the section is already gated on a GitHub token and hides itself when empty,

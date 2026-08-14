@@ -487,3 +487,137 @@ final class RecentlyClosedDefaultTests: XCTestCase {
         XCTAssertFalse(shipped.contains("customfield_"), shipped)
     }
 }
+
+/// The status element on Recently Closed rows. Reads the user's own statusDisplay mapping — no second
+/// palette, and no colour invented for a status they never configured.
+final class StatusElementColorTests: XCTestCase {
+
+    private var displays: [StatusDisplay] {
+        [
+            StatusDisplay(name: "Done", colorHex: "#00FF00"),
+            StatusDisplay(name: "Ready for Release", colorHex: "#2234FF"),
+        ]
+    }
+
+    func testItUsesTheConfiguredColour() {
+        XCTAssertEqual(
+            AppDelegate.statusElementColor(status: "Done", displays: displays),
+            NSColor(hex: "#00FF00")
+        )
+        XCTAssertEqual(
+            AppDelegate.statusElementColor(status: "Ready for Release", displays: displays),
+            NSColor(hex: "#2234FF")
+        )
+    }
+
+    /// Matching is case-insensitive, like every other status comparison in the app.
+    func testMatchIsCaseInsensitive() {
+        XCTAssertEqual(
+            AppDelegate.statusElementColor(status: "done", displays: displays),
+            NSColor(hex: "#00FF00")
+        )
+    }
+
+    /// An unmapped status still renders, in the metadata grey. Dropping it would lose information and
+    /// picking a colour would claim a mapping that does not exist.
+    func testAnUnmappedStatusFallsBackToMetadataGrey() {
+        XCTAssertEqual(
+            AppDelegate.statusElementColor(status: "Done - Release Not Required", displays: displays),
+            AppDelegate.ownershipMetadata
+        )
+        XCTAssertEqual(
+            AppDelegate.statusElementColor(status: "Anything", displays: []),
+            AppDelegate.ownershipMetadata
+        )
+    }
+}
+
+/// The Recently Approved search: `reviewed-by` plus a client-side approval filter, because GitHub has no
+/// qualifier for "the viewer approved it".
+final class RecentlyApprovedQueryTests: XCTestCase {
+
+    func testQueryScopesToTheOrgsAndSortsByUpdatedDescending() {
+        let q = GithubClient.recentlyApprovedQuery(orgs: ["Tradeswell"])
+        XCTAssertTrue(q.contains("is:pr"), q)
+        XCTAssertTrue(q.contains("reviewed-by:@me"), q)
+        XCTAssertTrue(q.contains("org:Tradeswell"), q)
+        // updated, not created or merged: they diverge on a PR approved days ago and pushed to today.
+        XCTAssertTrue(q.contains("sort:updated-desc"), q)
+        XCTAssertFalse(q.contains("is:open"), "merged PRs are the point here: " + q)
+    }
+
+    func testSeveralOrgsAndBlanksDropped() {
+        let q = GithubClient.recentlyApprovedQuery(orgs: [" Tradeswell ", "", "acme"])
+        XCTAssertTrue(q.contains("org:Tradeswell"), q)
+        XCTAssertTrue(q.contains("org:acme"), q)
+    }
+
+    // MARK: - the approval filter
+
+    private func pr(_ url: String) -> JiraPullRequest {
+        JiraPullRequest(id: "#1", name: "t", url: url, status: "MERGED", reviewers: nil)
+    }
+    private func status(_ state: String?) -> GithubPRStatus {
+        GithubPRStatus(
+            reviewDecision: nil, unresolvedThreads: 0, totalThreads: 0, ciState: nil, isMerged: true,
+            mergedAt: nil, latestReleasePublishedAt: nil, defaultBranchCIState: nil,
+            viewerLatestReviewState: state, assignees: [], pendingReviewers: [], reviews: [],
+            mergeCommitAllowed: true, squashMergeAllowed: true, rebaseMergeAllowed: true,
+            headRefName: nil, mergeStateStatus: nil, isDraft: false
+        )
+    }
+
+    /// reviewed-by includes reviews that are not approvals. Measured against the real org, one PR in
+    /// fourteen was COMMENTED — data-service-amazon-dsp#13.
+    func testOnlyPRsWhoseLatestViewerReviewIsAnApprovalSurvive() {
+        let approved = pr("https://github.com/o/r/pull/1")
+        let commented = pr("https://github.com/o/r/pull/2")
+        let changesRequested = pr("https://github.com/o/r/pull/3")
+        let kept = GithubClient.approvedByViewer(
+            [approved, commented, changesRequested],
+            statusByURL: [
+                approved.url: status("APPROVED"),
+                commented.url: status("COMMENTED"),
+                changesRequested.url: status("CHANGES_REQUESTED"),
+            ]
+        )
+        XCTAssertEqual(kept.map(\.url), [approved.url])
+    }
+
+    /// A PR whose enrichment failed has no review state, and unknown is not an approval.
+    func testUnknownReviewStateIsNotAnApproval() {
+        let unknown = pr("https://github.com/o/r/pull/9")
+        XCTAssertTrue(GithubClient.approvedByViewer([unknown], statusByURL: [:]).isEmpty)
+        XCTAssertTrue(
+            GithubClient.approvedByViewer([unknown], statusByURL: [unknown.url: status(nil)]).isEmpty
+        )
+    }
+
+    func testOrderIsPreserved() {
+        let a = pr("https://github.com/o/r/pull/1")
+        let b = pr("https://github.com/o/r/pull/2")
+        let kept = GithubClient.approvedByViewer(
+            [b, a], statusByURL: [a.url: status("APPROVED"), b.url: status("APPROVED")]
+        )
+        XCTAssertEqual(kept.map(\.url), [b.url, a.url], "search order is the updated-desc order")
+    }
+
+    // MARK: - search hits carry their real state
+
+    func testMergedClosedAndOpenHitsAreDistinguished() {
+        XCTAssertEqual(GithubClient.searchHitAsPR([
+            "html_url": "u", "number": 1, "title": "t", "state": "closed",
+            "pull_request": ["merged_at": "2026-08-12T00:00:00Z"],
+        ])?.status, "MERGED")
+        XCTAssertEqual(GithubClient.searchHitAsPR([
+            "html_url": "u", "number": 1, "title": "t", "state": "closed", "pull_request": [String: Any](),
+        ])?.status, "DECLINED")
+        XCTAssertEqual(GithubClient.searchHitAsPR([
+            "html_url": "u", "number": 1, "title": "t", "state": "open",
+        ])?.status, "OPEN")
+    }
+
+    func testAHitMissingItsEssentialsIsSkipped() {
+        XCTAssertNil(GithubClient.searchHitAsPR(["number": 1, "title": "t"]))
+    }
+}

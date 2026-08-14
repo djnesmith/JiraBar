@@ -35,6 +35,8 @@ struct AppSettings: Codable {
     var todoMaxResults: String?
     var recentlyClosedJQL: String?
     var recentlyClosedMaxResults: String?
+    var recentlyApprovedMaxResults: String?
+    var showRecentlyApprovedSection: Bool?
 
     // Lists
     /// Legacy pre-statusDisplay key. Kept so older backup files still decode; no longer
@@ -72,6 +74,8 @@ struct AppSettings: Codable {
             todoMaxResults: Defaults[.todoMaxResults],
             recentlyClosedJQL: Defaults[.recentlyClosedJQL],
             recentlyClosedMaxResults: Defaults[.recentlyClosedMaxResults],
+            recentlyApprovedMaxResults: Defaults[.recentlyApprovedMaxResults],
+            showRecentlyApprovedSection: Defaults[.showRecentlyApprovedSection],
             statusOrder: nil,
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -104,6 +108,8 @@ struct AppSettings: Codable {
         if let value = todoMaxResults { Defaults[.todoMaxResults] = value }
         if let value = recentlyClosedJQL { Defaults[.recentlyClosedJQL] = value }
         if let value = recentlyClosedMaxResults { Defaults[.recentlyClosedMaxResults] = value }
+        if let value = recentlyApprovedMaxResults { Defaults[.recentlyApprovedMaxResults] = value }
+        if let value = showRecentlyApprovedSection { Defaults[.showRecentlyApprovedSection] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         // Older backup files carry the legacy statusOrder list — convert it the same way the
         // launch migration does, and only when the file didn't bring its own statusDisplay.

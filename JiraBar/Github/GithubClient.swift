@@ -405,6 +405,85 @@ public class GithubClient {
         }
     }
 
+    /// Search behind the "Recently Approved" section: PRs the user has reviewed, newest-updated first.
+    ///
+    /// `reviewed-by` rather than an approved-only qualifier because GitHub has none — `review:approved` is
+    /// the PR's overall decision, not the viewer's own review. The approval filter therefore happens after
+    /// enrichment, on `viewerLatestReviewState`; see `approvedByViewer`.
+    ///
+    /// Sorted on the **updated** timestamp, which is what was asked for: a PR approved days ago and pushed
+    /// to this morning belongs at the top, and `created` or `merged` would both bury it.
+    static func recentlyApprovedQuery(orgs: [String]) -> String {
+        let orgTerms = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { "org:\($0)" }
+            .joined(separator: " ")
+        return "is:pr reviewed-by:@me sort:updated-desc \(orgTerms)"
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Keeps only the PRs whose *latest* review from the viewer is an approval, in the order given.
+    ///
+    /// Latest is the right reading of "PRs I approved": a PR he requested changes on and then approved
+    /// counts, and one he approved and later left a comment on does not — his standing review there is a
+    /// comment. Measured against the real org, this drops roughly one PR in fourteen from `reviewed-by`.
+    static func approvedByViewer(
+        _ prs: [JiraPullRequest],
+        statusByURL: [String: GithubPRStatus]
+    ) -> [JiraPullRequest] {
+        prs.filter { statusByURL[$0.url]?.viewerLatestReviewState == "APPROVED" }
+    }
+
+    /// One search hit as a PR row. Unlike the PRs-Without-Tickets search this one is not `is:open`, so the
+    /// state has to come from the payload: a merged PR is the interesting artifact here, and hardcoding
+    /// OPEN would render every row as though it were still in flight.
+    static func searchHitAsPR(_ item: [String: Any]) -> JiraPullRequest? {
+        guard
+            let htmlURL = item["html_url"] as? String,
+            let number = item["number"] as? Int,
+            let title = item["title"] as? String
+        else { return nil }
+        let merged = ((item["pull_request"] as? [String: Any])?["merged_at"] as? String) != nil
+        let closed = (item["state"] as? String)?.lowercased() == "closed"
+        let status = merged ? "MERGED" : (closed ? "DECLINED" : "OPEN")
+        return JiraPullRequest(id: "#\(number)", name: title, url: htmlURL, status: status, reviewers: nil)
+    }
+
+    func searchReviewedByMe(
+        orgs: [String],
+        token: String,
+        limit: Int,
+        completion: @escaping ([JiraPullRequest]) -> Void
+    ) {
+        guard !token.isEmpty else {
+            completion([])
+            return
+        }
+        AF.request(
+            "https://api.github.com/search/issues",
+            method: .get,
+            parameters: ["q": GithubClient.recentlyApprovedQuery(orgs: orgs), "per_page": limit],
+            headers: apiHeaders(token: token)
+        )
+        .validate(statusCode: 200..<300)
+        .responseData { response in
+            switch response.result {
+            case .success(let data):
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let items = json["items"] as? [[String: Any]]
+                else {
+                    completion([])
+                    return
+                }
+                completion(items.compactMap { GithubClient.searchHitAsPR($0) })
+            case .failure(let error):
+                print("github searchReviewedByMe: \(error)")
+                completion([])
+            }
+        }
+    }
+
     /// How a PR came to be in the search results. GitHub's search can't OR these
     /// together, so each is its own query.
     enum MyPRsRelation: String, CaseIterable {

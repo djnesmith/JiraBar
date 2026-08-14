@@ -164,6 +164,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.todoMaxResults) var todoMaxResults
     @Default(.recentlyClosedJQL) var recentlyClosedJQL
     @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
+    @Default(.recentlyApprovedMaxResults) var recentlyApprovedMaxResults
+    @Default(.showRecentlyApprovedSection) var showRecentlyApprovedSection
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -369,6 +371,7 @@ extension AppDelegate {
 
             if let todoPending { self.appendTodoSection(todoPending) }
             if let recentlyClosedPending { self.appendRecentlyClosedSection(recentlyClosedPending) }
+            self.appendRecentlyApprovedSection()
 
             // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
             // attached (or the whole section removed) once the searches and the per-issue PR
@@ -462,6 +465,56 @@ extension AppDelegate {
         return pending
     }
 
+    /// Adds the Recently Approved section: the PRs whose latest review from this user is an approval,
+    /// newest-updated first.
+    ///
+    /// Built entirely on first open. It costs a search plus one enrichment per candidate, and this is a
+    /// history rollup that may never be opened — the same trade the other two sections make.
+    private func appendRecentlyApprovedSection() {
+        guard showRecentlyApprovedSection else { return }
+        let orgs = githubSearchOrgs
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let token = gitHubToken.trimmingCharacters(in: .whitespaces)
+        guard !orgs.isEmpty, !token.isEmpty else { return }
+
+        let separator = NSMenuItem.separator()
+        let header = AppDelegate.makeSectionHeader(title: "Recently Approved", symbolName: "hand.thumbsup")
+        menu.addItem(separator)
+        menu.addItem(header)
+
+        let wanted = Int(recentlyApprovedMaxResults) ?? 10
+        let delegate = LazyMenuDelegate { [weak self] in
+            guard let self else { return }
+            // Over-fetched because the approval filter runs after the search: `reviewed-by` includes PRs
+            // whose latest review is a comment or a change request, so asking for exactly `wanted` would
+            // land short.
+            let client = GithubClient()
+            client.searchReviewedByMe(orgs: orgs, token: token, limit: max(wanted * 2, wanted + 5)) { prs in
+                guard !prs.isEmpty else { return }
+                self.fetchGithubStatuses(for: prs) { statusByURL in
+                    let approved = Array(
+                        GithubClient.approvedByViewer(prs, statusByURL: statusByURL).prefix(wanted)
+                    )
+                    DispatchQueue.main.async {
+                        guard let submenu = header.submenu else { return }
+                        submenu.removeAllItems()
+                        guard !approved.isEmpty else {
+                            submenu.addItem(NSMenuItem(title: "No approvals found", action: nil, keyEquivalent: ""))
+                            return
+                        }
+                        for pr in approved {
+                            self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: submenu, showOwnership: true)
+                        }
+                    }
+                }
+            }
+        }
+        header.submenu?.delegate = delegate
+        submenuDelegates.append(delegate)
+    }
+
     /// Starts the Recently Closed search, or nil when no query is configured.
     ///
     /// Deliberately keeps the order Jira returned rather than re-sorting by rank: this section is
@@ -508,7 +561,7 @@ extension AppDelegate {
             for issue in issues {
                 // No assignee highlight: this query is usually scoped to one person, where green would be
                 // green on every row and carry nothing.
-                let row = self.makeIssueRow(for: issue)
+                let row = self.makeIssueRow(for: issue, showStatus: true)
                 closedMenu.addItem(row)
                 rows.append((row, issue))
             }
@@ -749,6 +802,15 @@ extension AppDelegate {
         return "Add " + trimmed.dropFirst(prefix.count)
     }
 
+    /// The user's own `statusDisplay` colour for a status, or the metadata grey when they have no entry.
+    ///
+    /// Grey rather than dropping the status or inventing a colour: the status is information either way,
+    /// and a colour nobody configured would be a claim about a mapping that does not exist.
+    static func statusElementColor(status: String, displays: [StatusDisplay]) -> NSColor {
+        displays.first { $0.name.caseInsensitiveCompare(status) == .orderedSame }?.nsColor
+            ?? AppDelegate.ownershipMetadata
+    }
+
     /// Opt-in because green only means something in TODO, where the rule is "top-ranked *unassigned*
     /// ticket" and so green reads as taken-skip-it; the status-grouped rows are all the user's own
     /// tickets and would be green throughout.
@@ -764,12 +826,16 @@ extension AppDelegate {
     /// Builds the two-line ticket row: truncated summary, then `#KEY · assignee · type`.
     /// Clicking opens the ticket in the browser. The submenu is attached separately by
     /// `attachIssueSubmenu` so callers can decide when to pay for it.
-    private func makeIssueRow(for issue: Issue, highlightAssigned: Bool = false) -> NSMenuItem {
+    private func makeIssueRow(
+        for issue: Issue,
+        highlightAssigned: Bool = false,
+        showStatus: Bool = false
+    ) -> NSMenuItem {
         let assignee = AppDelegate.assigneeSegment(
             displayName: issue.fields.assignee?.displayName, highlightAssigned: highlightAssigned
         )
         let issueItem = NSMenuItem(title: "", action: #selector(self.openLink), keyEquivalent: "")
-        issueItem.attributedTitle = NSMutableAttributedString(string: "")
+        let title = NSMutableAttributedString(string: "")
             .appendString(string: issue.fields.summary.trunc(length: 50))
             .appendNewLine()
             .appendIcon(iconName: "hash", color: NSColor.gray)
@@ -778,6 +844,17 @@ extension AppDelegate {
             .appendString(string: assignee.text, color: assignee.color)
             .appendSeparator()
             .appendString(string: issue.fields.issuetype.name, color: "#888888")
+        if showStatus {
+            title
+                .appendSeparator()
+                .appendString(
+                    string: issue.fields.status.name,
+                    color: AppDelegate.statusElementColor(
+                        status: issue.fields.status.name, displays: statusDisplay
+                    )
+                )
+        }
+        issueItem.attributedTitle = title
         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
         return issueItem
     }

@@ -230,6 +230,8 @@ private struct QuerySection: View {
     @Default(.todoJQL) var todoJQL
     @Default(.recentlyClosedJQL) var recentlyClosedJQL
     @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
+    @Default(.showRecentlyApprovedSection) var showRecentlyApprovedSection
+    @Default(.recentlyApprovedMaxResults) var recentlyApprovedMaxResults
     @Default(.todoMaxResults) var todoMaxResults
 
     var body: some View {
@@ -253,6 +255,12 @@ private struct QuerySection: View {
         Text("Adds a Recently Closed entry under TODO listing finished tickets, each showing its PRs including merged and closed ones. No transitions or editing — it's a history rollup. Empty switches it off. Order by statusCategoryChangedDate rather than resolutiondate, which many workflows never populate. Add \"AND project in (ABC, DEF)\" to keep other projects' idea of \"Done\" out.")
             .font(.footnote)
         TextField("Recently Closed Max Results:", text: $recentlyClosedMaxResults)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+            .frame(width: 120)
+        Toggle("Show Recently Approved section", isOn: $showRecentlyApprovedSection)
+        Text("The PRs you most recently approved, newest-updated first, scoped by GitHub Search Orgs above. Requires a GitHub Token. Built on first open — it costs a search plus one lookup per candidate, because GitHub cannot search on \"I approved it\" and the approval has to be checked per PR.")
+            .font(.footnote)
+        TextField("Recently Approved Max Results:", text: $recentlyApprovedMaxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
             .frame(width: 120)
         TextField("Max Results:", text: $maxResults)

@@ -76,9 +76,19 @@ A `Recently Closed` entry appears under TODO, listing finished tickets newest-fi
 
 Each ticket's submenu carries the copy shortcuts and its PR rows, and nothing else: no transitions, comment, flag, upload or user-field shortcuts. It is a history rollup, so every one of those would be either a mutation or a request per ticket. Submenus are built the first time you open the section, so it costs nothing until then, and **Recently Closed Max Results** caps the list separately.
 
+Each row also shows the ticket's **status** after its type, coloured from your own **Status Order & Colors** mapping. A status you have not given a colour renders in the same grey as the rest of the row's metadata rather than being dropped or given an invented colour.
+
 The ordering is yours — put it in the query. Use **`ORDER BY statusCategoryChangedDate DESC`**, not `resolutiondate`: plenty of workflows never set a resolution, and NULLs sort first under `DESC`, so a third of your rows can be ancient tickets crowding out the recent ones. `statusCategoryChangedDate` is the field that means "when did this become Done".
 
 The default query is scoped to you but not to any project, because `statusCategory = Done` means different things in different workflows — a status like "General Availability" can count as Done and surface tickets nobody would call closed. If you work across projects, add `AND project in (ABC, DEF)`.
+
+## Recently Approved section
+
+A `Recently Approved` entry lists the PRs **you** most recently approved — your review activity, not your authored work — newest-**updated** first, so a PR you approved days ago and someone pushed to this morning sits at the top. Rows are the usual PR rows, so merged and closed states and their colours come free.
+
+Scoped by **GitHub Search Orgs** and requires a GitHub Token; both are the settings the PRs Without Tickets section already uses, so there is no query to configure. Toggle it with **Show Recently Approved section** and cap it with **Recently Approved Max Results** (default 10).
+
+GitHub has no search qualifier for "the viewer approved it" — `review:approved` is the PR's overall decision, not yours — so the search asks for `reviewed-by:@me` and the approval is checked per PR afterwards. That means PRs you only commented on, or requested changes on and never came back to, are filtered out; a PR you requested changes on and later approved stays in, because what counts is your *latest* review.
 
 ## PRs Without Tickets section
 
