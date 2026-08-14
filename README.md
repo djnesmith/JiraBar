@@ -70,6 +70,14 @@ The per-ticket submenus are built the first time you open TODO, not on every ref
 
 There's deliberately no default query. `status = "To Do"` with no project or board scope doesn't mean "my To Do column" — it means every To Do ticket in every project you can see, which after the result cap is a near-random sample. The query has to name your project or board to be meaningful, so it's yours to write.
 
+## Recently Closed section
+
+Set a **Recently Closed JQL** in Preferences and a `Recently Closed` entry appears under TODO, listing finished tickets newest-first with their PRs — including merged and closed ones, which for a finished ticket are the artifact worth seeing. **Off when the setting is empty**, since no default query can guess which of a workflow's statuses count as closed.
+
+Each ticket's submenu carries the copy shortcuts and its PR rows, and nothing else: no transitions, comment, flag, upload or user-field shortcuts. It is a history rollup, so every one of those would be either a mutation or a request per ticket. Submenus are built the first time you open the section, so it costs nothing until then, and **Recently Closed Max Results** caps the list separately.
+
+The ordering is yours — put it in the query. `ORDER BY resolutiondate DESC` is the honest field for "most recently closed" where resolutions are set; `ORDER BY updated DESC` is the fallback where they are not.
+
 ## PRs Without Tickets section
 
 With a GitHub token set, a **PRs Without Tickets** entry appears between the ticket groups and the utility items. Its submenu lists your open GitHub PRs — ones you authored, ones assigned to you, and ones whose review was requested from you — that **aren't** associated with any Jira ticket. All three matter: opening a PR doesn't assign it to you or request your review, and a PR assigned to you may well have been written by someone else. A PR counts as ticket-associated (and is excluded) when it already renders under a visible ticket, or when a Jira issue key (`ABC-123` style) appears in its title or head branch name — that second rule catches tickets outside your JQL window. Rows click exactly like ticket PR rows (same modifier routing and hint pills) and carry the same first three lines, plus a fourth naming who the PR is assigned to and where its reviews stand — `assignee: djnesmith · jgerman approved · alice pending`. That line only appears here, because every other PR row sits under a Jira ticket that already answers "whose is this". An unassigned PR says `unassigned` rather than leaving a gap, and a PR whose GitHub read failed shows no ownership line at all rather than claiming nobody owns it, the entry hides itself entirely when there's nothing to show, and results are scoped to **GitHub Search Orgs** when that's set. Toggle it off in Preferences with **Show PRs Without Tickets section**.

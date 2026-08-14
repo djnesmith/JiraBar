@@ -228,6 +228,8 @@ private struct QuerySection: View {
     @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
     @Default(.showMyPRsSection) var showMyPRsSection
     @Default(.todoJQL) var todoJQL
+    @Default(.recentlyClosedJQL) var recentlyClosedJQL
+    @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
     @Default(.todoMaxResults) var todoMaxResults
 
     var body: some View {
@@ -244,6 +246,13 @@ private struct QuerySection: View {
         Text("Optional. Adds a TODO entry whose submenu lists these tickets, each with the same submenu it gets in the main list. Meant for a backlog view your main JQL can't show — e.g. status = \"To Do\" ORDER BY Rank ASC for the whole column, not just your own tickets. Set the Rank field id below and the submenu follows board order.")
             .font(.footnote)
         TextField("TODO Max Results:", text: $todoMaxResults)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+            .frame(width: 120)
+        TextField("Recently Closed JQL:", text: $recentlyClosedJQL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional, off when empty. Adds a Recently Closed entry under TODO listing finished tickets, each showing its PRs including merged and closed ones. No transitions or editing — it's a history rollup. Order it yourself, e.g. assignee = currentUser() AND statusCategory = Done ORDER BY resolutiondate DESC.")
+            .font(.footnote)
+        TextField("Recently Closed Max Results:", text: $recentlyClosedMaxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
             .frame(width: 120)
         TextField("Max Results:", text: $maxResults)

@@ -436,3 +436,22 @@ final class OwnershipSegmentsTests: XCTestCase {
         XCTAssertNil(AppDelegate.reviewStateWord(""))
     }
 }
+
+/// Whether the Recently Closed section runs at all. Empty means absent, not unfiltered — a query that
+/// matched every closed ticket in the instance would be worse than no section.
+final class ConfiguredQueryTests: XCTestCase {
+
+    /// Both the TODO and Recently Closed sections gate on this: blank means the section is absent, not
+    /// that it runs unfiltered.
+    func testBlankIsOff() {
+        XCTAssertNil(AppDelegate.configuredQuery(""))
+        XCTAssertNil(AppDelegate.configuredQuery("  \n\t "))
+    }
+
+    /// Trimmed, never rewritten — the user's ORDER BY is what sets the chronology, so nothing may append
+    /// to or reorder it.
+    func testAQueryIsTrimmedAndOtherwiseUntouched() {
+        let query = "assignee = currentUser() AND statusCategory = Done ORDER BY resolutiondate DESC"
+        XCTAssertEqual(AppDelegate.configuredQuery("  " + query + "  "), query)
+    }
+}

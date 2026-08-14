@@ -11,7 +11,7 @@ Practical guidance for AI agents working on JiraBar.
 
 ## High-Signal Files
 
-- `JiraBar/AppDelegate.swift`: status bar lifecycle, timer, menu rebuild, window hosting, TODO and PRs Without Tickets sections, GitHub mirror/PR-action orchestration
+- `JiraBar/AppDelegate.swift`: status bar lifecycle, timer, menu rebuild, window hosting, TODO, Recently Closed and PRs Without Tickets sections, GitHub mirror/PR-action orchestration
 - `JiraBar/Jira/JiraClient.swift`: Jira API calls, auth headers, credential validation
 - `JiraBar/Github/GithubClient.swift`: GraphQL PR enrichment, searches, reviews/merge/assignee/reviewer endpoints
 - `JiraBar/Github/ForgePRURL.swift`: the one PR/repo URL parser — don't re-implement path walking

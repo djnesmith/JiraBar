@@ -101,6 +101,11 @@ extension Defaults.Keys {
     /// view usually wants a different depth than the main ticket list.
     static let todoMaxResults = Key<String>("todoMaxResults", default: "15")
 
+    /// JQL for the Recently Closed section. Empty is off — the section is absent rather than showing
+    /// everything, because no default query can guess a workflow's closed-ish statuses.
+    static let recentlyClosedJQL = Key<String>("recentlyClosedJQL", default: "")
+    static let recentlyClosedMaxResults = Key<String>("recentlyClosedMaxResults", default: "10")
+
     /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is
     /// assigned to, or has been asked to review, minus any associated with a Jira ticket.
     /// Default on — the section is already gated on a GitHub token and hides itself when empty,

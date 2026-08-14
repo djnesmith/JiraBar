@@ -80,7 +80,8 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
-/// Defers work until a menu is first opened, then runs it once. Used by the TODO section,
+/// Defers work until a menu is first opened, then runs it once. Used by the TODO and Recently Closed
+/// sections,
 /// whose per-ticket submenus each cost a transitions call plus a dev-status call: paying that
 /// for a whole backlog on every refresh — for a section that often goes unopened — would
 /// multiply the app's request volume for nothing.
@@ -161,6 +162,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.showMyPRsSection) var showMyPRsSection
     @Default(.todoJQL) var todoJQL
     @Default(.todoMaxResults) var todoMaxResults
+    @Default(.recentlyClosedJQL) var recentlyClosedJQL
+    @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
 
     @FromKeychain(.gitHubToken) var gitHubToken
 
@@ -282,6 +285,7 @@ extension AppDelegate {
             && !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty
         // Runs concurrently with the main search below — see startTodoFetch.
         let todoPending = self.startTodoFetch()
+        let recentlyClosedPending = self.startRecentlyClosedFetch()
         let myPRsGroup = DispatchGroup()
         let collectedURLsQueue = DispatchQueue(label: "myPRs.collectedURLs")
         var collectedPRURLs = Set<String>()
@@ -364,6 +368,7 @@ extension AppDelegate {
             }
 
             if let todoPending { self.appendTodoSection(todoPending) }
+            if let recentlyClosedPending { self.appendRecentlyClosedSection(recentlyClosedPending) }
 
             // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
             // attached (or the whole section removed) once the searches and the per-issue PR
@@ -448,14 +453,108 @@ extension AppDelegate {
     /// nothing to show — by the full cost of the primary search (~0.3–0.5s against the author's
     /// instance, visible in the unified log as one Jira request wave strictly following another).
     private func startTodoFetch() -> PendingSection<[Issue]>? {
-        let query = todoJQL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return nil }
+        guard let query = AppDelegate.configuredQuery(todoJQL) else { return nil }
 
         let pending = PendingSection<[Issue]>()
         jiraClient.getIssuesByJql(jql: query, maxResults: todoMaxResults) { resp, ranks in
             pending.deliver(AppDelegate.orderedByRank(resp.issues ?? [], ranks: ranks))
         }
         return pending
+    }
+
+    /// Starts the Recently Closed search, or nil when no query is configured.
+    ///
+    /// Deliberately keeps the order Jira returned rather than re-sorting by rank: this section is
+    /// chronological, and the ordering belongs in the user's `ORDER BY` where they can change it.
+    private func startRecentlyClosedFetch() -> PendingSection<[Issue]>? {
+        guard let query = AppDelegate.configuredQuery(recentlyClosedJQL) else { return nil }
+
+        let pending = PendingSection<[Issue]>()
+        jiraClient.getIssuesByJql(jql: query, maxResults: recentlyClosedMaxResults) { resp, _ in
+            pending.deliver(resp.issues ?? [])
+        }
+        return pending
+    }
+
+    /// A configured section's query, or nil when it is switched off. Empty means absent rather than
+    /// unfiltered — a section showing every closed ticket in the instance would be worse than none.
+    static func configuredQuery(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Adds the Recently Closed section under TODO: tickets the user's query returns, each showing its
+    /// PRs — including merged and closed ones, which for a finished ticket are the artifact worth seeing.
+    ///
+    /// Submenus are built on first open — see `LazyMenuDelegate` for why that matters at a request per
+    /// ticket.
+    private func appendRecentlyClosedSection(_ pending: PendingSection<[Issue]>) {
+        let separator = NSMenuItem.separator()
+        let header = AppDelegate.makeSectionHeader(title: "Recently Closed", symbolName: "checkmark.seal")
+        menu.addItem(separator)
+        menu.addItem(header)
+
+        pending.onReady { [weak self] issues in
+            guard let self else { return }
+            guard self.menu.index(of: header) != -1 else { return }
+            guard !issues.isEmpty else {
+                self.menu.removeItem(header)
+                if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
+                return
+            }
+
+            let closedMenu = NSMenu()
+            var rows: [(NSMenuItem, Issue)] = []
+            for issue in issues {
+                // No assignee highlight: this query is usually scoped to one person, where green would be
+                // green on every row and carry nothing.
+                let row = self.makeIssueRow(for: issue)
+                closedMenu.addItem(row)
+                rows.append((row, issue))
+            }
+            let delegate = LazyMenuDelegate {
+                for (row, issue) in rows {
+                    self.attachClosedIssueSubmenu(to: row, issue: issue)
+                }
+            }
+            closedMenu.delegate = delegate
+            self.submenuDelegates.append(delegate)
+            header.submenu = closedMenu
+        }
+    }
+
+    /// A finished ticket's submenu: the copy shortcuts, which cost nothing, and its PR rows. No
+    /// transitions, comment, flag, upload or user-field shortcuts — each is either a mutation or a request
+    /// per ticket, and this section is a rollup of history.
+    private func attachClosedIssueSubmenu(to item: NSMenuItem, issue: Issue) {
+        let issueMenu = NSMenu()
+        item.submenu = issueMenu
+
+        let copyKeyItem = NSMenuItem(title: "Copy Key", action: #selector(self.copyToClipboard), keyEquivalent: "")
+        copyKeyItem.representedObject = issue.key
+        issueMenu.addItem(copyKeyItem)
+
+        let copyURLItem = NSMenuItem(title: "Copy URL", action: #selector(self.copyToClipboard), keyEquivalent: "")
+        copyURLItem.representedObject = "\(self.baseUrl)/browse/\(issue.key)"
+        issueMenu.addItem(copyURLItem)
+
+        let copyTitleItem = NSMenuItem(title: "Copy Title", action: #selector(self.copyToClipboard), keyEquivalent: "")
+        copyTitleItem.representedObject = issue.fields.summary
+        issueMenu.addItem(copyTitleItem)
+
+        jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
+            self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
+                guard !merged.isEmpty else { return }
+                self.fetchGithubStatuses(for: merged) { statusByURL in
+                    DispatchQueue.main.async {
+                        issueMenu.addItem(.separator())
+                        for pr in merged {
+                            self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Adds the TODO section — a backlog rollup whose submenu lists the tickets matching the

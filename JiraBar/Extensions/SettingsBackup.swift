@@ -33,6 +33,8 @@ struct AppSettings: Codable {
     var showMyPRsSection: Bool?
     var todoJQL: String?
     var todoMaxResults: String?
+    var recentlyClosedJQL: String?
+    var recentlyClosedMaxResults: String?
 
     // Lists
     /// Legacy pre-statusDisplay key. Kept so older backup files still decode; no longer
@@ -68,6 +70,8 @@ struct AppSettings: Codable {
             showMyPRsSection: Defaults[.showMyPRsSection],
             todoJQL: Defaults[.todoJQL],
             todoMaxResults: Defaults[.todoMaxResults],
+            recentlyClosedJQL: Defaults[.recentlyClosedJQL],
+            recentlyClosedMaxResults: Defaults[.recentlyClosedMaxResults],
             statusOrder: nil,
             statusDisplay: Defaults[.statusDisplay],
             userFieldShortcuts: Defaults[.userFieldShortcuts],
@@ -98,6 +102,8 @@ struct AppSettings: Codable {
         if let value = showMyPRsSection { Defaults[.showMyPRsSection] = value }
         if let value = todoJQL { Defaults[.todoJQL] = value }
         if let value = todoMaxResults { Defaults[.todoMaxResults] = value }
+        if let value = recentlyClosedJQL { Defaults[.recentlyClosedJQL] = value }
+        if let value = recentlyClosedMaxResults { Defaults[.recentlyClosedMaxResults] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }
         // Older backup files carry the legacy statusOrder list — convert it the same way the
         // launch migration does, and only when the file didn't bring its own statusDisplay.
