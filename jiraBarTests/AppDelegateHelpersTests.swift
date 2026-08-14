@@ -1,4 +1,5 @@
 import XCTest
+import Defaults
 import AppKit
 @testable import jiraBar
 
@@ -442,7 +443,8 @@ final class OwnershipSegmentsTests: XCTestCase {
 final class ConfiguredQueryTests: XCTestCase {
 
     /// Both the TODO and Recently Closed sections gate on this: blank means the section is absent, not
-    /// that it runs unfiltered.
+    /// that it runs unfiltered. Recently Closed ships with a default, so blank there is a deliberate
+    /// switch-off.
     func testBlankIsOff() {
         XCTAssertNil(AppDelegate.configuredQuery(""))
         XCTAssertNil(AppDelegate.configuredQuery("  \n\t "))
@@ -451,7 +453,37 @@ final class ConfiguredQueryTests: XCTestCase {
     /// Trimmed, never rewritten — the user's ORDER BY is what sets the chronology, so nothing may append
     /// to or reorder it.
     func testAQueryIsTrimmedAndOtherwiseUntouched() {
-        let query = "assignee = currentUser() AND statusCategory = Done ORDER BY resolutiondate DESC"
+        let query = "assignee = currentUser() AND statusCategory = Done ORDER BY statusCategoryChangedDate DESC"
         XCTAssertEqual(AppDelegate.configuredQuery("  " + query + "  "), query)
+    }
+}
+
+/// The shipped default for the Recently Closed section. Verified against a live instance, so it is worth
+/// pinning against a well-meaning edit.
+final class RecentlyClosedDefaultTests: XCTestCase {
+
+    private var shipped: String { Defaults.Keys.recentlyClosedJQL.defaultValue }
+
+    /// The section works without configuration, so it must not default to blank.
+    func testTheSectionIsOnByDefault() {
+        XCTAssertNotNil(AppDelegate.configuredQuery(shipped))
+    }
+
+    /// resolutiondate is unpopulated in workflows that don't set a resolution, and NULLs sort first under
+    /// DESC — which put three ancient tickets at the top of a ten-row list on a real instance.
+    func testItOrdersByStatusCategoryChangedDateNotResolutiondate() {
+        XCTAssertTrue(shipped.contains("ORDER BY statusCategoryChangedDate DESC"), shipped)
+        XCTAssertFalse(shipped.lowercased().contains("resolutiondate"), shipped)
+    }
+
+    /// statusCategory over named statuses: a workflow's closed-ish statuses are not only "Done".
+    func testItMatchesOnStatusCategory() {
+        XCTAssertTrue(shipped.contains("statusCategory = Done"), shipped)
+    }
+
+    /// This repo is generic — no instance's project keys or field ids belong in a shipped default.
+    func testTheDefaultCarriesNoInstanceSpecificScope() {
+        XCTAssertFalse(shipped.contains("project in"), shipped)
+        XCTAssertFalse(shipped.contains("customfield_"), shipped)
     }
 }

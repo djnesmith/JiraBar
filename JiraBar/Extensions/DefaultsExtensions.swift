@@ -101,9 +101,22 @@ extension Defaults.Keys {
     /// view usually wants a different depth than the main ticket list.
     static let todoMaxResults = Key<String>("todoMaxResults", default: "15")
 
-    /// JQL for the Recently Closed section. Empty is off — the section is absent rather than showing
-    /// everything, because no default query can guess a workflow's closed-ish statuses.
-    static let recentlyClosedJQL = Key<String>("recentlyClosedJQL", default: "")
+    /// JQL for the Recently Closed section. Empty switches the section off.
+    ///
+    /// `statusCategoryChangedDate` rather than `resolutiondate`: verified against a live instance, where
+    /// resolutions are not set by these transitions, so a third of the rows came back with
+    /// `resolutiondate = None` — and NULLs sort first under DESC, crowding out the genuinely recent
+    /// tickets. `statusCategoryChangedDate` is the field that means "when did this become Done" and is
+    /// populated where the other is not.
+    ///
+    /// Deliberately not scoped to any project: `statusCategory = Done` means different things in different
+    /// workflows — one instance had a "General Availability" status counting as Done — so a multi-project
+    /// query can surface tickets nobody would call closed. Narrow it with `AND project in (…)` for your
+    /// own projects; that belongs in your settings, not in this default.
+    static let recentlyClosedJQL = Key<String>(
+        "recentlyClosedJQL",
+        default: "assignee = currentUser() AND statusCategory = Done ORDER BY statusCategoryChangedDate DESC"
+    )
     static let recentlyClosedMaxResults = Key<String>("recentlyClosedMaxResults", default: "10")
 
     /// Shows the "PRs Without Tickets" menu section: open GitHub PRs the user authored, is

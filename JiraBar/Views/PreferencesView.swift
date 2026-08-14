@@ -250,7 +250,7 @@ private struct QuerySection: View {
             .frame(width: 120)
         TextField("Recently Closed JQL:", text: $recentlyClosedJQL)
             .textFieldStyle(RoundedBorderTextFieldStyle())
-        Text("Optional, off when empty. Adds a Recently Closed entry under TODO listing finished tickets, each showing its PRs including merged and closed ones. No transitions or editing — it's a history rollup. Order it yourself, e.g. assignee = currentUser() AND statusCategory = Done ORDER BY resolutiondate DESC.")
+        Text("Adds a Recently Closed entry under TODO listing finished tickets, each showing its PRs including merged and closed ones. No transitions or editing — it's a history rollup. Empty switches it off. Order by statusCategoryChangedDate rather than resolutiondate, which many workflows never populate. Add \"AND project in (ABC, DEF)\" to keep other projects' idea of \"Done\" out.")
             .font(.footnote)
         TextField("Recently Closed Max Results:", text: $recentlyClosedMaxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())

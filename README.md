@@ -72,11 +72,13 @@ There's deliberately no default query. `status = "To Do"` with no project or boa
 
 ## Recently Closed section
 
-Set a **Recently Closed JQL** in Preferences and a `Recently Closed` entry appears under TODO, listing finished tickets newest-first with their PRs — including merged and closed ones, which for a finished ticket are the artifact worth seeing. **Off when the setting is empty**, since no default query can guess which of a workflow's statuses count as closed.
+A `Recently Closed` entry appears under TODO, listing finished tickets newest-first with their PRs — including merged and closed ones, which for a finished ticket are the artifact worth seeing. It works out of the box; clear **Recently Closed JQL** in Preferences to switch it off.
 
 Each ticket's submenu carries the copy shortcuts and its PR rows, and nothing else: no transitions, comment, flag, upload or user-field shortcuts. It is a history rollup, so every one of those would be either a mutation or a request per ticket. Submenus are built the first time you open the section, so it costs nothing until then, and **Recently Closed Max Results** caps the list separately.
 
-The ordering is yours — put it in the query. `ORDER BY resolutiondate DESC` is the honest field for "most recently closed" where resolutions are set; `ORDER BY updated DESC` is the fallback where they are not.
+The ordering is yours — put it in the query. Use **`ORDER BY statusCategoryChangedDate DESC`**, not `resolutiondate`: plenty of workflows never set a resolution, and NULLs sort first under `DESC`, so a third of your rows can be ancient tickets crowding out the recent ones. `statusCategoryChangedDate` is the field that means "when did this become Done".
+
+The default query is scoped to you but not to any project, because `statusCategory = Done` means different things in different workflows — a status like "General Availability" can count as Done and surface tickets nobody would call closed. If you work across projects, add `AND project in (ABC, DEF)`.
 
 ## PRs Without Tickets section
 
