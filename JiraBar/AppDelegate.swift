@@ -823,6 +823,12 @@ extension AppDelegate {
     /// with an empty band between 20.6 and 25.2, and red and purple are the two above it — 35.6 apart
     /// from each other. The hues after them are not close behind by accident; they are what is left.
     ///
+    /// Those figures are the system colours **as macOS 26.6.1 resolves them**, and Apple retunes them
+    /// between releases — `systemIndigo` is `#5E5CE6` on macOS 15 and `#6D7CFF` on 26, which is the
+    /// difference between clearing the bar and failing it. So the rejections are recorded against fixed
+    /// values in the tests rather than re-derived from whatever OS runs them, and the claim that the two
+    /// *shipped* colours still work is the part checked live.
+    ///
     /// Which leaves the question of whether Task should be *some* colour. It should not: colouring the
     /// 2-in-3 majority spends the row's remaining contrast on the one value that carries no decision.
     /// Grey already says "an ordinary piece of work", and Bug and Epic then read at a glance instead of

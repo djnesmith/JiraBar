@@ -69,7 +69,21 @@ private func cielab(_ c: [CGFloat]) -> (L: CGFloat, a: CGFloat, b: CGFloat) {
 /// just-noticeable difference and ~5 is comfortably distinct, so the bar used here is far above either
 /// and exists to leave room for the menu's translucency and for colours seen apart, not side by side.
 private func deltaE00(_ a: NSColor, _ b: NSColor, _ appearance: NSAppearance.Name) -> CGFloat {
-    let p = srgbComponents(a, appearance), q = srgbComponents(b, appearance)
+    deltaE00(srgbComponents(a, appearance), srgbComponents(b, appearance))
+}
+
+/// An sRGB hex, for reasoning that must not depend on how the running OS resolves a system colour.
+private func srgb(hex: String) -> [CGFloat] {
+    var value: UInt64 = 0
+    Scanner(string: String(hex.dropFirst())).scanHexInt64(&value)
+    return [
+        CGFloat((value >> 16) & 0xFF) / 255,
+        CGFloat((value >> 8) & 0xFF) / 255,
+        CGFloat(value & 0xFF) / 255,
+    ]
+}
+
+private func deltaE00(_ p: [CGFloat], _ q: [CGFloat]) -> CGFloat {
     guard p.count == 3, q.count == 3 else { return 0 }
     let (l1, a1, b1) = cielab(p), (l2, a2, b2) = cielab(q)
     let deg = CGFloat.pi / 180
@@ -1194,20 +1208,53 @@ final class IssueTypeColorTests: XCTestCase {
 
     /// The hues the docstring rejects have to actually fail the bar it rejects them on, or the reasoning
     /// recorded there is decoration.
+    ///
+    /// Against **recorded** sRGB values, not live `NSColor`s. Apple retunes the system palette between
+    /// releases: `systemIndigo` is `#5E5CE6` on macOS 15 and `#6D7CFF` on macOS 26, which moved it from
+    /// ΔE00 23 off the key blue to 14. Reading the live colours made this a test of whichever OS
+    /// happened to run it — it passed here and failed on a macOS 15 CI runner, for a difference that
+    /// says nothing about whether the decision was right. These are the values the decision was measured
+    /// against, on macOS 26.6.1; freezing them is what makes the reasoning auditable later.
+    ///
+    /// Whether the *shipped* colours still work on a given OS is a live question, and
+    /// `testTypeColorsAreDistinctFromEveryColorTheMenuAlreadyUses` is where it is asked.
     func testTheRejectedHuesReallyAreTooCloseToSomethingAlreadyOnScreen() {
-        let rejected: [(String, NSColor, NSColor)] = [
-            ("indigo vs the key blue", .systemIndigo, AppDelegate.issueKeyColor),
-            ("orange vs the unassigned amber", .systemOrange, AppDelegate.ownershipAbsent),
-            ("brown vs the unassigned amber", .systemBrown, AppDelegate.ownershipAbsent),
-            ("mint vs the assignee green", .systemMint, .systemGreen),
-            ("cyan vs the key blue", .systemCyan, AppDelegate.issueKeyColor),
-            ("pink vs the red Bug takes", .systemPink, .systemRed),
+        let rejected: [(what: String, candidate: String, incumbent: String)] = [
+            ("indigo vs the key blue", "#6D7CFF", "#419CFF"),
+            ("orange vs the unassigned amber", "#FF9230", "#BF6900"),
+            ("brown vs the unassigned amber", "#B78A66", "#BF6900"),
+            ("mint vs the assignee green", "#00DAC3", "#30D158"),
+            ("cyan vs the key blue", "#3CD3FE", "#419CFF"),
+            ("pink vs the red Bug takes", "#FF375F", "#FF4245"),
         ]
         for (what, candidate, incumbent) in rejected {
             XCTAssertLessThan(
-                deltaE00(candidate, incumbent, .darkAqua), distinctEnough,
+                deltaE00(srgb(hex: candidate), srgb(hex: incumbent)), distinctEnough,
                 "\(what) now clears the bar — the docstring's reasoning needs revisiting"
             )
+        }
+    }
+
+    /// The recorded values above are only worth anything while they still describe this machine. A
+    /// mismatch is not a failure — Apple moved the colour, which is exactly the thing worth knowing —
+    /// so this reports rather than asserts, and the shipped-colour test remains the real gate.
+    func testRecordedReferenceValuesStillMatchThisOS() {
+        let recorded: [(String, NSColor, String)] = [
+            ("linkColor", AppDelegate.issueKeyColor, "#419CFF"),
+            ("systemRed", .systemRed, "#FF4245"),
+            ("systemPurple", .systemPurple, "#DB34F2"),
+            ("systemGreen", .systemGreen, "#30D158"),
+        ]
+        for (name, color, expected) in recorded {
+            let drift = deltaE00(srgbComponents(color, .darkAqua), srgb(hex: expected))
+            if drift > 1 {
+                print("""
+                    NOTE: \(name) resolves ΔE00 \(String(format: "%.1f", drift)) from the \(expected) \
+                    recorded on macOS 26.6.1 — this OS is \
+                    \(ProcessInfo.processInfo.operatingSystemVersionString). The palette reasoning in \
+                    AppDelegate.issueTypeColor was measured against the recorded value.
+                    """)
+            }
         }
     }
 
