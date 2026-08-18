@@ -717,7 +717,7 @@ struct TransitionDialog: View {
                 .fontWeight(.semibold)
             Text(issueKey)
                 .font(.subheadline)
-                .foregroundColor(.secondary)
+                .foregroundColor(.issueKey)
         }
     }
 
@@ -748,7 +748,7 @@ struct TransitionDialog: View {
                     .foregroundColor(.red)
                     .font(.footnote)
             } else if availableUsers.isEmpty {
-                Text("No assignable users found for \(issueKey).")
+                Text("No assignable users found for \(Text(issueKey).foregroundColor(.issueKey)).")
                     .foregroundColor(.secondary)
                     .font(.footnote)
             } else if filteredUsers.isEmpty {

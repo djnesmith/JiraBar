@@ -162,7 +162,8 @@ struct BulkMoveDialog: View {
                     if submitting {
                         HStack {
                             ProgressView().controlSize(.small)
-                            Text(progress).font(.footnote).foregroundColor(.secondary)
+                            Text(AppDelegate.attributedColoringIssueKeys(progress))
+                                .font(.footnote).foregroundColor(.secondary)
                         }
                     }
 
@@ -265,8 +266,8 @@ struct BulkMoveDialog: View {
             Image(systemName: isChecked ? "checkmark.square.fill" : "square")
                 .foregroundColor(isChecked ? .accentColor : .secondary)
             VStack(alignment: .leading, spacing: 0) {
-                Text(issue.fields.summary).lineLimit(1)
-                Text(issue.key).font(.caption).foregroundColor(.secondary)
+                Text(AppDelegate.attributedColoringIssueKeys(issue.fields.summary)).lineLimit(1)
+                Text(issue.key).font(.caption).foregroundColor(.issueKey)
             }
             Spacer()
         }

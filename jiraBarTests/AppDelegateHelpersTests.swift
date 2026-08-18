@@ -1,7 +1,19 @@
 import XCTest
 import Defaults
 import AppKit
+import SwiftUI
 @testable import jiraBar
+
+/// A colour's sRGB components as resolved under one appearance. Empty when it cannot be converted,
+/// which callers must treat as a failure rather than indexing into.
+private func srgbComponents(_ color: NSColor, _ appearance: NSAppearance.Name) -> [CGFloat] {
+    var out: [CGFloat] = []
+    NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+        guard let s = color.usingColorSpace(.sRGB) else { return }
+        out = [s.redComponent, s.greenComponent, s.blueComponent]
+    }
+    return out
+}
 
 final class AppDelegateHelpersTests: XCTestCase {
 
@@ -398,24 +410,15 @@ final class OwnershipSegmentsTests: XCTestCase {
         for name in ["d", "x"] {
             guard let color = colour(of: name, in: segments) else { return XCTFail("no colour for \(name)") }
             XCTAssertNotEqual(
-                Self.srgb(color, .aqua), Self.srgb(color, .darkAqua),
+                srgbComponents(color, .aqua), srgbComponents(color, .darkAqua),
                 "\(name)'s colour is fixed and cannot adapt to a dark menu"
             )
         }
         // The amber is deliberately a fixed hex, so it is the control: same value in both.
         XCTAssertEqual(
-            Self.srgb(AppDelegate.ownershipAbsent, .aqua),
-            Self.srgb(AppDelegate.ownershipAbsent, .darkAqua)
+            srgbComponents(AppDelegate.ownershipAbsent, .aqua),
+            srgbComponents(AppDelegate.ownershipAbsent, .darkAqua)
         )
-    }
-
-    private static func srgb(_ color: NSColor, _ appearance: NSAppearance.Name) -> [CGFloat] {
-        var out: [CGFloat] = []
-        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
-            guard let s = color.usingColorSpace(.sRGB) else { return }
-            out = [s.redComponent, s.greenComponent, s.blueComponent]
-        }
-        return out
     }
 
     // MARK: - state wording
@@ -619,5 +622,185 @@ final class RecentlyApprovedQueryTests: XCTestCase {
 
     func testAHitMissingItsEssentialsIsSkipped() {
         XCTAssertNil(GithubClient.searchHitAsPR(["number": 1, "title": "t"]))
+    }
+}
+
+/// Issue keys render blue wherever a key appears. See `AppDelegate.coloringIssueKeys` for why matching
+/// runs before truncation and why the colour is `linkColor`.
+final class IssueKeyColoringTests: XCTestCase {
+
+    private func runs(_ text: String, truncatedTo length: Int? = nil) -> [(String, NSColor?)] {
+        let attributed = AppDelegate.coloringIssueKeys(
+            text, base: AppDelegate.ownershipMetadata, truncatedTo: length
+        )
+        var out: [(String, NSColor?)] = []
+        attributed.enumerateAttribute(
+            .foregroundColor, in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            out.append(((attributed.string as NSString).substring(with: range), value as? NSColor))
+        }
+        return out
+    }
+
+    private func keyRuns(_ text: String, truncatedTo length: Int? = nil) -> [String] {
+        runs(text, truncatedTo: length).filter { $0.1 == AppDelegate.issueKeyColor }.map(\.0)
+    }
+
+    // MARK: - which text gets colored
+
+    /// Any number of digits, which is what was asked for.
+    func testKeysOfAnyDigitLengthAreColored() {
+        for key in ["ABC-1", "ABC-42", "ABC-1717", "ABC-12345"] {
+            XCTAssertEqual(keyRuns("[\(key)] a title"), [key], key)
+        }
+    }
+
+    /// The key is colored and the punctuation around it is not, which is what makes it read as a key
+    /// rather than a highlighted phrase.
+    func testOnlyTheKeyIsColoredNotItsBrackets() {
+        let segments = runs("[ABC-1697] rewrite the parser")
+        XCTAssertEqual(segments.first?.0, "[")
+        XCTAssertEqual(segments.first?.1, AppDelegate.ownershipMetadata)
+        XCTAssertEqual(keyRuns("[ABC-1697] rewrite the parser"), ["ABC-1697"])
+    }
+
+    func testSeveralKeysInOneTitleAreAllColored() {
+        XCTAssertEqual(keyRuns("ABC-1 and PROJ-22 together"), ["ABC-1", "PROJ-22"])
+    }
+
+    /// Not tied to any one project: this reuses the app's existing generic key pattern, so every
+    /// project's keys color.
+    func testAnyProjectKeyColors() {
+        XCTAssertEqual(keyRuns("[ZZ9-3384] something"), ["ZZ9-3384"])
+    }
+
+    func testTextWithNoKeyIsLeftEntirelyInTheBaseColor() {
+        let segments = runs("no key in this title")
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments.first?.1, AppDelegate.ownershipMetadata)
+    }
+
+    func testLowercaseIsNotAKey() {
+        XCTAssertTrue(keyRuns("abc-1717 lowercase").isEmpty)
+    }
+
+    // MARK: - truncation
+
+    func testAKeySlicedByTheCutIsNotColored() {
+        // 35 leading characters put ABC-1717 across the 50-char cut, leaving the stump "ABC-171".
+        let title = String(repeating: "a", count: 35) + " revert ABC-1717 rollout"
+        XCTAssertEqual(keyRuns(title), ["ABC-1717"], "untruncated, the whole key colors")
+
+        let cut = runs(title, truncatedTo: 50)
+        XCTAssertTrue(cut.map(\.0).joined().hasSuffix("ABC-171…"), "the stump is what's on screen")
+        XCTAssertTrue(keyRuns(title, truncatedTo: 50).isEmpty, "and none of it is colored as a key")
+    }
+
+    /// One character shorter and the key ends exactly on the cut — it is whole, so it colors. This is
+    /// the off-by-one the survivor test above would not catch on its own.
+    func testAKeyEndingExactlyOnTheCutSurvives() {
+        let title = String(repeating: "a", count: 34) + " revert ABC-1717 rollout"
+        XCTAssertEqual(keyRuns(title, truncatedTo: 50), ["ABC-1717"])
+    }
+
+    func testAKeyThatSurvivesTheCutIntactStaysColored() {
+        let title = "[ABC-1717] a title long enough to be cut somewhere after the key"
+        XCTAssertEqual(keyRuns(title, truncatedTo: 50), ["ABC-1717"])
+    }
+
+    /// The cut counts characters but the match offsets are UTF-16, so a title with astral-plane
+    /// characters is where the two disagree. Swapping the length check to `body.count` passes every
+    /// other test here and fails this one.
+    func testTheCutIsMeasuredConsistentlyWithTheMatchOffsets() {
+        let title = "🎉🎉🎉🎉 ABC-1717 x"
+        XCTAssertEqual(keyRuns(title, truncatedTo: 13), ["ABC-1717"], "key ends exactly on the cut")
+        XCTAssertTrue(keyRuns(title, truncatedTo: 11).isEmpty, "key crosses the cut")
+    }
+
+    func testTextShorterThanTheCutIsNotEllipsised() {
+        XCTAssertEqual(runs("[ABC-1] short", truncatedTo: 50).map(\.0).joined(), "[ABC-1] short")
+    }
+
+    func testWithoutALengthNothingIsCut() {
+        XCTAssertEqual(runs("ABC-1717").map(\.0).joined(), "ABC-1717")
+        XCTAssertEqual(keyRuns("ABC-1717"), ["ABC-1717"])
+    }
+
+    func testEmptyTextIsHandled() {
+        XCTAssertEqual(runs("", truncatedTo: 50).map(\.0).joined(), "")
+    }
+
+    // MARK: - the SwiftUI dialogs
+
+    private func attributedKeyRuns(_ text: String) -> [String] {
+        let attributed = AppDelegate.attributedColoringIssueKeys(text)
+        return attributed.runs
+            .filter { $0.foregroundColor == Color.issueKey }
+            .map { String(attributed[$0.range].characters) }
+    }
+
+    func testTheDialogColorerPicksOutTheSameKeys() {
+        XCTAssertEqual(attributedKeyRuns("Transitioning 2 of 5: ABC-1717"), ["ABC-1717"])
+        XCTAssertEqual(attributedKeyRuns("follow-up to ABC-1 and PROJ-22"), ["ABC-1", "PROJ-22"])
+        XCTAssertTrue(attributedKeyRuns("no key here").isEmpty)
+        XCTAssertTrue(attributedKeyRuns("").isEmpty)
+    }
+
+    /// The text has to survive intact — a colourer that drops or reorders the runs between matches
+    /// would still pass the assertions above.
+    func testTheDialogColorerPreservesTheWholeString() {
+        for text in ["Transitioning 2 of 5: ABC-1717", "ABC-1 leading", "trailing ABC-1", "", "none"] {
+            XCTAssertEqual(String(AppDelegate.attributedColoringIssueKeys(text).characters), text, text)
+        }
+    }
+
+    /// Only the key is coloured; the surrounding text carries no colour of its own, so the dialog's
+    /// own styling still applies to it.
+    func testTheDialogColorerLeavesOtherRunsUnstyled() {
+        let attributed = AppDelegate.attributedColoringIssueKeys("done ABC-1 ok")
+        let uncolored = attributed.runs.filter { $0.foregroundColor == nil }
+            .map { String(attributed[$0.range].characters) }
+        XCTAssertEqual(uncolored, ["done ", " ok"])
+    }
+
+    // MARK: - the color itself
+
+    /// Blue is the actual request, so pin blueness rather than the identity of the constant — every
+    /// other test here still passes if the colour is changed to pink.
+    func testTheKeyColorIsBlueInBothAppearances() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let rgb = srgbComponents(AppDelegate.issueKeyColor, appearance)
+            guard rgb.count == 3 else { return XCTFail("\(appearance.rawValue) did not resolve") }
+            XCTAssertGreaterThan(rgb[2], rgb[0], "blue over red in \(appearance.rawValue)")
+            XCTAssertGreaterThan(rgb[2], rgb[1], "blue over green in \(appearance.rawValue)")
+        }
+    }
+
+    func testTheKeyColorAdaptsToTheAppearance() {
+        XCTAssertNotEqual(
+            srgbComponents(AppDelegate.issueKeyColor, .aqua),
+            srgbComponents(AppDelegate.issueKeyColor, .darkAqua),
+            "a key colour that cannot adapt would be a fixed sRGB value"
+        )
+    }
+
+    /// It has to be distinguishable from the grey it replaces, or the change accomplishes nothing.
+    func testItIsNotTheMetadataGrey() {
+        XCTAssertNotEqual(AppDelegate.issueKeyColor, AppDelegate.ownershipMetadata)
+    }
+
+    /// The SwiftUI dialogs colour through `Color.issueKey`. It has to be the same blue as the menu's,
+    /// which is only guaranteed while it is derived from the one constant rather than restated.
+    func testTheDialogColorIsTheSameBlueAsTheMenus() {
+        XCTAssertEqual(NSColor(Color.issueKey), AppDelegate.issueKeyColor)
+    }
+
+    /// Bridging through `Color` must not resolve the dynamic colour to a single value on the way, which
+    /// would freeze the dialogs at whichever appearance was current when the constant was first touched.
+    func testTheDialogColorStillAdaptsAfterBridging() {
+        XCTAssertNotEqual(
+            srgbComponents(NSColor(Color.issueKey), .aqua),
+            srgbComponents(NSColor(Color.issueKey), .darkAqua)
+        )
     }
 }

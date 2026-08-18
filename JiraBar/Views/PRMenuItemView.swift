@@ -180,9 +180,9 @@ final class PRMenuItemView: NSView {
             height: bounds.height - verticalInset * 2
         )
 
-        // The attributed string's first line (PR title) has no explicit color attribute, which
-        // renders as pure black — invisible in dark mode. Fill any uncolored ranges with the
-        // system label color so the title adapts. Highlighted state recolors everything white.
+        // An uncolored range renders as pure black — invisible in dark mode — so fill any the
+        // caller left with the system label color. Callers color their own runs; this is the
+        // backstop. Highlighted state flattens every run to white.
         let mutable = NSMutableAttributedString(attributedString: attributedTitle)
         let full = NSRange(location: 0, length: mutable.length)
         if isHighlighted {

@@ -66,6 +66,10 @@ extension NSColor {
 }
 
 extension Color {
+    /// `AppDelegate.issueKeyColor` bridged for the SwiftUI dialogs. Derived rather than restated so the
+    /// dialogs and the menu cannot drift; `Color(nsColor:)` keeps the per-appearance resolution.
+    static let issueKey = Color(nsColor: AppDelegate.issueKeyColor)
+
     init?(statusHex hex: String) {
         guard StatusDisplay.isValidHex(hex) else { return nil }
         self.init(nsColor: NSColor(hex: hex))

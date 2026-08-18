@@ -25,7 +25,7 @@ struct UploadFilesDialog: View {
                         .fontWeight(.semibold)
                     Text(issueKey)
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.issueKey)
                 }
             }
 

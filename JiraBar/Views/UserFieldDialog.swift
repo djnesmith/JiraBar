@@ -41,7 +41,7 @@ struct UserFieldDialog: View {
                     .fontWeight(.semibold)
                 Text(issueKey)
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.issueKey)
             }
 
             HStack {
@@ -61,7 +61,8 @@ struct UserFieldDialog: View {
             } else if let loadError {
                 Text(loadError).foregroundColor(.red).font(.footnote)
             } else if availableUsers.isEmpty {
-                Text("No assignable users found for \(issueKey).").foregroundColor(.secondary).font(.footnote)
+                Text("No assignable users found for \(Text(issueKey).foregroundColor(.issueKey)).")
+                    .foregroundColor(.secondary).font(.footnote)
             } else if filteredUsers.isEmpty {
                 Text("No users match your filter.").foregroundColor(.secondary).font(.footnote)
             }

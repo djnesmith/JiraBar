@@ -839,7 +839,7 @@ extension AppDelegate {
             .appendString(string: issue.fields.summary.trunc(length: 50))
             .appendNewLine()
             .appendIcon(iconName: "hash", color: NSColor.gray)
-            .appendString(string: issue.key, color: "#888888")
+            .appendString(string: issue.key, color: AppDelegate.issueKeyColor)
             .appendSeparator()
             .appendString(string: assignee.text, color: assignee.color)
             .appendSeparator()
@@ -2245,6 +2245,66 @@ extension AppDelegate {
     /// case-sensitively, mirroring how Jira's own integrations link branches/titles to tickets.
     private static let issueKeyRegex = try! NSRegularExpression(pattern: #"\b[A-Z][A-Z0-9]+-[0-9]+\b"#)
 
+    /// The color every issue key renders in, wherever a key appears — menu rows, PR titles, and the
+    /// SwiftUI dialogs via `Color.issueKey`.
+    ///
+    /// Three surfaces deliberately keep their key uncolored. `NSWindow.title` and user-notification
+    /// bodies are plain `String` with no attributed form, so they cannot carry one. Red error text in
+    /// the transition dialog could, but the red is the message there — punching one blue word through
+    /// a failure notice reads as a rendering fault rather than a link.
+    ///
+    /// `linkColor` rather than a fixed hex: it is the semantic color for "this opens something", which is
+    /// exactly what these rows do, and it resolves per appearance instead of being one sRGB value.
+    /// `controlAccentColor` was the other semantic candidate and is disqualified — it follows the user's
+    /// accent, so on a machine set to graphite the "blue" renders grey.
+    static let issueKeyColor = NSColor.linkColor
+
+    /// Every issue key inside `text` colored, the rest left in `base`, optionally cut to `length`
+    /// characters with an ellipsis. For text that only *might* contain a key — PR titles. A ticket row's
+    /// own key is already known to be one and is colored directly; both share `issueKeyColor`, which is
+    /// what keeps them from drifting.
+    ///
+    /// Keys are matched against the whole `text` and then dropped if the cut lands inside one, rather than
+    /// matching the already-cut string. Truncating first would let `\b` close a match on the stump: a PR
+    /// about ABC-1717 cut to "ABC-171…" would render ABC-171 as its key, which is a different, real
+    /// ticket rather than an obviously mangled one.
+    static func coloringIssueKeys(_ text: String, base: NSColor, truncatedTo length: Int? = nil) -> NSAttributedString {
+        let cutAt = length.flatMap { text.count > $0 ? $0 : nil }
+        let body = cutAt.map { String(text.prefix($0)) } ?? text
+        let kept = (body as NSString).length
+
+        let out = NSMutableAttributedString(string: body, attributes: [.foregroundColor: base])
+        let range = NSRange(text.startIndex..., in: text)
+        for match in AppDelegate.issueKeyRegex.matches(in: text, options: [], range: range)
+        where match.range.upperBound <= kept {
+            out.addAttribute(.foregroundColor, value: AppDelegate.issueKeyColor, range: match.range)
+        }
+        if cutAt != nil {
+            out.append(NSAttributedString(string: "…", attributes: [.foregroundColor: base]))
+        }
+        return out
+    }
+
+    /// The same thing for SwiftUI: keys colored, every other run left unstyled so the `Text` keeps
+    /// whatever the view applies. Shares `issueKeyRegex` and `issueKeyColor` with the AppKit path above,
+    /// so the two rendering systems cannot disagree about what a key is or what colour it takes. No
+    /// truncation — the dialogs wrap.
+    static func attributedColoringIssueKeys(_ text: String) -> AttributedString {
+        var out = AttributedString()
+        var cursor = text.startIndex
+        let range = NSRange(text.startIndex..., in: text)
+        for match in AppDelegate.issueKeyRegex.matches(in: text, options: [], range: range) {
+            guard let keyRange = Range(match.range, in: text) else { continue }
+            out += AttributedString(String(text[cursor..<keyRange.lowerBound]))
+            var key = AttributedString(String(text[keyRange]))
+            key.foregroundColor = Color.issueKey
+            out += key
+            cursor = keyRange.upperBound
+        }
+        out += AttributedString(String(text[cursor...]))
+        return out
+    }
+
     /// True when the string contains something that looks like a Jira issue key.
     static func containsIssueKey(_ s: String) -> Bool {
         let range = NSRange(s.startIndex..., in: s)
@@ -2377,8 +2437,8 @@ extension AppDelegate {
         showOwnership: Bool = false
     ) {
         let title = NSMutableAttributedString(string: "")
-            .appendString(string: pr.name.trunc(length: 50))
-            .appendNewLine()
+        title.append(AppDelegate.coloringIssueKeys(pr.name, base: NSColor.labelColor, truncatedTo: 50))
+        title.appendNewLine()
 
         let slug = pr.repoSlug.isEmpty ? "PR" : pr.repoSlug
         title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: "#888888")
