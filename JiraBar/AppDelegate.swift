@@ -882,12 +882,8 @@ extension AppDelegate {
             ?? AppDelegate.ownershipMetadata
     }
 
-    /// The colour an issue type renders in. Three kinds of type get one; everything else keeps the
+    /// The colour an issue type renders in. Two kinds of type get one; everything else keeps the
     /// metadata grey.
-    ///
-    /// Bug is red, Epic and initiatives are purple, and Improvement is the same purple lighter — see
-    /// `issueTypeEpicColor` for why those two are written-out light/dark pairs instead of `systemPurple`,
-    /// and what it costs.
     ///
     /// Deliberately not a colour per type. The row already carries the key blue, the assignee green or
     /// unassigned amber, the metadata grey and the hash glyph, and the hues left over are mostly ones
@@ -916,48 +912,14 @@ extension AppDelegate {
     /// One adjacency this cannot police: Recently Closed rows put a status colour immediately after the
     /// type, and those are free hex the user picks. Colour a Done-category status red or purple and it
     /// will sit beside a red Bug or a purple Epic with three spaces between them.
-    /// An explicit light/dark pair. Only for colours that must hold a measured distance from something
-    /// else, where a system colour's freedom to be retuned is the problem rather than the point.
-    private static func dynamicColor(light: String, dark: String) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                ? NSColor(hex: dark)
-                : NSColor(hex: light)
-        }
-    }
-
-    /// Epic's purple and Improvement's lighter one — the same hue, far enough apart in lightness to be
-    /// two colours rather than one.
-    ///
-    /// Hand-written pairs rather than `systemPurple`, for two reasons that both had to be measured.
-    /// With Epic left on `systemPurple` there is *no* lighter purple at all in light mode: clearing
-    /// ΔE00 22 from it needs Lab L≥86, which is 1.9:1 on white against a 3:1 floor. Epic has to go
-    /// deeper to make the room, and once it is a chosen value the system colour is no longer what is
-    /// being used. And a pair this close cannot sit on colours Apple retunes between releases —
-    /// `systemPurple` is `#BF5AF2` on macOS 15 and `#DB34F2` on 26, and this margin does not survive
-    /// that kind of drift unnoticed.
-    ///
-    /// Measured in four environments — both appearances against both OS palettes. Epic to Improvement
-    /// is ΔE00 24.6 dark and 26.9 light; the nearest either comes to anything else the menu draws is
-    /// 26.4. Contrast is 4.6:1 and 10.6:1 on the dark menu, 10.1:1 and 3.5:1 on white — the last
-    /// matching, to two decimals, the metadata grey it replaces.
-    ///
-    /// Two consequences worth knowing. On the dark menu the lighter colour is the *louder* one, so
-    /// Improvement carries more visual weight than Epic, which is the reverse of their importance —
-    /// unavoidable once "lighter" is the axis. And Epic in light mode is now a deep aubergine rather
-    /// than the brighter `systemPurple` it was, which is the room Improvement is standing in.
-    static let issueTypeEpicColor = dynamicColor(light: "#70008D", dark: "#DB34F2")
-    static let issueTypeImprovementColor = dynamicColor(light: "#DD37F4", dark: "#FFB5FF")
-
     static func issueTypeColor(_ typeName: String) -> NSColor {
         let name = typeName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if name == "bug" { return .systemRed }
-        if name == "improvement" { return issueTypeImprovementColor }
         // Epics and initiatives hold other work rather than being work, which is the one other
         // distinction worth a colour. They share it: which kind it is, the word already says. Matched by
         // suffix because "Initiative" is a naming convention rather than one fixed type — instances
         // qualify it with their own word, and no instance's vocabulary belongs in this source.
-        if name == "epic" || name.hasSuffix("initiative") { return issueTypeEpicColor }
+        if name == "epic" || name.hasSuffix("initiative") { return .systemPurple }
         return AppDelegate.ownershipMetadata
     }
 
