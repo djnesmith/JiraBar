@@ -882,10 +882,13 @@ extension AppDelegate {
             ?? AppDelegate.ownershipMetadata
     }
 
-    /// The colour an issue type renders in. Two kinds of type get one; everything else keeps the
-    /// metadata grey.
+    /// The colour an issue type renders in. Bug is red, Epic and initiatives take the deep purple, Task
+    /// and Improvement take the light one, and anything else keeps the metadata grey — see
+    /// `issueTypeDeepPurple` for why the two purples are written-out light/dark pairs instead of
+    /// `systemPurple`, and what that pair costs.
     ///
-    /// Deliberately not a colour per type. The row already carries the key blue, the assignee green or
+    /// Still not a colour per type, though with Task on the light shade the greys below are now the
+    /// minority. The row already carries the key blue, the assignee green or
     /// unassigned amber, the metadata grey and the hash glyph, and the hues left over are mostly ones
     /// that sit closer to those than these two do. Distance to the nearest colour the menu already uses,
     /// ΔE00 on the dark menu: red 25.3 and purple 31.1, against indigo 14.2 and cyan 20.5 (the key
@@ -912,14 +915,52 @@ extension AppDelegate {
     /// One adjacency this cannot police: Recently Closed rows put a status colour immediately after the
     /// type, and those are free hex the user picks. Colour a Done-category status red or purple and it
     /// will sit beside a red Bug or a purple Epic with three spaces between them.
+    /// An explicit light/dark pair. Only for colours that must hold a measured distance from something
+    /// else, where a system colour's freedom to be retuned is the problem rather than the point.
+    private static func dynamicColor(light: String, dark: String) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(hex: dark)
+                : NSColor(hex: light)
+        }
+    }
+
+    /// Two shades of one purple, far enough apart in lightness to read as two colours. Named for the
+    /// shade rather than for a type, because which types take which is the part that moves: the deep one
+    /// is Epic and initiatives, the light one is Task and Improvement.
+    ///
+    /// Hand-written pairs rather than `systemPurple`, for two reasons that both had to be measured.
+    /// With the deep shade left on `systemPurple` there is *no* lighter purple at all in light mode:
+    /// clearing ΔE00 22 from it needs Lab L≥86, which is 1.9:1 on white against a 3:1 floor. The deep
+    /// one has to go deeper to make the room, and once it is a chosen value the system colour is no
+    /// longer what is being used. And a pair this close cannot sit on colours Apple retunes between
+    /// releases — `systemPurple` is `#BF5AF2` on macOS 15 and `#DB34F2` on 26, and this margin does not
+    /// survive that kind of drift unnoticed.
+    ///
+    /// Measured in four environments — both appearances against both OS palettes. Deep to light is
+    /// ΔE00 24.6 dark and 26.9 light; the nearest either comes to anything else the menu draws is 26.4,
+    /// which includes the key blue those rows also carry. Contrast is 4.6:1 and 10.6:1 on the dark menu,
+    /// 10.1:1 and 3.5:1 on white — the last matching, to two decimals, the metadata grey it replaces.
+    ///
+    /// Two consequences, both chosen rather than overlooked. On the dark menu the lighter colour is the
+    /// *louder* one, so Task and Improvement carry more visual weight than Epic — the reverse of their
+    /// importance, and unavoidable once lightness is the axis. And with Task on the light shade the
+    /// majority of rows are coloured, which is the opposite of the restraint the rest of this palette
+    /// is built on; the grey below is now the exception rather than the rule.
+    static let issueTypeDeepPurple = dynamicColor(light: "#70008D", dark: "#DB34F2")
+    static let issueTypeLightPurple = dynamicColor(light: "#DD37F4", dark: "#FFB5FF")
+
     static func issueTypeColor(_ typeName: String) -> NSColor {
         let name = typeName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if name == "bug" { return .systemRed }
-        // Epics and initiatives hold other work rather than being work, which is the one other
-        // distinction worth a colour. They share it: which kind it is, the word already says. Matched by
+        // The two ordinary work types the menu is mostly made of. Same shade because they are the same
+        // kind of thing to whoever is scanning the row — which is the whole reason they share one.
+        if name == "task" || name == "improvement" { return issueTypeLightPurple }
+        // Epics and initiatives hold other work rather than being work, which is the distinction the
+        // deeper shade marks. They share it: which kind it is, the word already says. Matched by
         // suffix because "Initiative" is a naming convention rather than one fixed type — instances
         // qualify it with their own word, and no instance's vocabulary belongs in this source.
-        if name == "epic" || name.hasSuffix("initiative") { return .systemPurple }
+        if name == "epic" || name.hasSuffix("initiative") { return issueTypeDeepPurple }
         return AppDelegate.ownershipMetadata
     }
 
