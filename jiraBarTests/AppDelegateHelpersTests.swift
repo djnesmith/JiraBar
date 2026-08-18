@@ -1290,3 +1290,115 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 }
+
+/// Recently Seen: tickets the user moved that are now someone else's, so they have left the board.
+final class RecentlySeenTests: XCTestCase {
+
+    private func issue(_ key: String) -> Issue {
+        Issue(
+            id: key,
+            key: key,
+            fields: Fields(
+                summary: "summary for \(key)",
+                status: IssueStatus(name: "QA"),
+                issuetype: IssueType(name: "Task"),
+                project: Project(name: "Example"),
+                assignee: nil
+            )
+        )
+    }
+
+    // MARK: - overlap with the main list
+
+    func testATicketAlreadyInTheMainListIsNotRepeated() {
+        let rows = AppDelegate.recentlySeenRows(
+            [issue("ABC-1"), issue("ABC-2"), issue("ABC-3")],
+            alreadyShown: [issue("ABC-2")]
+        )
+        XCTAssertEqual(rows.map(\.key), ["ABC-1", "ABC-3"])
+    }
+
+    func testNothingIsDroppedWhenTheMainListIsEmpty() {
+        let rows = AppDelegate.recentlySeenRows([issue("ABC-1")], alreadyShown: [])
+        XCTAssertEqual(rows.map(\.key), ["ABC-1"])
+    }
+
+    /// The order is the user's `ORDER BY`, so the filter must not reshuffle what survives it.
+    func testTheQuerysOrderIsPreserved() {
+        let rows = AppDelegate.recentlySeenRows(
+            [issue("ABC-9"), issue("ABC-1"), issue("ABC-5")],
+            alreadyShown: [issue("ABC-1")]
+        )
+        XCTAssertEqual(rows.map(\.key), ["ABC-9", "ABC-5"])
+    }
+
+    /// Everything overlapping means an empty section, which is what makes the header disappear rather
+    /// than sit there with nothing under it.
+    func testAFullyOverlappingResultComesBackEmpty() {
+        let rows = AppDelegate.recentlySeenRows(
+            [issue("ABC-1")], alreadyShown: [issue("ABC-1"), issue("ABC-2")]
+        )
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    // MARK: - the query
+
+    func testTheSectionIsOffWhenTheQueryIsBlank() {
+        XCTAssertNil(AppDelegate.configuredQuery(""))
+        XCTAssertNil(AppDelegate.configuredQuery("   \n "))
+    }
+
+    /// The three clauses are what make this section mean anything, and the last is what keeps it from
+    /// duplicating Recently Closed.
+    func testTheDefaultQueryCarriesTheThreeClausesThatDefineTheSection() {
+        let jql = Defaults.Keys.recentlySeenJQL.defaultValue
+        XCTAssertTrue(jql.contains("status CHANGED BY currentUser()"), jql)
+        XCTAssertTrue(jql.contains("assignee != currentUser()"), jql)
+        XCTAssertTrue(jql.contains("statusCategory != Done"), jql)
+    }
+
+    /// A hand-off is often between two statuses in the same category, which never moves
+    /// `statusCategoryChangedDate` — ordering on it would sort by an event that did not happen.
+    func testTheDefaultQueryOrdersByUpdated() {
+        let jql = Defaults.Keys.recentlySeenJQL.defaultValue
+        XCTAssertTrue(jql.contains("ORDER BY updated DESC"), jql)
+        XCTAssertFalse(jql.contains("statusCategoryChangedDate"), jql)
+    }
+
+    /// Public repo: the default must name no one's projects. Scoping is the user's to add.
+    func testTheDefaultQueryNamesNoProject() {
+        XCTAssertFalse(Defaults.Keys.recentlySeenJQL.defaultValue.lowercased().contains("project"))
+    }
+
+    /// Recently Closed is `statusCategory = Done` and this is `!= Done`, so the two cannot both return
+    /// the same ticket. That disjointness is why only the main list needs an overlap filter.
+    func testItCannotOverlapRecentlyClosed() {
+        XCTAssertTrue(Defaults.Keys.recentlyClosedJQL.defaultValue.contains("statusCategory = Done"))
+        XCTAssertTrue(Defaults.Keys.recentlySeenJQL.defaultValue.contains("statusCategory != Done"))
+    }
+
+    func testItListsTheSameNumberOfRowsAsTheOtherRollups() {
+        XCTAssertEqual(Defaults.Keys.recentlySeenMaxResults.defaultValue, "10")
+        XCTAssertEqual(
+            Defaults.Keys.recentlySeenMaxResults.defaultValue,
+            Defaults.Keys.recentlyApprovedMaxResults.defaultValue
+        )
+    }
+
+    /// Losing the backup wiring is what makes a section quietly vanish on a settings restore.
+    func testBothKeysSurviveABackupRoundTrip() {
+        let savedJQL = Defaults[.recentlySeenJQL], savedMax = Defaults[.recentlySeenMaxResults]
+        defer { Defaults[.recentlySeenJQL] = savedJQL; Defaults[.recentlySeenMaxResults] = savedMax }
+
+        Defaults[.recentlySeenJQL] = "status CHANGED BY currentUser() AFTER -3d"
+        Defaults[.recentlySeenMaxResults] = "42"
+        let backup = AppSettings.snapshot()
+
+        Defaults[.recentlySeenJQL] = "wiped"
+        Defaults[.recentlySeenMaxResults] = "1"
+        backup.apply()
+
+        XCTAssertEqual(Defaults[.recentlySeenJQL], "status CHANGED BY currentUser() AFTER -3d")
+        XCTAssertEqual(Defaults[.recentlySeenMaxResults], "42")
+    }
+}

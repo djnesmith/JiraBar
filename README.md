@@ -83,6 +83,18 @@ The ordering is yours — put it in the query. Use **`ORDER BY statusCategoryCha
 
 The default query is scoped to you but not to any project, because `statusCategory = Done` means different things in different workflows — a status like "General Availability" can count as Done and surface tickets nobody would call closed. If you work across projects, add `AND project in (ABC, DEF)`.
 
+## Recently Seen section
+
+A `Recently Seen` entry sits under Recently Closed, listing tickets **you moved that are not yours**. You transition something as reviewer or tester, it goes to someone else's name, and it leaves your board immediately — with nothing anywhere recording that you touched it. This is that record.
+
+Three clauses define it, and each is load-bearing: `status CHANGED BY currentUser()` (you moved it), `assignee != currentUser()` (which is why it vanished), and `statusCategory != Done` (which is what keeps it disjoint from Recently Closed rather than duplicating it). It works out of the box; clear **Recently Seen JQL** to switch it off, and cap it with **Recently Seen Max Results** (default 10).
+
+Rows show the key, the type and the **status** — the status is the whole point, since it is the thing you changed. Submenus are the same history rollup Recently Closed uses: copy shortcuts and PR rows, no transitions. These are not your tickets, and offering to move someone else's out of a rollup invites a misclick with no context.
+
+Ordered by **`updated`**, not `statusCategoryChangedDate` as Recently Closed uses. A hand-off is often between two statuses inside the same category — a review-to-QA move can be two "In Progress" statuses — and `statusCategoryChangedDate` does not move for those, so it would order the section by an event that never happened.
+
+The window is **14 days**: one two-week sprint, so something handed off at the start of the sprint is still listed, while the section stays a memory aid rather than an archive. Change it in the query. A ticket already visible in your main list is filtered out rather than shown twice, and the section hides itself entirely when nothing survives — which, if you mostly hand things straight to Done, will be often.
+
 ## Recently Approved PRs section
 
 A `Recently Approved PRs` entry lists the PRs **you** most recently approved — your review activity, not your authored work — newest-**updated** first, so a PR you approved days ago and someone pushed to this morning sits at the top. Rows are the usual PR rows, so merged and closed states and their colours come free.

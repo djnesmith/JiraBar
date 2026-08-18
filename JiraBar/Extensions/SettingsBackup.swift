@@ -36,6 +36,8 @@ struct AppSettings: Codable {
     var todoMaxResults: String?
     var recentlyClosedJQL: String?
     var recentlyClosedMaxResults: String?
+    var recentlySeenJQL: String?
+    var recentlySeenMaxResults: String?
     var recentlyApprovedMaxResults: String?
     var showRecentlyApprovedSection: Bool?
 
@@ -76,6 +78,8 @@ struct AppSettings: Codable {
             todoMaxResults: Defaults[.todoMaxResults],
             recentlyClosedJQL: Defaults[.recentlyClosedJQL],
             recentlyClosedMaxResults: Defaults[.recentlyClosedMaxResults],
+            recentlySeenJQL: Defaults[.recentlySeenJQL],
+            recentlySeenMaxResults: Defaults[.recentlySeenMaxResults],
             recentlyApprovedMaxResults: Defaults[.recentlyApprovedMaxResults],
             showRecentlyApprovedSection: Defaults[.showRecentlyApprovedSection],
             statusOrder: nil,
@@ -111,6 +115,8 @@ struct AppSettings: Codable {
         if let value = todoMaxResults { Defaults[.todoMaxResults] = value }
         if let value = recentlyClosedJQL { Defaults[.recentlyClosedJQL] = value }
         if let value = recentlyClosedMaxResults { Defaults[.recentlyClosedMaxResults] = value }
+        if let value = recentlySeenJQL { Defaults[.recentlySeenJQL] = value }
+        if let value = recentlySeenMaxResults { Defaults[.recentlySeenMaxResults] = value }
         if let value = recentlyApprovedMaxResults { Defaults[.recentlyApprovedMaxResults] = value }
         if let value = showRecentlyApprovedSection { Defaults[.showRecentlyApprovedSection] = value }
         if let value = statusDisplay { Defaults[.statusDisplay] = value }

@@ -164,6 +164,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @Default(.todoMaxResults) var todoMaxResults
     @Default(.recentlyClosedJQL) var recentlyClosedJQL
     @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
+    @Default(.recentlySeenJQL) var recentlySeenJQL
+    @Default(.recentlySeenMaxResults) var recentlySeenMaxResults
     @Default(.recentlyApprovedMaxResults) var recentlyApprovedMaxResults
     @Default(.showRecentlyApprovedSection) var showRecentlyApprovedSection
 
@@ -288,6 +290,7 @@ extension AppDelegate {
         // Runs concurrently with the main search below — see startTodoFetch.
         let todoPending = self.startTodoFetch()
         let recentlyClosedPending = self.startRecentlyClosedFetch()
+        let recentlySeenPending = self.startRecentlySeenFetch()
         let myPRsGroup = DispatchGroup()
         let collectedURLsQueue = DispatchQueue(label: "myPRs.collectedURLs")
         var collectedPRURLs = Set<String>()
@@ -371,6 +374,7 @@ extension AppDelegate {
 
             if let todoPending { self.appendTodoSection(todoPending) }
             if let recentlyClosedPending { self.appendRecentlyClosedSection(recentlyClosedPending) }
+            if let recentlySeenPending { self.appendRecentlySeenSection(recentlySeenPending) }
             self.appendRecentlyApprovedSection()
 
             // PRs Without Tickets sits between the status groups and the utility items. Its submenu is
@@ -529,6 +533,29 @@ extension AppDelegate {
         return pending
     }
 
+    /// Starts the Recently Seen search, or nil when no query is configured. Ordering is the user's
+    /// `ORDER BY`, same as Recently Closed.
+    private func startRecentlySeenFetch() -> PendingSection<[Issue]>? {
+        guard let query = AppDelegate.configuredQuery(recentlySeenJQL) else { return nil }
+
+        let pending = PendingSection<[Issue]>()
+        jiraClient.getIssuesByJql(jql: query, maxResults: recentlySeenMaxResults) { resp, _ in
+            pending.deliver(resp.issues ?? [])
+        }
+        return pending
+    }
+
+    /// Recently Seen rows that are not already on screen in the main list.
+    ///
+    /// The default query cannot collide — it asks for tickets assigned to someone else, and the main
+    /// query is normally scoped to you — but the main JQL is yours to write, and a project-wide one puts
+    /// the same ticket in both places. Recently Closed needs no such filter: it is `statusCategory =
+    /// Done` and this is `!= Done`, so the two are disjoint by construction.
+    static func recentlySeenRows(_ seen: [Issue], alreadyShown: [Issue]) -> [Issue] {
+        let shown = Set(alreadyShown.map(\.key))
+        return seen.filter { !shown.contains($0.key) }
+    }
+
     /// A configured section's query, or nil when it is switched off. Empty means absent rather than
     /// unfiltered — a section showing every closed ticket in the instance would be worse than none.
     static func configuredQuery(_ raw: String) -> String? {
@@ -573,6 +600,50 @@ extension AppDelegate {
             closedMenu.delegate = delegate
             self.submenuDelegates.append(delegate)
             header.submenu = closedMenu
+        }
+    }
+
+    /// Adds the Recently Seen section under Recently Closed: tickets you moved that are now someone
+    /// else's, so they are no longer anywhere else in this menu.
+    ///
+    /// The status is the point of the row — it is what you changed — so it renders like Recently
+    /// Closed's does, from the user's own status colours.
+    ///
+    /// Submenus are the finished-ticket set: copy shortcuts and PR rows, no transitions. These are not
+    /// your tickets, and offering to move someone else's from a rollup invites a misclick with no
+    /// context.
+    private func appendRecentlySeenSection(_ pending: PendingSection<[Issue]>) {
+        let separator = NSMenuItem.separator()
+        let header = AppDelegate.makeSectionHeader(title: "Recently Seen", symbolName: "eye")
+        menu.addItem(separator)
+        menu.addItem(header)
+
+        pending.onReady { [weak self] issues in
+            guard let self else { return }
+            guard self.menu.index(of: header) != -1 else { return }
+            let rowsToShow = AppDelegate.recentlySeenRows(issues, alreadyShown: self.lastIssues)
+            guard !rowsToShow.isEmpty else {
+                self.menu.removeItem(header)
+                if self.menu.index(of: separator) != -1 { self.menu.removeItem(separator) }
+                return
+            }
+
+            let seenMenu = NSMenu()
+            var rows: [(NSMenuItem, Issue)] = []
+            for issue in rowsToShow {
+                // No assignee highlight: by definition nobody here is you, so green would say nothing.
+                let row = self.makeIssueRow(for: issue, showStatus: true)
+                seenMenu.addItem(row)
+                rows.append((row, issue))
+            }
+            let delegate = LazyMenuDelegate {
+                for (row, issue) in rows {
+                    self.attachClosedIssueSubmenu(to: row, issue: issue)
+                }
+            }
+            seenMenu.delegate = delegate
+            self.submenuDelegates.append(delegate)
+            header.submenu = seenMenu
         }
     }
 

@@ -231,6 +231,8 @@ private struct QuerySection: View {
     @Default(.todoJQL) var todoJQL
     @Default(.recentlyClosedJQL) var recentlyClosedJQL
     @Default(.recentlyClosedMaxResults) var recentlyClosedMaxResults
+    @Default(.recentlySeenJQL) var recentlySeenJQL
+    @Default(.recentlySeenMaxResults) var recentlySeenMaxResults
     @Default(.showRecentlyApprovedSection) var showRecentlyApprovedSection
     @Default(.recentlyApprovedMaxResults) var recentlyApprovedMaxResults
     @Default(.todoMaxResults) var todoMaxResults
@@ -256,6 +258,13 @@ private struct QuerySection: View {
         Text("Adds a Recently Closed entry under TODO listing finished tickets, each showing its PRs including merged and closed ones. No transitions or editing — it's a history rollup. Empty switches it off. Order by statusCategoryChangedDate rather than resolutiondate, which many workflows never populate. Add \"AND project in (ABC, DEF)\" to keep other projects' idea of \"Done\" out.")
             .font(.footnote)
         TextField("Recently Closed Max Results:", text: $recentlyClosedMaxResults)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+            .frame(width: 120)
+        TextField("Recently Seen JQL:", text: $recentlySeenJQL)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Adds a Recently Seen entry listing tickets whose status you changed that are assigned to someone else and are not Done — the ones that leave your board the moment you hand them on, so nothing otherwise records that you touched them. Same history-rollup submenu as Recently Closed. Empty switches it off. Ordered by updated rather than statusCategoryChangedDate, because a hand-off is often between two statuses in the same category and that field would not move. Add \"AND project in (ABC, DEF)\" to scope it.")
+            .font(.footnote)
+        TextField("Recently Seen Max Results:", text: $recentlySeenMaxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())
             .frame(width: 120)
         Toggle("Show Recently Approved PRs section", isOn: $showRecentlyApprovedSection)

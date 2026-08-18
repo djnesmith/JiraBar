@@ -127,6 +127,31 @@ extension Defaults.Keys {
     )
     static let recentlyClosedMaxResults = Key<String>("recentlyClosedMaxResults", default: "10")
 
+    /// JQL for the Recently Seen section. Empty switches the section off.
+    ///
+    /// Tickets you moved that then left your board because you are not the assignee — you transition
+    /// something as reviewer or tester and it vanishes, with nothing left saying you touched it. Hence
+    /// the three clauses: you changed the status, you are not the assignee, and it is not Done. The last
+    /// is what keeps this disjoint from Recently Closed rather than duplicating it.
+    ///
+    /// `ORDER BY updated`, not `statusCategoryChangedDate` as Recently Closed uses. The moves this
+    /// section exists to remember are often *within* a category — a review-to-QA hand-off can be two
+    /// statuses that are both "In Progress" — and `statusCategoryChangedDate` does not move for those,
+    /// so it would order the section by an event that never happened.
+    ///
+    /// Fourteen days because it is one two-week sprint: long enough that something handed off at the
+    /// start of the sprint is still listed, short enough that the section stays a memory aid rather than
+    /// an archive. Widen it in your own settings if your cycle is longer.
+    ///
+    /// Deliberately not scoped to any project, like the other section queries. Narrow it with
+    /// `AND project in (…)` for yours; that belongs in your settings, not in this default.
+    static let recentlySeenJQL = Key<String>(
+        "recentlySeenJQL",
+        default: "status CHANGED BY currentUser() AFTER -14d AND assignee != currentUser()"
+            + " AND statusCategory != Done ORDER BY updated DESC"
+    )
+    static let recentlySeenMaxResults = Key<String>("recentlySeenMaxResults", default: "10")
+
     /// How many PRs the "Recently Approved PRs" section lists. Scoped by GitHub Search Orgs, the same
     /// setting PRs Without Tickets uses, so it needs no query of its own.
     ///
