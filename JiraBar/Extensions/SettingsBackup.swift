@@ -28,6 +28,7 @@ struct AppSettings: Codable {
     var rankFieldId: String?
     var allIssuesJQL: String?
     var githubSearchOrgs: String?
+    var highlightedProjectKeys: String?
     var jiraGithubUserMapPath: String?
     var githubPRReviewerJiraFieldId: String?
     var showMyPRsSection: Bool?
@@ -67,6 +68,7 @@ struct AppSettings: Codable {
             rankFieldId: Defaults[.rankFieldId],
             allIssuesJQL: Defaults[.allIssuesJQL],
             githubSearchOrgs: Defaults[.githubSearchOrgs],
+            highlightedProjectKeys: Defaults[.highlightedProjectKeys],
             jiraGithubUserMapPath: Defaults[.jiraGithubUserMapPath],
             githubPRReviewerJiraFieldId: Defaults[.githubPRReviewerJiraFieldId],
             showMyPRsSection: Defaults[.showMyPRsSection],
@@ -101,6 +103,7 @@ struct AppSettings: Codable {
         if let value = rankFieldId { Defaults[.rankFieldId] = value }
         if let value = allIssuesJQL { Defaults[.allIssuesJQL] = value }
         if let value = githubSearchOrgs { Defaults[.githubSearchOrgs] = value }
+        if let value = highlightedProjectKeys { Defaults[.highlightedProjectKeys] = value }
         if let value = jiraGithubUserMapPath { Defaults[.jiraGithubUserMapPath] = value }
         if let value = githubPRReviewerJiraFieldId { Defaults[.githubPRReviewerJiraFieldId] = value }
         if let value = showMyPRsSection { Defaults[.showMyPRsSection] = value }

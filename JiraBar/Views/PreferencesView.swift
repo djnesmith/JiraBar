@@ -223,6 +223,7 @@ private struct QuerySection: View {
     @Default(.allIssuesJQL) var allIssuesJQL
     @FromKeychain(.gitHubToken) var gitHubToken
     @Default(.githubSearchOrgs) var githubSearchOrgs
+    @Default(.highlightedProjectKeys) var highlightedProjectKeys
     @Default(.jiraGithubUserMapPath) var jiraGithubUserMapPath
     @Default(.jiraGithubUserMapBookmark) var jiraGithubUserMapBookmark
     @Default(.githubPRReviewerJiraFieldId) var githubPRReviewerJiraFieldId
@@ -281,6 +282,10 @@ private struct QuerySection: View {
         TextField("Rank field id:", text: $rankFieldId)
             .textFieldStyle(RoundedBorderTextFieldStyle())
         Text("Optional. Lexorank field id (commonly customfield_10019 on Cloud). When set, tickets inside each status group are sorted to match your board order.")
+            .font(.footnote)
+        TextField("Highlight Keys For:", text: $highlightedProjectKeys)
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+        Text("Optional. Comma-separated project keys (e.g. \"ABC, XY2\") whose issue keys render in link blue wherever they appear — menu rows, PR titles and dialogs. Case-insensitive. Leave empty to highlight every project's keys. Does not affect which PRs count as tied to a ticket.")
             .font(.footnote)
         SecureField("GitHub Token:", text: $gitHubToken)
             .textFieldStyle(RoundedBorderTextFieldStyle())

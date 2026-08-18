@@ -20,7 +20,7 @@ struct CommentDialog: View {
                     .fontWeight(.semibold)
                 Text(issueKey)
                     .font(.subheadline)
-                    .foregroundColor(.issueKey)
+                    .foregroundColor(.forIssueKey(issueKey))
             }
 
             TextField("", text: $comment, axis: .vertical)

@@ -839,7 +839,12 @@ extension AppDelegate {
             .appendString(string: issue.fields.summary.trunc(length: 50))
             .appendNewLine()
             .appendIcon(iconName: "hash", color: NSColor.gray)
-            .appendString(string: issue.key, color: AppDelegate.issueKeyColor)
+            .appendString(
+                string: issue.key,
+                color: AppDelegate.isHighlightedKey(issue.key)
+                    ? AppDelegate.issueKeyColor
+                    : AppDelegate.ownershipMetadata
+            )
             .appendSeparator()
             .appendString(string: assignee.text, color: assignee.color)
             .appendSeparator()
@@ -2245,8 +2250,81 @@ extension AppDelegate {
     /// case-sensitively, mirroring how Jira's own integrations link branches/titles to tickets.
     private static let issueKeyRegex = try! NSRegularExpression(pattern: #"\b[A-Z][A-Z0-9]+-[0-9]+\b"#)
 
-    /// The color every issue key renders in, wherever a key appears — menu rows, PR titles, and the
-    /// SwiftUI dialogs via `Color.issueKey`.
+    /// Whether a key Jira gave us belongs to a highlighted project. Used where the string is known to
+    /// be an issue key already — a ticket row's own key, and the dialogs opened from one.
+    ///
+    /// Nothing configured means every project qualifies, and it answers `true` without consulting a
+    /// pattern at all. Running the generic one here would re-decide whether this is a key, which it is
+    /// not our place to doubt: Jira DC lets an admin set the project-key pattern, so a perfectly valid
+    /// `X-1` would come back grey. Only once the user names projects is there a question to ask.
+    ///
+    /// Whole-string when there is: the element holds a bare key, and a partial match would colour a key
+    /// the filter exists to exclude.
+    static func isHighlightedKey(_ key: String) -> Bool {
+        guard !highlightedProjects(from: Defaults[.highlightedProjectKeys]).isEmpty else { return true }
+        let range = NSRange(key.startIndex..., in: key)
+        guard let match = issueKeyColorRegex.firstMatch(in: key, options: [], range: range) else {
+            return false
+        }
+        return match.range == range
+    }
+
+    /// The configured project keys, parsed from the comma-separated setting: trimmed, empties dropped.
+    static func highlightedProjects(from setting: String) -> [String] {
+        setting.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Which strings get *colored*. Deliberately not `issueKeyRegex`: whether a PR is tied to a ticket
+    /// is a different question, and keeping that on the generic pattern means narrowing what turns blue
+    /// cannot push rows into "PRs Without Tickets".
+    ///
+    /// With no configured projects this is the generic pattern, so an unconfigured install colors keys
+    /// in free text exactly as it did before the setting existed. With projects configured it matches
+    /// only those, case-insensitively, and accepts any run of letters and digits after the dash — a key
+    /// like ABC-XDFD2453 counts, and so does abc-1717.
+    ///
+    /// The trailing `(?!-)` makes a second dash kill the match rather than shorten it. Without it,
+    /// `ABC-dfs-3js` would color `ABC-dfs`: there is a word boundary between `s` and `-`, so `\b` alone
+    /// is happy to stop there. Backtracking cannot rescue it either, because the suffix has no other
+    /// position where a boundary falls — which is what makes the whole match fail, as intended.
+    ///
+    /// That cuts both ways, and it is the deliberate cost of the rule: a branch-shaped title like
+    /// `ABC-1717-fix-the-thing` colors nothing once a filter is on, where an unconfigured install would
+    /// color `ABC-1717`. Nothing distinguishes it from `ABC-dfs-3js` without treating an all-digit
+    /// suffix as special. Titles this app produces are `[ABC-1717] Summary`, which is unaffected.
+    static func makeIssueKeyColorRegex(projects: [String]) -> NSRegularExpression {
+        guard !projects.isEmpty else { return issueKeyRegex }
+        let alternation = projects.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        // Escaped input should always compile. If it somehow doesn't, colour nothing — falling back to
+        // the generic pattern would colour *every* project, the opposite of what the user asked for,
+        // and silently. Nothing turning blue is at least visible.
+        return (try? NSRegularExpression(
+            pattern: #"\b(?:\#(alternation))-[A-Za-z0-9]+\b(?!-)"#,
+            options: [.caseInsensitive]
+        )) ?? matchNothingRegex
+    }
+
+    /// Never matches. `(?!)` is an empty negative lookahead, which fails wherever it is tried.
+    private static let matchNothingRegex = try! NSRegularExpression(pattern: #"(?!)"#)
+
+    /// `makeIssueKeyColorRegex` for the current setting, rebuilt only when the setting changes.
+    /// Menu building calls this once per rendered row, and compiling a regex each time would be paid
+    /// for nothing. Main-thread only, like every other menu-construction path.
+    static var issueKeyColorRegex: NSRegularExpression {
+        let setting = Defaults[.highlightedProjectKeys]
+        if let cached = cachedColorRegex, cached.setting == setting { return cached.regex }
+        let regex = makeIssueKeyColorRegex(projects: highlightedProjects(from: setting))
+        cachedColorRegex = (setting, regex)
+        return regex
+    }
+
+    private static var cachedColorRegex: (setting: String, regex: NSRegularExpression)?
+
+    /// The color a highlighted issue key renders in, wherever a key appears — menu rows, PR titles, and
+    /// the SwiftUI dialogs via `Color.issueKey` / `Color.forIssueKey`. Which keys qualify is the
+    /// `highlightedProjectKeys` setting; with it empty, all of them do.
     ///
     /// Three surfaces deliberately keep their key uncolored. `NSWindow.title` and user-notification
     /// bodies are plain `String` with no attributed form, so they cannot carry one. Red error text in
@@ -2261,8 +2339,8 @@ extension AppDelegate {
 
     /// Every issue key inside `text` colored, the rest left in `base`, optionally cut to `length`
     /// characters with an ellipsis. For text that only *might* contain a key — PR titles. A ticket row's
-    /// own key is already known to be one and is colored directly; both share `issueKeyColor`, which is
-    /// what keeps them from drifting.
+    /// own key is known to be one already and only asks `isHighlightedKey`; both go through
+    /// `issueKeyColorRegex` and `issueKeyColor`, which is what keeps them from drifting.
     ///
     /// Keys are matched against the whole `text` and then dropped if the cut lands inside one, rather than
     /// matching the already-cut string. Truncating first would let `\b` close a match on the stump: a PR
@@ -2275,7 +2353,7 @@ extension AppDelegate {
 
         let out = NSMutableAttributedString(string: body, attributes: [.foregroundColor: base])
         let range = NSRange(text.startIndex..., in: text)
-        for match in AppDelegate.issueKeyRegex.matches(in: text, options: [], range: range)
+        for match in AppDelegate.issueKeyColorRegex.matches(in: text, options: [], range: range)
         where match.range.upperBound <= kept {
             out.addAttribute(.foregroundColor, value: AppDelegate.issueKeyColor, range: match.range)
         }
@@ -2286,14 +2364,14 @@ extension AppDelegate {
     }
 
     /// The same thing for SwiftUI: keys colored, every other run left unstyled so the `Text` keeps
-    /// whatever the view applies. Shares `issueKeyRegex` and `issueKeyColor` with the AppKit path above,
-    /// so the two rendering systems cannot disagree about what a key is or what colour it takes. No
-    /// truncation — the dialogs wrap.
+    /// whatever the view applies. Goes through the same `issueKeyColorRegex` and `issueKeyColor` as the
+    /// AppKit path above, so the two rendering systems cannot disagree about what a key is, what colour
+    /// it takes, or which projects the filter admits. No truncation — the dialogs wrap.
     static func attributedColoringIssueKeys(_ text: String) -> AttributedString {
         var out = AttributedString()
         var cursor = text.startIndex
         let range = NSRange(text.startIndex..., in: text)
-        for match in AppDelegate.issueKeyRegex.matches(in: text, options: [], range: range) {
+        for match in AppDelegate.issueKeyColorRegex.matches(in: text, options: [], range: range) {
             guard let keyRange = Range(match.range, in: text) else { continue }
             out += AttributedString(String(text[cursor..<keyRange.lowerBound]))
             var key = AttributedString(String(text[keyRange]))

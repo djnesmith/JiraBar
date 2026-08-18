@@ -75,6 +75,14 @@ extension Defaults.Keys {
     /// issue key inside those orgs. Empty disables the fallback.
     static let githubSearchOrgs = Key<String>("githubSearchOrgs", default: "")
 
+    /// Comma-separated project keys whose issue keys render in the issue-key blue (e.g. "ABC, XY2").
+    /// Matched case-insensitively, and the part after the dash may be any run of letters and digits,
+    /// so "abc-1717" and "ABC-XDFD2453" both count. Empty highlights every project's keys.
+    ///
+    /// Colouring only. Which PRs count as tied to a ticket is a separate question and keeps using the
+    /// generic pattern, so narrowing this cannot move rows into "PRs Without Tickets".
+    static let highlightedProjectKeys = Key<String>("highlightedProjectKeys", default: "")
+
     /// Path to the JSON file mapping Jira accountIds to GitHub logins. See JiraGithubUserMap
     /// for the schema. Empty disables the GitHub PR reviewer/assignee integration entirely.
     /// Stored for display only — actual reads use the security-scoped bookmark below so the

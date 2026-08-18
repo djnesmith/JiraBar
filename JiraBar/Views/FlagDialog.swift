@@ -22,7 +22,7 @@ struct FlagDialog: View {
                         .fontWeight(.semibold)
                     Text(issueKey)
                         .font(.subheadline)
-                        .foregroundColor(.issueKey)
+                        .foregroundColor(.forIssueKey(issueKey))
                 }
             }
 

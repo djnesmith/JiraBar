@@ -4,6 +4,25 @@ import AppKit
 import SwiftUI
 @testable import jiraBar
 
+/// Every run of `coloringIssueKeys` output paired with the colour it carries.
+private func colorRuns(_ text: String, truncatedTo length: Int? = nil) -> [(String, NSColor?)] {
+    let attributed = AppDelegate.coloringIssueKeys(
+        text, base: AppDelegate.ownershipMetadata, truncatedTo: length
+    )
+    var out: [(String, NSColor?)] = []
+    attributed.enumerateAttribute(
+        .foregroundColor, in: NSRange(location: 0, length: attributed.length)
+    ) { value, range, _ in
+        out.append(((attributed.string as NSString).substring(with: range), value as? NSColor))
+    }
+    return out
+}
+
+/// Just the substrings painted in the issue-key colour.
+private func coloredKeyRuns(_ text: String, truncatedTo length: Int? = nil) -> [String] {
+    colorRuns(text, truncatedTo: length).filter { $0.1 == AppDelegate.issueKeyColor }.map(\.0)
+}
+
 /// A colour's sRGB components as resolved under one appearance. Empty when it cannot be converted,
 /// which callers must treat as a failure rather than indexing into.
 private func srgbComponents(_ color: NSColor, _ appearance: NSAppearance.Name) -> [CGFloat] {
@@ -629,21 +648,28 @@ final class RecentlyApprovedQueryTests: XCTestCase {
 /// runs before truncation and why the colour is `linkColor`.
 final class IssueKeyColoringTests: XCTestCase {
 
+    /// These cover the unconfigured install, where every project's keys colour. The project filter has
+    /// its own class. Pinned rather than assumed: the setting is real `Defaults`, so on a machine that
+    /// has a filter configured these would otherwise read it and fail.
+    private var savedSetting = ""
+
+    override func setUp() {
+        super.setUp()
+        savedSetting = Defaults[.highlightedProjectKeys]
+        Defaults[.highlightedProjectKeys] = ""
+    }
+
+    override func tearDown() {
+        Defaults[.highlightedProjectKeys] = savedSetting
+        super.tearDown()
+    }
+
     private func runs(_ text: String, truncatedTo length: Int? = nil) -> [(String, NSColor?)] {
-        let attributed = AppDelegate.coloringIssueKeys(
-            text, base: AppDelegate.ownershipMetadata, truncatedTo: length
-        )
-        var out: [(String, NSColor?)] = []
-        attributed.enumerateAttribute(
-            .foregroundColor, in: NSRange(location: 0, length: attributed.length)
-        ) { value, range, _ in
-            out.append(((attributed.string as NSString).substring(with: range), value as? NSColor))
-        }
-        return out
+        colorRuns(text, truncatedTo: length)
     }
 
     private func keyRuns(_ text: String, truncatedTo length: Int? = nil) -> [String] {
-        runs(text, truncatedTo: length).filter { $0.1 == AppDelegate.issueKeyColor }.map(\.0)
+        coloredKeyRuns(text, truncatedTo: length)
     }
 
     // MARK: - which text gets colored
@@ -668,9 +694,8 @@ final class IssueKeyColoringTests: XCTestCase {
         XCTAssertEqual(keyRuns("ABC-1 and PROJ-22 together"), ["ABC-1", "PROJ-22"])
     }
 
-    /// Not tied to any one project: this reuses the app's existing generic key pattern, so every
-    /// project's keys color.
-    func testAnyProjectKeyColors() {
+    /// With nothing configured the generic pattern applies, so every project's keys color.
+    func testAnyProjectKeyColorsWhenNoFilterIsSet() {
         XCTAssertEqual(keyRuns("[ZZ9-3384] something"), ["ZZ9-3384"])
     }
 
@@ -802,5 +827,189 @@ final class IssueKeyColoringTests: XCTestCase {
             srgbComponents(NSColor(Color.issueKey), .aqua),
             srgbComponents(NSColor(Color.issueKey), .darkAqua)
         )
+    }
+}
+
+/// The project filter — which keys turn blue. Colouring only: `containsIssueKey`, and so which PRs
+/// count as tied to a ticket, deliberately stays on the generic pattern whatever this is set to.
+///
+/// A generic key stands in for a real project throughout. The behaviour is identical and the repo is
+/// open source, so no one's actual project keys belong in it.
+final class HighlightedProjectFilterTests: XCTestCase {
+
+    private var savedSetting = ""
+
+    override func setUp() {
+        super.setUp()
+        savedSetting = Defaults[.highlightedProjectKeys]
+    }
+
+    override func tearDown() {
+        Defaults[.highlightedProjectKeys] = savedSetting
+        super.tearDown()
+    }
+
+    private func keyRuns(_ text: String) -> [String] { coloredKeyRuns(text) }
+
+    // MARK: - parsing the setting
+
+    func testTheSettingIsSplitTrimmedAndCompacted() {
+        XCTAssertEqual(AppDelegate.highlightedProjects(from: "ABC, XY2"), ["ABC", "XY2"])
+        XCTAssertEqual(AppDelegate.highlightedProjects(from: "  ABC  "), ["ABC"])
+        XCTAssertEqual(AppDelegate.highlightedProjects(from: "ABC,,XY2"), ["ABC", "XY2"])
+        XCTAssertEqual(AppDelegate.highlightedProjects(from: " , , "), [])
+        XCTAssertEqual(AppDelegate.highlightedProjects(from: ""), [])
+    }
+
+    // MARK: - what the configured project matches
+
+    func testTheProjectMatchesInAnyCase() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        for key in ["ABC-1717", "abc-1717", "Abc-1717", "aBc-1717"] {
+            XCTAssertEqual(keyRuns("[\(key)] a title"), [key], key)
+        }
+    }
+
+    /// Configuring it in lowercase has to work the same — the match is on the project, not on how the
+    /// user happened to type the setting.
+    func testTheSettingItselfIsCaseInsensitive() {
+        Defaults[.highlightedProjectKeys] = "abc"
+        XCTAssertEqual(keyRuns("[ABC-1717] a title"), ["ABC-1717"])
+    }
+
+    func testTheSuffixMayBeLettersDigitsOrBoth() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        for key in ["ABC-1717", "ABC-XYZ", "ABC-XDFD2453", "ABC-abc123", "ABC-7"] {
+            XCTAssertEqual(keyRuns("see \(key) here"), [key], key)
+        }
+    }
+
+    func testSeveralConfiguredProjectsAllColor() {
+        Defaults[.highlightedProjectKeys] = "ABC, XY2"
+        XCTAssertEqual(keyRuns("ABC-1 and XY2-22 together"), ["ABC-1", "XY2-22"])
+    }
+
+    // MARK: - what it must no longer color
+
+    /// The behaviour this change removes: before the filter, every project's keys were blue.
+    func testOtherProjectsAreNoLongerColored() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertTrue(keyRuns("[OTH-201] nope").isEmpty)
+        XCTAssertTrue(keyRuns("[ZZ9-3384] nope").isEmpty)
+        XCTAssertTrue(keyRuns("ABCD-1 is a different project").isEmpty)
+    }
+
+    /// A second dash kills the whole match rather than shortening it. Without the lookahead this
+    /// colours "ABC-dfs", because there is a word boundary between "s" and "-".
+    func testASecondDashKillsTheMatchRatherThanShorteningIt() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertTrue(keyRuns("ABC-dfs-3js").isEmpty)
+        XCTAssertTrue(keyRuns("abc-service-vendor").isEmpty)
+        XCTAssertTrue(keyRuns("feature/ABC-1717-do-the-thing").isEmpty)
+    }
+
+    func testADashWithNothingAfterItIsNotAKey() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertTrue(keyRuns("ABC- and then words").isEmpty)
+        XCTAssertTrue(keyRuns("ABC-").isEmpty)
+        XCTAssertTrue(keyRuns("ABC_1717").isEmpty)
+    }
+
+    /// A dash *before* the project is left matching: "revert-ABC-123" is a real ticket reference, unlike
+    /// the trailing-dash case where "ABC-dfs-3js" is a different identifier entirely.
+    func testALeadingDashStillMatches() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertEqual(keyRuns("revert-ABC-123"), ["ABC-123"])
+    }
+
+    /// The setting is user input and goes into a pattern, so it has to be escaped.
+    func testRegexMetacharactersInTheSettingAreEscaped() {
+        Defaults[.highlightedProjectKeys] = "A.C"
+        XCTAssertTrue(keyRuns("ABC-1717 should not match a dot wildcard").isEmpty)
+        XCTAssertEqual(keyRuns("A.C-1717 is the literal one"), ["A.C-1717"])
+    }
+
+    // MARK: - the empty setting keeps the old behaviour
+
+    func testAnEmptySettingColorsEveryProject() {
+        Defaults[.highlightedProjectKeys] = ""
+        XCTAssertEqual(keyRuns("[OTH-201] yes"), ["OTH-201"])
+        XCTAssertEqual(keyRuns("[ZZ9-3384] yes"), ["ZZ9-3384"])
+    }
+
+    /// Ordered alternation: a shorter configured key must not shadow a longer one it prefixes, in
+    /// either listing order. Sorting or deduping the list later would break this silently.
+    func testAConfiguredKeyThatPrefixesAnotherDoesNotShadowIt() {
+        for setting in ["AB, ABC", "ABC, AB"] {
+            Defaults[.highlightedProjectKeys] = setting
+            XCTAssertEqual(keyRuns("ABC-1 here"), ["ABC-1"], setting)
+            XCTAssertEqual(keyRuns("AB-9 here"), ["AB-9"], setting)
+        }
+    }
+
+    // MARK: - the ticket row's own key
+
+    func testTheTicketRowKeyFollowsTheFilter() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertTrue(AppDelegate.isHighlightedKey("ABC-1717"))
+        XCTAssertTrue(AppDelegate.isHighlightedKey("abc-1717"))
+        XCTAssertFalse(AppDelegate.isHighlightedKey("OTH-201"))
+        XCTAssertFalse(AppDelegate.isHighlightedKey("ABC-dfs-3js"), "not a key under this rule")
+        XCTAssertFalse(AppDelegate.isHighlightedKey("[ABC-1717]"), "the element holds a bare key")
+        XCTAssertFalse(AppDelegate.isHighlightedKey(""))
+    }
+
+    /// An unconfigured install must not re-decide whether Jira's own key is a key. Jira DC lets an
+    /// admin set the project-key pattern, so shapes the generic pattern rejects — a single-letter
+    /// project, a non-ASCII one — still have to come back blue, exactly as they did before the
+    /// setting existed.
+    func testEveryTicketRowKeyIsHighlightedWhenNothingIsConfigured() {
+        Defaults[.highlightedProjectKeys] = ""
+        for key in ["OTH-201", "ABC-1717", "X-1", "ÄBC-1", "ABC-dfs-3js"] {
+            XCTAssertTrue(AppDelegate.isHighlightedKey(key), key)
+        }
+    }
+
+    /// The dialogs are opened from a ticket row, so their key has to follow the same filter — otherwise
+    /// a row whose key is grey opens a dialog whose key is blue.
+    func testTheDialogKeyColorFollowsTheFilter() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertEqual(Color.forIssueKey("ABC-1717"), .issueKey)
+        XCTAssertEqual(Color.forIssueKey("OTH-201"), .secondary)
+
+        Defaults[.highlightedProjectKeys] = ""
+        XCTAssertEqual(Color.forIssueKey("OTH-201"), .issueKey)
+    }
+
+    // MARK: - the filter must not move rows between sections
+
+    /// `containsIssueKey` decides which PRs are "without tickets". Narrowing what turns blue must not
+    /// touch it, or configuring a filter would silently repopulate that section.
+    func testTheFilterDoesNotChangeWhichPRsCountAsTicketed() {
+        for setting in ["", "ABC", "ZZZ"] {
+            Defaults[.highlightedProjectKeys] = setting
+            XCTAssertTrue(AppDelegate.containsIssueKey("[OTH-201] fix"), "setting: \(setting)")
+            XCTAssertTrue(AppDelegate.containsIssueKey("ZZ9-3384-branch"), "setting: \(setting)")
+            XCTAssertFalse(AppDelegate.containsIssueKey("no key here"), "setting: \(setting)")
+        }
+    }
+
+    // MARK: - changing the setting takes effect
+
+    /// The compiled pattern is cached, so a stale cache would keep colouring the old project.
+    func testChangingTheSettingRebuildsTheMatcher() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        XCTAssertEqual(keyRuns("ABC-1 and XY2-2"), ["ABC-1"])
+        Defaults[.highlightedProjectKeys] = "XY2"
+        XCTAssertEqual(keyRuns("ABC-1 and XY2-2"), ["XY2-2"])
+    }
+
+    /// The SwiftUI dialogs go through the same matcher, so the filter has to reach them too.
+    func testTheDialogColorerFollowsTheFilter() {
+        Defaults[.highlightedProjectKeys] = "ABC"
+        let colored = AppDelegate.attributedColoringIssueKeys("ABC-1 and OTH-201")
+        let keys = colored.runs.filter { $0.foregroundColor == Color.issueKey }
+            .map { String(colored[$0.range].characters) }
+        XCTAssertEqual(keys, ["ABC-1"])
     }
 }

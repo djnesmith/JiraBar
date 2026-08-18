@@ -70,6 +70,13 @@ extension Color {
     /// dialogs and the menu cannot drift; `Color(nsColor:)` keeps the per-appearance resolution.
     static let issueKey = Color(nsColor: AppDelegate.issueKeyColor)
 
+    /// The colour a dialog should draw `key` in: the issue-key blue when it belongs to a highlighted
+    /// project, otherwise the secondary grey these headers used before. A dialog is opened *from* a
+    /// ticket row, so its key has to obey the same filter the row did or the two disagree on screen.
+    static func forIssueKey(_ key: String) -> Color {
+        AppDelegate.isHighlightedKey(key) ? .issueKey : .secondary
+    }
+
     init?(statusHex hex: String) {
         guard StatusDisplay.isValidHex(hex) else { return nil }
         self.init(nsColor: NSColor(hex: hex))

@@ -267,7 +267,7 @@ struct BulkMoveDialog: View {
                 .foregroundColor(isChecked ? .accentColor : .secondary)
             VStack(alignment: .leading, spacing: 0) {
                 Text(AppDelegate.attributedColoringIssueKeys(issue.fields.summary)).lineLimit(1)
-                Text(issue.key).font(.caption).foregroundColor(.issueKey)
+                Text(issue.key).font(.caption).foregroundColor(.forIssueKey(issue.key))
             }
             Spacer()
         }
