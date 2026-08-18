@@ -1117,21 +1117,40 @@ final class IssueTypeColorTests: XCTestCase {
     /// `NSColor.systemRed` would keep passing after the mapping stopped returning it.
     private let bug = AppDelegate.issueTypeColor("Bug")
     private let epic = AppDelegate.issueTypeColor("Epic")
+    private let improvement = AppDelegate.issueTypeColor("Improvement")
 
     func testBugIsRed() {
         XCTAssertEqual(bug, .systemRed)
     }
 
     func testEpicsAndInitiativesShareOneColor() {
-        XCTAssertEqual(epic, .systemPurple)
+        XCTAssertEqual(epic, AppDelegate.issueTypeEpicColor)
         for name in ["Initiative", "Platform Initiative", "Delivery initiative", "SOME INITIATIVE"] {
             XCTAssertEqual(AppDelegate.issueTypeColor(name), epic, name)
         }
     }
 
+    func testImprovementIsTheLighterPurple() {
+        XCTAssertEqual(improvement, AppDelegate.issueTypeImprovementColor)
+        XCTAssertEqual(AppDelegate.issueTypeColor("improvement"), improvement)
+        XCTAssertNotEqual(improvement, epic, "the two purples must not collapse to one")
+    }
+
+    /// Lighter is the whole distinction, so it has to actually be lighter — in both appearances, since
+    /// "lighter" means the opposite thing about prominence on a dark background.
+    func testImprovementIsLighterThanEpicInBothAppearances() {
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            let e = srgbComponents(epic, appearance), i = srgbComponents(improvement, appearance)
+            XCTAssertGreaterThan(
+                cielab(i).L, cielab(e).L,
+                "Improvement is not lighter than Epic in \(appearance.rawValue)"
+            )
+        }
+    }
+
     /// The majority of rows. Colouring these would be the rainbow the palette is chosen to avoid.
     func testOrdinaryWorkKeepsTheMetadataGrey() {
-        for name in ["Task", "Story", "Improvement", "New Feature", "Sub-task", "Subtask"] {
+        for name in ["Task", "Story", "New Feature", "Sub-task", "Subtask"] {
             XCTAssertEqual(AppDelegate.issueTypeColor(name), AppDelegate.ownershipMetadata, name)
         }
     }
@@ -1188,7 +1207,7 @@ final class IssueTypeColorTests: XCTestCase {
 
     func testTypeColorsAreDistinctFromEveryColorTheMenuAlreadyUses() {
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
-            for (typeName, typeColor) in [("Bug", bug), ("Epic", epic)] {
+            for (typeName, typeColor) in [("Bug", bug), ("Epic", epic), ("Improvement", improvement)] {
                 for (otherName, other) in alreadySpent {
                     let distance = deltaE00(typeColor, other, appearance)
                     XCTAssertGreaterThan(
@@ -1200,9 +1219,19 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 
-    func testTheTwoTypeColorsAreDistinctFromEachOther() {
+    /// Including the two purples against each other, which is the tightest pair in the palette and the
+    /// only one where the distinction rests on lightness rather than hue.
+    func testTheTypeColorsAreDistinctFromEachOther() {
+        let pairs = [("Bug/Epic", bug, epic), ("Bug/Improvement", bug, improvement),
+                     ("Epic/Improvement", epic, improvement)]
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
-            XCTAssertGreaterThan(deltaE00(bug, epic, appearance), distinctEnough, appearance.rawValue)
+            for (what, a, b) in pairs {
+                let distance = deltaE00(a, b, appearance)
+                XCTAssertGreaterThan(
+                    distance, distinctEnough,
+                    "\(what) is ΔE00 \(distance) in \(appearance.rawValue)"
+                )
+            }
         }
     }
 
@@ -1258,10 +1287,73 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 
+    /// The two purples are the tightest pair in the palette, and Bug red beside them is a system colour
+    /// Apple moves between releases. So the pair is held against **both** OS palettes, from recorded
+    /// values: a distance that survives on this machine and not on the runner's is not a distance the
+    /// app can rely on, which is exactly what `systemIndigo` taught.
+    func testThePurplePairHoldsAgainstBothOSPalettes() {
+        let epicDark = "#DB34F2", imprDark = "#FFB5FF"
+        let epicLight = "#70008D", imprLight = "#DD37F4"
+        let palettes: [(String, [String], [(String, String)])] = [
+            ("dark / macOS 26", [epicDark, imprDark], [
+                ("key blue", "#419CFF"), ("assignee green", "#30D158"), ("reviewer yellow", "#FFD600"),
+                ("Bug red", "#FF4245"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("hash glyph", "#808080"), ("row title", "#FFFFFF"),
+            ]),
+            ("dark / macOS 15", [epicDark, imprDark], [
+                ("key blue", "#419CFF"), ("assignee green", "#32D74B"), ("reviewer yellow", "#FFD60A"),
+                ("Bug red", "#FF453A"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("hash glyph", "#808080"), ("row title", "#FFFFFF"),
+            ]),
+            ("light / macOS 26", [epicLight, imprLight], [
+                ("key blue", "#0068DA"), ("assignee green", "#34C759"), ("reviewer yellow", "#FFCC00"),
+                ("Bug red", "#FF383C"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("hash glyph", "#808080"), ("row title", "#000000"),
+            ]),
+            ("light / macOS 15", [epicLight, imprLight], [
+                ("key blue", "#0068DA"), ("assignee green", "#28CD41"), ("reviewer yellow", "#FFCC00"),
+                ("Bug red", "#FF3B30"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("hash glyph", "#808080"), ("row title", "#000000"),
+            ]),
+        ]
+        for (env, purples, menu) in palettes {
+            let pair = deltaE00(srgb(hex: purples[0]), srgb(hex: purples[1]))
+            XCTAssertGreaterThan(pair, distinctEnough, "Epic/Improvement is ΔE00 \(pair) in \(env)")
+            for (label, purple) in zip(["Epic", "Improvement"], purples) {
+                for (otherName, other) in menu {
+                    let distance = deltaE00(srgb(hex: purple), srgb(hex: other))
+                    XCTAssertGreaterThan(
+                        distance, distinctEnough,
+                        "\(label) is ΔE00 \(distance) from \(otherName) in \(env)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// The written-out pairs have to be the colours actually shipped, or the measurements above describe
+    /// something the menu does not draw.
+    func testTheShippedPurplesAreTheMeasuredValues() {
+        for (name, color, expected) in [
+            ("Epic dark", epic, "#DB34F2"), ("Improvement dark", improvement, "#FFB5FF"),
+        ] {
+            XCTAssertLessThan(
+                deltaE00(srgbComponents(color, .darkAqua), srgb(hex: expected)), 1, name
+            )
+        }
+        for (name, color, expected) in [
+            ("Epic light", epic, "#70008D"), ("Improvement light", improvement, "#DD37F4"),
+        ] {
+            XCTAssertLessThan(
+                deltaE00(srgbComponents(color, .aqua), srgb(hex: expected)), 1, name
+            )
+        }
+    }
+
     /// Semantic colours, so they resolve per appearance instead of being one fixed sRGB value — the same
     /// property the key blue is chosen for.
     func testTypeColorsAdaptToTheAppearance() {
-        for (name, color) in [("Bug", bug), ("Epic", epic)] {
+        for (name, color) in [("Bug", bug), ("Epic", epic), ("Improvement", improvement)] {
             XCTAssertNotEqual(
                 srgbComponents(color, .aqua), srgbComponents(color, .darkAqua),
                 "\(name)'s colour cannot adapt to a dark menu"
@@ -1277,7 +1369,7 @@ final class IssueTypeColorTests: XCTestCase {
         // resolves closest to, and the values a reader can reproduce.
         let darkMenu: [CGFloat] = [0x1E / 255.0, 0x1E / 255.0, 0x1E / 255.0]
         let lightMenu: [CGFloat] = [1, 1, 1]
-        for (name, color) in [("Bug", bug), ("Epic", epic)] {
+        for (name, color) in [("Bug", bug), ("Epic", epic), ("Improvement", improvement)] {
             let onDark = contrastRatio(srgbComponents(color, .darkAqua), darkMenu)
             XCTAssertGreaterThan(onDark, 4.5, "\(name) is \(onDark):1 on the dark menu")
             let onLight = contrastRatio(srgbComponents(color, .aqua), lightMenu)
