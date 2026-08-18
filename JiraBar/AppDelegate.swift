@@ -811,6 +811,41 @@ extension AppDelegate {
             ?? AppDelegate.ownershipMetadata
     }
 
+    /// The colour an issue type renders in. Two kinds of type get one; everything else keeps the
+    /// metadata grey.
+    ///
+    /// Deliberately not a colour per type. The row already carries the key blue, the assignee green or
+    /// unassigned amber, the metadata grey and the hash glyph, and the hues left over are mostly ones
+    /// that sit closer to those than these two do. Distance to the nearest colour the menu already uses,
+    /// ΔE00 on the dark menu: red 25.3 and purple 31.1, against indigo 14.2 and cyan 20.5 (the key
+    /// blue), brown 14.2 and orange 15.4 (the amber), mint 20.5 (the assignee green). Pink is clear of
+    /// the menu at 28.5 but only 7.9 from the red Bug already needs. The candidates fall in two groups
+    /// with an empty band between 20.6 and 25.2, and red and purple are the two above it — 35.6 apart
+    /// from each other. The hues after them are not close behind by accident; they are what is left.
+    ///
+    /// Which leaves the question of whether Task should be *some* colour. It should not: colouring the
+    /// 2-in-3 majority spends the row's remaining contrast on the one value that carries no decision.
+    /// Grey already says "an ordinary piece of work", and Bug and Epic then read at a glance instead of
+    /// competing with four other coloured runs.
+    ///
+    /// Both are semantic system colours, so they resolve per appearance instead of being one fixed sRGB
+    /// value. Contrast is 4.9:1 (red) and 4.6:1 (purple) on the dark menu; in light mode they are 3.6:1
+    /// and 4.2:1, which is under AA but is where the grey they replace already sat (3.5:1).
+    ///
+    /// One adjacency this cannot police: Recently Closed rows put a status colour immediately after the
+    /// type, and those are free hex the user picks. Colour a Done-category status red or purple and it
+    /// will sit beside a red Bug or a purple Epic with three spaces between them.
+    static func issueTypeColor(_ typeName: String) -> NSColor {
+        let name = typeName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if name == "bug" { return .systemRed }
+        // Epics and initiatives hold other work rather than being work, which is the one other
+        // distinction worth a colour. They share it: which kind it is, the word already says. Matched by
+        // suffix because "Initiative" is a naming convention rather than one fixed type — instances
+        // qualify it with their own word, and no instance's vocabulary belongs in this source.
+        if name == "epic" || name.hasSuffix("initiative") { return .systemPurple }
+        return AppDelegate.ownershipMetadata
+    }
+
     /// Opt-in because green only means something in TODO, where the rule is "top-ranked *unassigned*
     /// ticket" and so green reads as taken-skip-it; the status-grouped rows are all the user's own
     /// tickets and would be green throughout.
@@ -848,7 +883,10 @@ extension AppDelegate {
             .appendSeparator()
             .appendString(string: assignee.text, color: assignee.color)
             .appendSeparator()
-            .appendString(string: issue.fields.issuetype.name, color: "#888888")
+            .appendString(
+                string: issue.fields.issuetype.name,
+                color: AppDelegate.issueTypeColor(issue.fields.issuetype.name)
+            )
         if showStatus {
             title
                 .appendSeparator()

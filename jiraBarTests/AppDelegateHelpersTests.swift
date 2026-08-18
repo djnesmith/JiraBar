@@ -34,6 +34,87 @@ private func srgbComponents(_ color: NSColor, _ appearance: NSAppearance.Name) -
     return out
 }
 
+/// WCAG contrast ratio between two sRGB triples. Returns 0 for a triple `srgbComponents` could not
+/// produce, which fails an assertion rather than trapping on the index.
+private func contrastRatio(_ a: [CGFloat], _ b: [CGFloat]) -> CGFloat {
+    guard a.count == 3, b.count == 3 else { return 0 }
+    func luminance(_ c: [CGFloat]) -> CGFloat {
+        func channel(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+    }
+    let x = luminance(a), y = luminance(b)
+    return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+}
+
+/// sRGB → CIELAB (D65).
+private func cielab(_ c: [CGFloat]) -> (L: CGFloat, a: CGFloat, b: CGFloat) {
+    func linear(_ v: CGFloat) -> CGFloat { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+    let r = linear(c[0]), g = linear(c[1]), bl = linear(c[2])
+    let x = (0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * bl
+    let z = (0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883
+    func f(_ t: CGFloat) -> CGFloat { t > 0.008856 ? pow(t, 1.0 / 3) : (7.787 * t + 16.0 / 116) }
+    let fx = f(x), fy = f(y), fz = f(z)
+    return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+}
+
+/// Perceptual distance between two colours as resolved under one appearance, CIEDE2000.
+///
+/// `!=` says two colours differ; this says how far apart they look, which is the real question when a
+/// colour is carrying a signal. CIE76 is the easier formula and it is the wrong one here — it badly
+/// overstates distance in the saturated blues and reds this palette lives in, which is how a hue that
+/// looks like one already on the row can still score "far".
+///
+/// The threshold the palette holds to is a project choice, not a perceptual constant: ΔE00 1 is the
+/// just-noticeable difference and ~5 is comfortably distinct, so the bar used here is far above either
+/// and exists to leave room for the menu's translucency and for colours seen apart, not side by side.
+private func deltaE00(_ a: NSColor, _ b: NSColor, _ appearance: NSAppearance.Name) -> CGFloat {
+    let p = srgbComponents(a, appearance), q = srgbComponents(b, appearance)
+    guard p.count == 3, q.count == 3 else { return 0 }
+    let (l1, a1, b1) = cielab(p), (l2, a2, b2) = cielab(q)
+    let deg = CGFloat.pi / 180
+
+    let c1 = sqrt(a1 * a1 + b1 * b1), c2 = sqrt(a2 * a2 + b2 * b2)
+    let cBar = (c1 + c2) / 2
+    let g = 0.5 * (1 - sqrt(pow(cBar, 7) / (pow(cBar, 7) + pow(25, 7))))
+    let a1p = (1 + g) * a1, a2p = (1 + g) * a2
+    let c1p = sqrt(a1p * a1p + b1 * b1), c2p = sqrt(a2p * a2p + b2 * b2)
+
+    func hue(_ b: CGFloat, _ ap: CGFloat) -> CGFloat {
+        if b == 0 && ap == 0 { return 0 }
+        let h = atan2(b, ap) / deg
+        return h < 0 ? h + 360 : h
+    }
+    let h1p = hue(b1, a1p), h2p = hue(b2, a2p)
+
+    let dLp = l2 - l1, dCp = c2p - c1p
+    var dhp: CGFloat = 0
+    if c1p * c2p != 0 {
+        dhp = h2p - h1p
+        if dhp > 180 { dhp -= 360 } else if dhp < -180 { dhp += 360 }
+    }
+    let dHp = 2 * sqrt(c1p * c2p) * sin(dhp * deg / 2)
+
+    let lBar = (l1 + l2) / 2, cBarP = (c1p + c2p) / 2
+    var hBarP = h1p + h2p
+    if c1p * c2p != 0 {
+        hBarP = abs(h1p - h2p) > 180 ? (h1p + h2p + 360) / 2 : (h1p + h2p) / 2
+    }
+    let t = 1 - 0.17 * cos((hBarP - 30) * deg) + 0.24 * cos(2 * hBarP * deg)
+        + 0.32 * cos((3 * hBarP + 6) * deg) - 0.20 * cos((4 * hBarP - 63) * deg)
+    let dTheta = 30 * exp(-pow((hBarP - 275) / 25, 2))
+    let rc = 2 * sqrt(pow(cBarP, 7) / (pow(cBarP, 7) + pow(25, 7)))
+    let sl = 1 + (0.015 * pow(lBar - 50, 2)) / sqrt(20 + pow(lBar - 50, 2))
+    let sc = 1 + 0.045 * cBarP
+    let sh = 1 + 0.015 * cBarP * t
+    let rt = -sin(2 * dTheta * deg) * rc
+
+    return sqrt(
+        pow(dLp / sl, 2) + pow(dCp / sc, 2) + pow(dHp / sh, 2)
+            + rt * (dCp / sc) * (dHp / sh)
+    )
+}
+
 final class AppDelegateHelpersTests: XCTestCase {
 
     // MARK: - branchName
@@ -1011,5 +1092,154 @@ final class HighlightedProjectFilterTests: XCTestCase {
         let keys = colored.runs.filter { $0.foregroundColor == Color.issueKey }
             .map { String(colored[$0.range].characters) }
         XCTAssertEqual(keys, ["ABC-1"])
+    }
+}
+
+/// The issue-type colour. Two kinds of type earn one; the rest keep the metadata grey deliberately, so
+/// much of this class is pinning what stays quiet.
+final class IssueTypeColorTests: XCTestCase {
+
+    /// Read through the mapping, never restated as a literal — a property asserted about
+    /// `NSColor.systemRed` would keep passing after the mapping stopped returning it.
+    private let bug = AppDelegate.issueTypeColor("Bug")
+    private let epic = AppDelegate.issueTypeColor("Epic")
+
+    func testBugIsRed() {
+        XCTAssertEqual(bug, .systemRed)
+    }
+
+    func testEpicsAndInitiativesShareOneColor() {
+        XCTAssertEqual(epic, .systemPurple)
+        for name in ["Initiative", "Platform Initiative", "Delivery initiative", "SOME INITIATIVE"] {
+            XCTAssertEqual(AppDelegate.issueTypeColor(name), epic, name)
+        }
+    }
+
+    /// The majority of rows. Colouring these would be the rainbow the palette is chosen to avoid.
+    func testOrdinaryWorkKeepsTheMetadataGrey() {
+        for name in ["Task", "Story", "Improvement", "New Feature", "Sub-task", "Subtask"] {
+            XCTAssertEqual(AppDelegate.issueTypeColor(name), AppDelegate.ownershipMetadata, name)
+        }
+    }
+
+    /// Jira instances define their own types, so the mapping has to answer for names it has never seen —
+    /// with the row's normal grey, not something invisible and not a crash.
+    func testAnUnknownTypeFallsBackToTheMetadataGrey() {
+        for name in ["Spike", "", "   ", "🙂", String(repeating: "x", count: 500)] {
+            XCTAssertEqual(AppDelegate.issueTypeColor(name), AppDelegate.ownershipMetadata, "[\(name)]")
+        }
+    }
+
+    func testTheMatchIgnoresCaseAndSurroundingWhitespace() {
+        for name in ["bug", "BUG", "  Bug  ", "\tBug\n"] {
+            XCTAssertEqual(AppDelegate.issueTypeColor(name), bug, "[\(name)]")
+        }
+        XCTAssertEqual(AppDelegate.issueTypeColor("ePiC"), epic)
+        XCTAssertEqual(AppDelegate.issueTypeColor("PLATFORM INITIATIVE"), epic)
+    }
+
+    /// A near-miss must not be treated as a hit — the fallback is what an unrecognised type gets.
+    func testASubstringMatchIsNotEnough() {
+        for name in ["Bugfix", "Debug", "Epic Saga", "Sub-bug", "Initiatives"] {
+            XCTAssertEqual(AppDelegate.issueTypeColor(name), AppDelegate.ownershipMetadata, name)
+        }
+    }
+
+    // MARK: - the colours have to survive next to the rest of the menu
+
+    /// Colours the menu already spends, that a type colour must not be mistaken for. Reviewer yellow is
+    /// on PR rows rather than ticket rows, and is held to the same bar anyway rather than carving out an
+    /// exception that would need revisiting if a ticket row ever grows one.
+    private var alreadySpent: [(String, NSColor)] {
+        [
+            ("key blue", AppDelegate.issueKeyColor),
+            ("assignee green", .systemGreen),
+            ("reviewer yellow", .systemYellow),
+            ("unassigned amber", AppDelegate.ownershipAbsent),
+            ("metadata grey", AppDelegate.ownershipMetadata),
+            ("hash glyph grey", .gray),
+            ("row title", .labelColor),
+        ]
+    }
+
+    /// The bar the palette holds to. Not a perceptual constant — ΔE00 5 is already clearly distinct —
+    /// but it is not arbitrary either: measured against the colours above, the candidates fall into two
+    /// groups with an empty band between them. On the dark menu nothing rejected reaches 20.6, and the
+    /// two shipped colours are at 25.3 and 31.1. 22 sits in that gap.
+    ///
+    /// A colour has to clear it in *both* appearances. Cyan is the case that shows why the rule is "in
+    /// both": it is more isolated than red in light mode (26.0 vs 24.7) and still fails, because in dark
+    /// it collapses to 20.5 against the key blue two segments away on the same row.
+    private let distinctEnough: CGFloat = 22
+
+    func testTypeColorsAreDistinctFromEveryColorTheMenuAlreadyUses() {
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            for (typeName, typeColor) in [("Bug", bug), ("Epic", epic)] {
+                for (otherName, other) in alreadySpent {
+                    let distance = deltaE00(typeColor, other, appearance)
+                    XCTAssertGreaterThan(
+                        distance, distinctEnough,
+                        "\(typeName) is ΔE00 \(distance) from \(otherName) in \(appearance.rawValue)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testTheTwoTypeColorsAreDistinctFromEachOther() {
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            XCTAssertGreaterThan(deltaE00(bug, epic, appearance), distinctEnough, appearance.rawValue)
+        }
+    }
+
+    /// The hues the docstring rejects have to actually fail the bar it rejects them on, or the reasoning
+    /// recorded there is decoration.
+    func testTheRejectedHuesReallyAreTooCloseToSomethingAlreadyOnScreen() {
+        let rejected: [(String, NSColor, NSColor)] = [
+            ("indigo vs the key blue", .systemIndigo, AppDelegate.issueKeyColor),
+            ("orange vs the unassigned amber", .systemOrange, AppDelegate.ownershipAbsent),
+            ("brown vs the unassigned amber", .systemBrown, AppDelegate.ownershipAbsent),
+            ("mint vs the assignee green", .systemMint, .systemGreen),
+            ("cyan vs the key blue", .systemCyan, AppDelegate.issueKeyColor),
+            ("pink vs the red Bug takes", .systemPink, .systemRed),
+        ]
+        for (what, candidate, incumbent) in rejected {
+            XCTAssertLessThan(
+                deltaE00(candidate, incumbent, .darkAqua), distinctEnough,
+                "\(what) now clears the bar — the docstring's reasoning needs revisiting"
+            )
+        }
+    }
+
+    /// Semantic colours, so they resolve per appearance instead of being one fixed sRGB value — the same
+    /// property the key blue is chosen for.
+    func testTypeColorsAdaptToTheAppearance() {
+        for (name, color) in [("Bug", bug), ("Epic", epic)] {
+            XCTAssertNotEqual(
+                srgbComponents(color, .aqua), srgbComponents(color, .darkAqua),
+                "\(name)'s colour cannot adapt to a dark menu"
+            )
+        }
+    }
+
+    /// Legible rather than sinking into the background it is drawn on. The dark bar is AA; the light one
+    /// is lower on purpose, because the metadata grey these sit among is itself only 3.5:1 on white and
+    /// holding the type to a standard the rest of the row misses would fail for the wrong reason.
+    func testTypeColorsAreLegibleOnTheMenuBackground() {
+        // The menu is a vibrancy material rather than a flat fill; these are the flat backgrounds it
+        // resolves closest to, and the values a reader can reproduce.
+        let darkMenu: [CGFloat] = [0x1E / 255.0, 0x1E / 255.0, 0x1E / 255.0]
+        let lightMenu: [CGFloat] = [1, 1, 1]
+        for (name, color) in [("Bug", bug), ("Epic", epic)] {
+            let onDark = contrastRatio(srgbComponents(color, .darkAqua), darkMenu)
+            XCTAssertGreaterThan(onDark, 4.5, "\(name) is \(onDark):1 on the dark menu")
+            let onLight = contrastRatio(srgbComponents(color, .aqua), lightMenu)
+            XCTAssertGreaterThan(onLight, 3.0, "\(name) is \(onLight):1 on the light menu")
+            XCTAssertGreaterThan(
+                onLight,
+                contrastRatio(srgbComponents(AppDelegate.ownershipMetadata, .aqua), lightMenu) - 0.1,
+                "\(name) is dimmer in light mode than the grey it replaces"
+            )
+        }
     }
 }
