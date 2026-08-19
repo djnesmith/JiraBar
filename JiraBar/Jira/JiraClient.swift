@@ -754,7 +754,14 @@ public class JiraClient {
     }
 
     /// Returns the authenticated user (Cloud: accountId-bearing; Server: name-bearing). `nil` on failure.
+    ///
+    /// Guarded like `getIssuesByJql`: this now runs on every refresh for the TODO filter, so an
+    /// unconfigured instance would otherwise fire a doomed request on the timer forever.
     func getCurrentUser(completion: @escaping (JiraUser?) -> Void) {
+        guard isConfigured else {
+            completion(nil)
+            return
+        }
         let url = "\(baseUrl)/rest/api/\(apiVersion)/myself"
         AF.request(url, method: .get, parameters: nil, headers: authHeaders())
             .validate(statusCode: 200..<300)

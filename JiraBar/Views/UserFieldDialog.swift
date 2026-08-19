@@ -205,7 +205,7 @@ struct UserFieldDialog: View {
                 }
                 guard !existing.isEmpty else { return }
                 let matched: [JiraUser] = existing.map { candidate in
-                    availableUsers.first(where: { Self.sameUser($0, candidate) }) ?? candidate
+                    availableUsers.first(where: { $0.isSame(as: candidate) }) ?? candidate
                 }
                 selectedUsers = Set(matched)
                 arrangeSelectedFirst()
@@ -221,13 +221,6 @@ struct UserFieldDialog: View {
         let selectedNotInList = selectedUsers.filter { !availableUsers.contains($0) }
         let unselectedInList = availableUsers.filter { !selectedUsers.contains($0) }
         availableUsers = selectedInList + Array(selectedNotInList) + unselectedInList
-    }
-
-    private static func sameUser(_ a: JiraUser, _ b: JiraUser) -> Bool {
-        if let x = a.accountId, let y = b.accountId, !x.isEmpty, !y.isEmpty { return x == y }
-        if let x = a.name, let y = b.name, !x.isEmpty, !y.isEmpty { return x == y }
-        if let x = a.key, let y = b.key, !x.isEmpty, !y.isEmpty { return x == y }
-        return false
     }
 
     private func submit() {

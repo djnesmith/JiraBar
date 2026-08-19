@@ -65,9 +65,13 @@ Hovering over a PR row with any modifier held pops small accent-colored hint pil
 
 Set a **TODO JQL** in Preferences and a `TODO` entry appears above PRs Without Tickets, whose submenu lists the matching tickets — each carrying the same submenu it gets in the main list (transitions, copy shortcuts, comment/flag/upload, user-field shortcuts, PR rows). It's meant for the backlog your main JQL can't show: the main query is usually scoped to you, so the column you'd *pick from* is invisible. A query like `project = ABC AND status = "To Do" ORDER BY Rank ASC` gives you that.
 
+Tickets **already assigned to you are left out**, whatever your query says. The section answers "what would I pick up next", and a ticket that's already yours isn't a candidate — it's work in hand, and the status groups above are already showing it. Your own tickets are matched by your Jira account, not your display name, so a namesake's ticket still appears. If JiraBar can't establish who you are, nothing is filtered rather than something being hidden without explanation.
+
 Ordering follows the **Rank field id** when one is configured, which is what makes the submenu match board order. Without it, the order Jira returned is preserved untouched, so any `ORDER BY` in your query still applies. **TODO Max Results** caps the list separately from the main one, since a backlog usually wants a different depth.
 
-The per-ticket submenus are built the first time you open TODO, not on every refresh — each one costs a transitions call plus a dev-status call, so a 15-ticket backlog would otherwise multiply JiraBar's request volume for a menu you may never open. The section hides itself entirely when the query returns nothing.
+The per-ticket submenus are built the first time you open TODO, not on every refresh — each one costs a transitions call plus a dev-status call, so a 15-ticket backlog would otherwise multiply JiraBar's request volume for a menu you may never open. The section hides itself entirely when there's nothing left to show — whether the query came back empty or everything it returned was already yours.
+
+To keep your own tickets from eating into **TODO Max Results**, the search asks for roughly twice the cap and trims after filtering. That's headroom, not a guarantee: if your own tickets fill the top of the column past that margin, you'll see a short section — or none at all — even though unassigned backlog exists further down. Raise **TODO Max Results**, or scope the query past the tickets you're already holding.
 
 There's deliberately no default query. `status = "To Do"` with no project or board scope doesn't mean "my To Do column" — it means every To Do ticket in every project you can see, which after the result cap is a near-random sample. The query has to name your project or board to be meaningful, so it's yours to write.
 

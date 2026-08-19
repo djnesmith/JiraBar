@@ -248,7 +248,7 @@ private struct QuerySection: View {
             .font(.footnote)
         TextField("TODO JQL:", text: $todoJQL)
             .textFieldStyle(RoundedBorderTextFieldStyle())
-        Text("Optional. Adds a TODO entry whose submenu lists these tickets, each with the same submenu it gets in the main list. Meant for a backlog view your main JQL can't show — e.g. status = \"To Do\" ORDER BY Rank ASC for the whole column, not just your own tickets. Set the Rank field id below and the submenu follows board order.")
+        Text("Optional. Adds a TODO entry whose submenu lists these tickets, each with the same submenu it gets in the main list. Meant for a backlog view your main JQL can't show — e.g. status = \"To Do\" ORDER BY Rank ASC for the whole column, not just your own tickets. Tickets already assigned to you are left out, since they're work in hand rather than something to pick up next. Set the Rank field id below and the submenu follows board order.")
             .font(.footnote)
         TextField("TODO Max Results:", text: $todoMaxResults)
             .textFieldStyle(RoundedBorderTextFieldStyle())

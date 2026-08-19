@@ -27,7 +27,7 @@ struct Fields: Codable {
     var status: IssueStatus
     var issuetype: IssueType
     var project: Project
-    var assignee: User?
+    var assignee: JiraUser?
     
     enum CodingKeys: String, CodingKey {
         case summary
@@ -64,18 +64,8 @@ struct Project: Codable {
     }
 }
 
-struct User: Codable {
-    var name: String?
-    var displayName: String
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case displayName
-    }
-}
-
 //
-// MARK: assignable users
+// MARK: users
 //
 struct JiraUser: Codable, Identifiable, Hashable {
     /// Stable identifier for SwiftUI lists. Prefers accountId (Cloud) and falls back to name/key (Server).
@@ -86,7 +76,8 @@ struct JiraUser: Codable, Identifiable, Hashable {
         return "display:\(displayName)"
     }
 
-    /// Cloud-only stable identifier.
+    /// Cloud-only stable identifier. A search response's assignee carries this and omits `name`
+    /// entirely on Cloud, so it is the only field that identifies the assignee there.
     var accountId: String?
     /// Server/Data Center username.
     var name: String?
@@ -103,6 +94,17 @@ struct JiraUser: Codable, Identifiable, Hashable {
         case displayName
         case emailAddress
         case active
+    }
+
+    /// Whether this is the same person as `other`. Cloud identifies by accountId, Server/DC by
+    /// username and older installs by key — deliberately not displayName, which is not unique and
+    /// would confuse a namesake for the user.
+    func isSame(as other: JiraUser?) -> Bool {
+        guard let other else { return false }
+        if let x = accountId, let y = other.accountId, !x.isEmpty, !y.isEmpty { return x == y }
+        if let x = name, let y = other.name, !x.isEmpty, !y.isEmpty { return x == y }
+        if let x = key, let y = other.key, !x.isEmpty, !y.isEmpty { return x == y }
+        return false
     }
 }
 

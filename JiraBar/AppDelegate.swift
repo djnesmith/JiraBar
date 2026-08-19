@@ -459,12 +459,53 @@ extension AppDelegate {
     /// main result in any way, so waiting for it only widened the window where the section has
     /// nothing to show — by the full cost of the primary search (~0.3–0.5s against the author's
     /// instance, visible in the unified log as one Jira request wave strictly following another).
+    ///
+    /// The identity lookup the assigned-to-me filter needs runs alongside the search for the same
+    /// reason, and is fetched per refresh rather than cached: it is one small GET that the search
+    /// it races is already paying for, and a cache would outlive a credentials change made in
+    /// Preferences and go on filtering against the previous account.
+    ///
+    /// The filter is applied to the decoded rows rather than spliced into the query as `AND
+    /// assignee != currentUser()`, which would be cheaper on the wire and need no `/myself` at all.
+    /// The query is the user's text and ours to run, not to rewrite: it may already end in an
+    /// `ORDER BY` that naive appending would land inside, and a JQL edit that silently changes what
+    /// their own query means is worse than a request. Excluding after the fact is also what the
+    /// menu's other overlap filter does — see `recentlySeenRows`.
     private func startTodoFetch() -> PendingSection<[Issue]>? {
         guard let query = AppDelegate.configuredQuery(todoJQL) else { return nil }
 
+        let wanted = AppDelegate.maxResultsSetting(todoMaxResults)
         let pending = PendingSection<[Issue]>()
-        jiraClient.getIssuesByJql(jql: query, maxResults: todoMaxResults) { resp, ranks in
-            pending.deliver(AppDelegate.orderedByRank(resp.issues ?? [], ranks: ranks))
+        let group = DispatchGroup()
+        // Safe to write from both completions and read from the notify: Alamofire's default
+        // response queue is main, which is also where the notify runs.
+        var fetched: [Issue] = []
+        var ranks: [String: String] = [:]
+        var me: JiraUser?
+
+        group.enter()
+        jiraClient.getIssuesByJql(
+            jql: query,
+            maxResults: AppDelegate.todoFetchSize(wanted) ?? todoMaxResults
+        ) { resp, fetchedRanks in
+            fetched = resp.issues ?? []
+            ranks = fetchedRanks
+            group.leave()
+        }
+
+        group.enter()
+        jiraClient.getCurrentUser { user in
+            me = user
+            group.leave()
+        }
+
+        group.notify(queue: .main) {
+            // Trim to the cap before the rank sort, not after. The search over-fetches, and rank
+            // sorting the whole over-fetch would let the cap select by rank instead of by the
+            // user's own ORDER BY — a different set of tickets on any query not already ordered by
+            // rank, which is not a change this section's filter has any business making.
+            let rows = AppDelegate.todoRows(fetched, excluding: me, limit: wanted)
+            pending.deliver(AppDelegate.orderedByRank(rows, ranks: ranks))
         }
         return pending
     }
@@ -488,14 +529,15 @@ extension AppDelegate {
         menu.addItem(separator)
         menu.addItem(header)
 
-        let wanted = Int(recentlyApprovedMaxResults) ?? 10
+        // Floored at zero because `prefix` traps on a negative, and this is a free-text field.
+        let wanted = max(AppDelegate.maxResultsSetting(recentlyApprovedMaxResults) ?? 10, 0)
         let delegate = LazyMenuDelegate { [weak self] in
             guard let self else { return }
             // Over-fetched because the approval filter runs after the search: `reviewed-by` includes PRs
             // whose latest review is a comment or a change request, so asking for exactly `wanted` would
             // land short.
             let client = GithubClient()
-            client.searchReviewedByMe(orgs: orgs, token: token, limit: max(wanted * 2, wanted + 5)) { prs in
+            client.searchReviewedByMe(orgs: orgs, token: token, limit: AppDelegate.overFetchCount(wanted)) { prs in
                 guard !prs.isEmpty else { return }
                 self.fetchGithubStatuses(for: prs) { statusByURL in
                     let approved = Array(
@@ -554,6 +596,52 @@ extension AppDelegate {
     static func recentlySeenRows(_ seen: [Issue], alreadyShown: [Issue]) -> [Issue] {
         let shown = Set(alreadyShown.map(\.key))
         return seen.filter { !shown.contains($0.key) }
+    }
+
+    /// TODO rows minus the ones already assigned to you, capped at the configured maximum.
+    ///
+    /// The section answers "what would I pick up next", so a ticket that is already yours is not a
+    /// candidate — it is work in hand, and the status groups above are already showing it.
+    ///
+    /// A nil `me` — the identity lookup failed — filters nothing. Dropping rows because we could
+    /// not establish who you are would hide work with nothing on screen to explain the gap; one row
+    /// too many is the safer way to be wrong, and is what the section did before this filter.
+    static func todoRows(_ issues: [Issue], excluding me: JiraUser?, limit: Int?) -> [Issue] {
+        let rows = issues.filter { !($0.fields.assignee?.isSame(as: me) ?? false) }
+        guard let limit, limit > 0 else { return rows }
+        return Array(rows.prefix(limit))
+    }
+
+    /// How many rows to ask for when a section filters its results after the search, so the
+    /// configured cap survives the filter. Shared by TODO and Recently Approved, which over-fetch
+    /// for the same reason and must not drift apart.
+    ///
+    /// Headroom, not a guarantee — if the filtered-out rows outnumber it the section shows fewer
+    /// than the cap rather than paging, which is the right trade for a menu.
+    ///
+    /// Saturating rather than plain arithmetic because "TODO Max Results" and "Recently Approved
+    /// Max Results" are both free-text fields, so `Int.max` parses straight out of either. A trap
+    /// here is unrecoverable: the crash lands on the refresh that runs at launch, so Preferences
+    /// never opens again to take the bad value back out.
+    static func overFetchCount(_ wanted: Int) -> Int {
+        let (doubled, overflowed) = wanted.multipliedReportingOverflow(by: 2)
+        return overflowed ? Int.max : max(doubled, wanted + 5)
+    }
+
+    /// A section's "Max Results" setting as a number, or nil when it isn't one.
+    ///
+    /// The trim is the point. These are free-text fields, and a pasted " 15 " parsed to nil before
+    /// this existed — which on the TODO side meant Jira received a non-integer `maxResults` and the
+    /// configured cap was not honoured at all. It now also feeds the client-side cap, where a
+    /// dropped trim would produce an uncapped menu rather than a visible parse error.
+    static func maxResultsSetting(_ raw: String) -> Int? {
+        Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The TODO search's `maxResults`, or nil when there is no number to scale.
+    static func todoFetchSize(_ wanted: Int?) -> String? {
+        guard let wanted, wanted > 0 else { return nil }
+        return String(overFetchCount(wanted))
     }
 
     /// A configured section's query, or nil when it is switched off. Empty means absent rather than
@@ -1882,13 +1970,7 @@ extension AppDelegate {
             self.jiraClient.getCurrentUser { me in
                 DispatchQueue.main.async {
                     status.jiraAssigneeName = assignee?.displayName
-                    if let a = assignee?.accountId, let m = me?.accountId, !a.isEmpty, !m.isEmpty {
-                        status.jiraAssignedToMe = (a == m)
-                    } else if let a = assignee?.name, let m = me?.name, !a.isEmpty, !m.isEmpty {
-                        status.jiraAssignedToMe = (a == m)
-                    } else {
-                        status.jiraAssignedToMe = false
-                    }
+                    status.jiraAssignedToMe = assignee?.isSame(as: me) ?? false
                 }
             }
         }

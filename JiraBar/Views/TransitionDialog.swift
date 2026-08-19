@@ -1129,7 +1129,7 @@ struct TransitionDialog: View {
     private func applyPrefill(_ candidates: [JiraUser], wasCurrentUser: Bool = false) {
         guard !candidates.isEmpty else { return }
         let matched: [JiraUser] = candidates.map { candidate in
-            availableUsers.first(where: { Self.sameUser($0, candidate) }) ?? candidate
+            availableUsers.first(where: { $0.isSame(as: candidate) }) ?? candidate
         }
         selectedUsers = Set(matched)
         // Remembered so a required field satisfied purely by a prefill can say so. Cleared by the
@@ -1146,13 +1146,6 @@ struct TransitionDialog: View {
         let selectedNotInList = selectedUsers.filter { !availableUsers.contains($0) }
         let unselectedInList = availableUsers.filter { !selectedUsers.contains($0) }
         availableUsers = selectedInList + Array(selectedNotInList) + unselectedInList
-    }
-
-    private static func sameUser(_ a: JiraUser, _ b: JiraUser) -> Bool {
-        if let x = a.accountId, let y = b.accountId, !x.isEmpty, !y.isEmpty { return x == y }
-        if let x = a.name, let y = b.name, !x.isEmpty, !y.isEmpty { return x == y }
-        if let x = a.key, let y = b.key, !x.isEmpty, !y.isEmpty { return x == y }
-        return false
     }
 
     private func dialogHeight() -> CGFloat {

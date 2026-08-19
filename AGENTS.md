@@ -63,9 +63,12 @@ Practical guidance for AI agents working on JiraBar.
 - `Base.lproj/Main.storyboard` contains a dead scene referencing a deleted `ViewController`
   class; the scene never instantiates (`visibleAtLaunch="NO"`), the storyboard itself is
   still needed (`INFOPLIST_KEY_NSMainStoryboardFile` wires NSApplication/main menu)
-- The user-picker UI (filter/row/toggle/arrange/sameUser) is duplicated across
+- The user-picker UI (filter/row/toggle/arrange) is duplicated across
   `TransitionDialog` and `UserFieldDialog`, with a diverging variant in `BulkMoveDialog` —
-  extraction deferred because it's SwiftUI with no test coverage possible
+  extraction deferred because it's SwiftUI with no test coverage possible. The identity
+  match is not part of that: it lives in `JiraUser.isSame(as:)` (`JiraDtos.swift`). Note
+  `JiraUser.id` tiers the same three fields for a different purpose — it must never be nil,
+  so it falls back to displayName, which `isSame` must never do
 
 ## Entitlements
 
