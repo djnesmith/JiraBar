@@ -150,16 +150,28 @@ struct UserFieldDialog: View {
         .onTapGesture { toggle(user) }
     }
 
+    /// What the *picker* should allow, which is not always what the shortcut says: a field Jira defines
+    /// as single stays single here too, or tapping a second name would accumulate a selection the field
+    /// cannot hold and the write would then pick one of them arbitrarily.
+    private var allowsMultiple: Bool {
+        JiraClient.isMultiValuedUserField(
+            fieldId: shortcut.fieldId, configuredMultiple: shortcut.allowsMultiple
+        )
+    }
+
     private func toggle(_ user: JiraUser) {
-        if selectedUsers.contains(user) {
-            selectedUsers.remove(user)
-        } else {
-            if shortcut.allowsMultiple {
-                selectedUsers.insert(user)
-            } else {
-                selectedUsers = [user]
-            }
-        }
+        selectedUsers = UserFieldDialog.selection(
+            afterTapping: user, current: selectedUsers, multi: allowsMultiple
+        )
+    }
+
+    /// Tapping a name toggles it. On a single-valued field a new name replaces the old one rather than
+    /// joining it — which is what makes "Change" a change rather than an ambiguous pair.
+    static func selection(
+        afterTapping user: JiraUser, current: Set<JiraUser>, multi: Bool
+    ) -> Set<JiraUser> {
+        if current.contains(user) { return current.subtracting([user]) }
+        return multi ? current.union([user]) : [user]
     }
 
     private func loadUsers() {
@@ -223,7 +235,7 @@ struct UserFieldDialog: View {
         submitting = true
         submitError = nil
         let flag = showGithubMirrorCheckbox && updateGithub
-        onSubmit(Array(selectedUsers), flag) { success in
+        onSubmit(selectedUsers.sorted { $0.id < $1.id }, flag) { success in
             if !success {
                 submitting = false
                 // The dialog stays open on failure, and until this existed the only sign anything had

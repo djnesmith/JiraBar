@@ -1574,3 +1574,56 @@ final class UserFieldPayloadTests: XCTestCase {
         XCTAssertEqual(JiraClient.userFieldPayload(references: [], multi: true) as? [[String: String]], [])
     }
 }
+
+/// The picker half of a user-field edit. The payload shape was only half the assignee bug: the write
+/// can be the right shape and still carry the wrong person if the picker let two names accumulate on a
+/// field that holds one.
+final class UserFieldSelectionTests: XCTestCase {
+
+    private func user(_ id: String) -> JiraUser {
+        var u = JiraUser(displayName: "User \(id)")
+        u.accountId = id
+        return u
+    }
+
+    /// "Change Assignee": someone is already selected and you tap a different name. On a single-valued
+    /// field that must *replace*, not add — otherwise the write picks one of the two arbitrarily, and
+    /// `selectedUsers` is a Set, so which one is not even stable between runs.
+    func testTappingANewNameOnASingleFieldReplacesTheCurrentOne() {
+        let current: Set<JiraUser> = [user("old")]
+        let after = UserFieldDialog.selection(afterTapping: user("new"), current: current, multi: false)
+        XCTAssertEqual(after.map(\.accountId), ["new"])
+    }
+
+    /// "Add Assignee": nothing selected yet, which is the empty→one case.
+    func testTappingANameOnAnEmptySingleFieldSelectsIt() {
+        let after = UserFieldDialog.selection(afterTapping: user("me"), current: [], multi: false)
+        XCTAssertEqual(after.map(\.accountId), ["me"])
+    }
+
+    func testTappingANewNameOnAMultiFieldAddsToTheSelection() {
+        let current: Set<JiraUser> = [user("a")]
+        let after = UserFieldDialog.selection(afterTapping: user("b"), current: current, multi: true)
+        XCTAssertEqual(Set(after.compactMap(\.accountId)), ["a", "b"])
+    }
+
+    /// Tapping a selected name always deselects, on either kind of field.
+    func testTappingASelectedNameDeselectsIt() {
+        for multi in [true, false] {
+            let current: Set<JiraUser> = [user("a"), user("b")]
+            let after = UserFieldDialog.selection(afterTapping: user("a"), current: current, multi: multi)
+            XCTAssertEqual(Set(after.compactMap(\.accountId)), ["b"], "multi: \(multi)")
+        }
+    }
+
+    /// The picker has to take its cue from the same override the write does, or a shortcut ticked
+    /// "Multi" against `assignee` puts the two back out of step — which is the state this shipped in.
+    func testAssigneeStaysSingleInThePickerEvenWhenTheShortcutSaysMulti() {
+        let multi = JiraClient.isMultiValuedUserField(fieldId: "assignee", configuredMultiple: true)
+        XCTAssertFalse(multi)
+
+        let current: Set<JiraUser> = [user("old")]
+        let after = UserFieldDialog.selection(afterTapping: user("new"), current: current, multi: multi)
+        XCTAssertEqual(after.map(\.accountId), ["new"], "two names on assignee is the ambiguous write")
+    }
+}
