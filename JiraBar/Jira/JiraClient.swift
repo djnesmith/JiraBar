@@ -317,14 +317,14 @@ public class JiraClient {
                 // Empty `users` is intentional — clear the field (empty array for multi,
                 // null for single). Callers pre-populate from the current issue value,
                 // so an empty picker means "remove the existing users".
+                //
+                // Same shape rule as `setIssueUsers`, and for the same reason: a transition prompt
+                // targeting `assignee` would otherwise write an array that Jira accepts and drops.
                 let refs = users.compactMap(userReference(for:))
-                if multi {
-                    fields[fieldId] = refs
-                } else if let first = refs.first {
-                    fields[fieldId] = first
-                } else {
-                    fields[fieldId] = NSNull()
-                }
+                fields[fieldId] = JiraClient.userFieldPayload(
+                    references: refs,
+                    multi: JiraClient.isMultiValuedUserField(fieldId: fieldId, configuredMultiple: multi)
+                )
             case .text(let fieldId, let value):
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
@@ -641,6 +641,30 @@ public class JiraClient {
 
     /// Sets a user-picker field on an issue. Empty `users` clears the field
     /// (empty array for multi-user fields, JSON null for single-user fields).
+    /// Jira's own user fields, which are single-valued no matter what a shortcut is configured to say.
+    ///
+    /// The shape of these cannot be left to configuration, because getting it wrong is not an error.
+    /// Verified against a live Cloud instance: `PUT {"fields":{"assignee":[{...}]}}` returns **204 No
+    /// Content** and silently discards the value — the issue stays unassigned. A *custom* field rejects
+    /// the same mistake loudly (`400 "data was not an array"`), so only the system fields fail quietly,
+    /// which is exactly why this went unnoticed.
+    static let singleValuedUserFields: Set<String> = ["assignee", "reporter"]
+
+    /// Whether a user field takes an array, given what the shortcut claims. A shortcut may not claim
+    /// multi for a field Jira defines as single.
+    static func isMultiValuedUserField(fieldId: String, configuredMultiple: Bool) -> Bool {
+        if singleValuedUserFields.contains(fieldId.trimmingCharacters(in: .whitespaces).lowercased()) {
+            return false
+        }
+        return configuredMultiple
+    }
+
+    /// The value to write for a user field: an array for multi-valued fields, a bare object for single
+    /// ones, and empty/null to clear.
+    static func userFieldPayload(references: [[String: String]], multi: Bool) -> Any {
+        multi ? references : (references.first ?? NSNull())
+    }
+
     func setIssueUsers(
         issueKey: String,
         fieldId: String,
@@ -649,14 +673,36 @@ public class JiraClient {
         completion: @escaping (Bool) -> Void
     ) {
         let refs = users.compactMap(userReference(for:))
-        let value: Any
-        if multi {
-            value = refs
-        } else {
-            value = refs.first ?? NSNull()
-        }
-        updateIssueFields(issueKey: issueKey, fields: [fieldId: value]) { success, _ in
-            completion(success)
+        let multi = JiraClient.isMultiValuedUserField(fieldId: fieldId, configuredMultiple: multi)
+        let value = JiraClient.userFieldPayload(references: refs, multi: multi)
+
+        updateIssueFields(issueKey: issueKey, fields: [fieldId: value]) { [self] success, _ in
+            guard success else {
+                completion(false)
+                return
+            }
+            // A 204 from Jira means "request accepted", not "field written" — see
+            // `singleValuedUserFields`. The only way to know a user-field write landed is to read it
+            // back, and this is a user-initiated action, so one extra GET is worth not lying to them.
+            getIssueFieldUsers(issueKey: issueKey, fieldId: fieldId) { readBack in
+                guard let readBack else {
+                    // The field is not on the issue's screen, or the read itself failed. That is not
+                    // evidence the write was dropped, and claiming failure on no evidence would be its
+                    // own kind of lie.
+                    completion(true)
+                    return
+                }
+                let wanted = Set(users.map(\.id))
+                let got = Set(readBack.map(\.id))
+                guard wanted == got else {
+                    sendNotification(
+                        body: "\(issueKey): Jira accepted the change but \(fieldId) did not update."
+                    )
+                    completion(false)
+                    return
+                }
+                completion(true)
+            }
         }
     }
 

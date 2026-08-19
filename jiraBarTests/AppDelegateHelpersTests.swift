@@ -1496,3 +1496,81 @@ final class RecentlySeenTests: XCTestCase {
         XCTAssertEqual(Defaults[.recentlySeenMaxResults], "42")
     }
 }
+
+/// The shape of a user-field write. Getting this wrong on a *system* field is not an error — Jira
+/// returns 204 and discards the value — so the shape cannot be left to the shortcut's configuration.
+/// Verified against a live Cloud instance: `assignee` given an array stayed unassigned, while the same
+/// mistake on a custom field returned `400 "data was not an array"`.
+final class UserFieldPayloadTests: XCTestCase {
+
+    private func user(_ accountId: String) -> JiraUser {
+        var u = JiraUser(displayName: "User \(accountId)")
+        u.accountId = accountId
+        return u
+    }
+
+    // MARK: - which fields take an array
+
+    /// The bug: the shortcut said multi, Jira says otherwise, and Jira wins.
+    func testJirasOwnUserFieldsAreSingleWhateverTheShortcutClaims() {
+        for field in ["assignee", "reporter", "Assignee", "  ASSIGNEE  "] {
+            XCTAssertFalse(
+                JiraClient.isMultiValuedUserField(fieldId: field, configuredMultiple: true),
+                "\(field) must never be written as an array"
+            )
+            XCTAssertFalse(JiraClient.isMultiValuedUserField(fieldId: field, configuredMultiple: false))
+        }
+    }
+
+    /// Custom fields are the caller's to describe — the app has no way to know their arity.
+    func testCustomFieldsFollowTheShortcut() {
+        XCTAssertTrue(JiraClient.isMultiValuedUserField(fieldId: "customfield_12345", configuredMultiple: true))
+        XCTAssertFalse(JiraClient.isMultiValuedUserField(fieldId: "customfield_12345", configuredMultiple: false))
+    }
+
+    // MARK: - the payload itself
+
+    /// The exact case that failed: an empty field gaining its first user.
+    func testAssigningOneUserToAnEmptySingleFieldSendsABareObject() {
+        let multi = JiraClient.isMultiValuedUserField(fieldId: "assignee", configuredMultiple: true)
+        let payload = JiraClient.userFieldPayload(references: [["accountId": "abc"]], multi: multi)
+
+        let object = payload as? [String: String]
+        XCTAssertEqual(object, ["accountId": "abc"], "assignee must be an object, not an array")
+        XCTAssertNil(payload as? [[String: String]], "an array here is the 204-and-discard bug")
+    }
+
+    /// The same case on a genuine multi field, which is the shape that already worked.
+    func testAddingOneUserToAnEmptyMultiFieldSendsAOneElementArray() {
+        let multi = JiraClient.isMultiValuedUserField(fieldId: "customfield_12345", configuredMultiple: true)
+        let payload = JiraClient.userFieldPayload(references: [["accountId": "abc"]], multi: multi)
+
+        XCTAssertEqual(payload as? [[String: String]], [["accountId": "abc"]])
+        XCTAssertNil(payload as? [String: String], "a bare object here is a 400 from Jira")
+    }
+
+    func testAddingToAPopulatedMultiFieldSendsEveryUser() {
+        let payload = JiraClient.userFieldPayload(
+            references: [["accountId": "a"], ["accountId": "b"]], multi: true
+        )
+        XCTAssertEqual(payload as? [[String: String]], [["accountId": "a"], ["accountId": "b"]])
+    }
+
+    /// A single field only ever carries one, so a caller handing over several must not produce an array.
+    func testASingleFieldTakesTheFirstUserRatherThanAnArray() {
+        let payload = JiraClient.userFieldPayload(
+            references: [["accountId": "a"], ["accountId": "b"]], multi: false
+        )
+        XCTAssertEqual(payload as? [String: String], ["accountId": "a"])
+    }
+
+    // MARK: - clearing
+
+    func testClearingASingleFieldSendsNull() {
+        XCTAssertTrue(JiraClient.userFieldPayload(references: [], multi: false) is NSNull)
+    }
+
+    func testClearingAMultiFieldSendsAnEmptyArray() {
+        XCTAssertEqual(JiraClient.userFieldPayload(references: [], multi: true) as? [[String: String]], [])
+    }
+}

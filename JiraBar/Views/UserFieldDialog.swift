@@ -17,6 +17,7 @@ struct UserFieldDialog: View {
     @State private var filter: String = ""
     @State private var loading: Bool = false
     @State private var loadError: String?
+    @State private var submitError: String?
     @State private var submitting: Bool = false
     @State private var updateGithub: Bool = true
 
@@ -104,6 +105,13 @@ struct UserFieldDialog: View {
             }
 
             Spacer(minLength: 0)
+
+            if let submitError {
+                Text(submitError)
+                    .foregroundColor(.red)
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack {
                 HiddenSubmitButton(disabled: submitting) { submit() }
@@ -213,9 +221,17 @@ struct UserFieldDialog: View {
     private func submit() {
         guard !submitting else { return }
         submitting = true
+        submitError = nil
         let flag = showGithubMirrorCheckbox && updateGithub
         onSubmit(Array(selectedUsers), flag) { success in
-            if !success { submitting = false }
+            if !success {
+                submitting = false
+                // The dialog stays open on failure, and until this existed the only sign anything had
+                // gone wrong was a notification — which is missable, and absent entirely if the user
+                // ever declined notification permission. A write that did not happen has to say so
+                // where the user is already looking.
+                submitError = "Couldn't save. The field is unchanged — see the notification for why."
+            }
         }
     }
 }
