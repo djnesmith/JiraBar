@@ -1145,36 +1145,40 @@ extension AppDelegate {
                     )
                 )
         }
-        issueItem.attributedTitle = title
+        // Last on the metadata line, past the issue type and the status. The row is scanned
+        // left-to-right for the summary and then the key, and a marker ahead of either pushes both
+        // off the edge the eye starts from; trailing, it reads as an annotation on the row rather
+        // than a change to how the row begins.
+        //
         // Only a known flag gets a marker. Unknown renders like unflagged here, unlike the menu
         // label — a row has no third appearance to offer, and a "we didn't ask" glyph on tickets
         // whose field isn't on their screen would be permanent noise on every one of them. The
         // label is where the three-state distinction is load-bearing, because that is the one that
         // proposes an action; see `flagItemTitle`.
         if issueFlags[issue.key] == true {
-            issueItem.image = AppDelegate.flagRowImage
+            title
+                .appendSeparator()
+                .appendImage(AppDelegate.flagRowImage)
         }
+        issueItem.attributedTitle = title
         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
         return issueItem
     }
 
     /// The flag marker for a ticket row.
     ///
-    /// `NSMenuItem.image` rather than a run inside the attributed title: the title is where the
-    /// issue-key and issue-type colours live, and an attachment appended there would have to be
-    /// tinted by hand for light and dark and would push the two-line layout around.
-    ///
-    /// NSMenu sizes one image gutter per menu, so a section gains that gutter the moment any row in
-    /// it is flagged. In the main menu nothing moves — Refresh and its neighbours already carry
-    /// images. The TODO and history submenus hold ticket rows only, so there the whole section
-    /// indents while it has a flagged ticket in it. Accepted: it is a uniform shift of one gutter,
-    /// and the alternative is reserving that space on every menu forever to keep an empty column
-    /// stable.
+    /// Inline in the attributed title rather than `NSMenuItem.image`. The image slot is fixed at the
+    /// leading edge, ahead of the summary — and NSMenu sizes one image gutter per menu, so a single
+    /// flagged ticket indents every row of a submenu that holds ticket rows only (TODO and the
+    /// history sections). An attachment costs neither.
     ///
     /// Explicitly non-template with a palette colour. A template image is repainted in the menu's
     /// own label colour, which would make the flag black-on-light and white-on-dark — legible, but
     /// indistinguishable from an ordinary glyph. `.systemRed` is dynamic, so it stays legible in
     /// both appearances without a second asset.
+    ///
+    /// The palette configuration survives into the text attachment — the drawn glyph is red, not the
+    /// label colour, confirmed by rasterising the row and sampling it (`FlagRowMarkerTests`).
     static let flagRowImage: NSImage? = {
         let config = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
         let image = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: "Flagged")?

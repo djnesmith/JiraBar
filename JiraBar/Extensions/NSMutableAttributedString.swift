@@ -28,17 +28,31 @@ extension NSMutableAttributedString {
 
     @discardableResult
     func appendIcon(iconName: String, color: NSColor = NSColor.gray) -> NSMutableAttributedString {
-        let image = NSImage(named: iconName)?.tint(color: color)
-        image?.size = NSSize(width: 12, height: 12)
-        let image1Attachment = NSTextAttachment()
-        image1Attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
-        image1Attachment.image = image
-        let image1String = NSMutableAttributedString(attachment: image1Attachment)
-        let range = NSMakeRange(0,image1String.length)
-        image1String.addAttribute(NSAttributedString.Key.baselineOffset, value: -1.0, range: range)
-        self.append(image1String)
+        appendImage(NSImage(named: iconName)?.tint(color: color))
         self.appendString(string: " ")
-        
+
+        return self
+    }
+
+    /// Appends an already-built image inline, sized and baselined to sit with the text.
+    ///
+    /// Split out of `appendIcon` so a caller that has an image rather than an asset name — an SF
+    /// Symbol carrying its own colour, which `NSImage(named:)` cannot load — can use the same
+    /// sizing and baseline. No trailing space: a trailing icon is the end of the line.
+    @discardableResult
+    func appendImage(_ image: NSImage?, size: CGFloat = 12) -> NSMutableAttributedString {
+        image?.size = NSSize(width: size, height: size)
+        let attachment = NSTextAttachment()
+        attachment.attachmentCell = NSTextAttachmentCell(imageCell: image)
+        attachment.image = image
+        let imageString = NSMutableAttributedString(attachment: attachment)
+        imageString.addAttribute(
+            .baselineOffset,
+            value: -1.0,
+            range: NSMakeRange(0, imageString.length)
+        )
+        self.append(imageString)
+
         return self
     }
 
