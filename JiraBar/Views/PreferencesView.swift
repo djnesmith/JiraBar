@@ -286,7 +286,7 @@ private struct QuerySection: View {
             .font(.footnote)
         TextField("Flag field id:", text: $flagFieldId)
             .textFieldStyle(RoundedBorderTextFieldStyle())
-        Text("Optional. Field id for Jira's Flagged custom field (commonly customfield_10021 on Cloud). When set, an Add Flag entry appears in each ticket's submenu.")
+        Text("Optional. Field id for Jira's Flagged custom field (commonly customfield_10021 on Cloud). When set, each ticket's submenu gets an Add Flag entry — Remove Flag if it is already flagged — and flagged tickets show a red flag on their row.")
             .font(.footnote)
         TextField("Rank field id:", text: $rankFieldId)
             .textFieldStyle(RoundedBorderTextFieldStyle())

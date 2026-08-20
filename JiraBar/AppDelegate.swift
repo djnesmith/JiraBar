@@ -199,6 +199,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// bulk-move dialog has a list of candidates without a fresh API call.
     private var lastIssues: [Issue] = []
 
+    /// Flag state for every issue this refresh's searches reported on, keyed by issue key.
+    ///
+    /// **A missing key is unknown, not unflagged** — see `JiraClient.IssueExtras.flags`. Shared
+    /// across all four searches rather than threaded through each section because it is also read
+    /// by `attachIssueSubmenu`, which for TODO and the history sections runs on hover, long after
+    /// the search that answered for that row has returned.
+    ///
+    /// Two searches can disagree about the same key — the TODO and Recently Seen queries overlap
+    /// the main list, which is why `todoRows` and `recentlySeenRows` exist — but both answers
+    /// describe the same ticket seconds apart, so last-write-wins within one refresh is fine.
+    /// Across refreshes it is not: see `refreshGeneration`.
+    private var issueFlags: [String: Bool] = [:]
+
+    /// Which refresh `issueFlags` currently describes.
+    ///
+    /// `isRefreshing` cannot stand in for this. It is cleared by the *main* search's completion,
+    /// while the three section searches are still in flight — so a refresh triggered right after
+    /// the main list lands (which is exactly what `setFlag` does on success) races them. Without a
+    /// generation check the losing refresh's answer overwrites the winner's, and a ticket whose
+    /// flag was just cleared renders with no icon while its submenu still offers "Remove Flag".
+    private var refreshGeneration = 0
+
     /// Strong references to the submenu delegates (per-issue field-value loaders and the TODO
     /// section's lazy builder). `NSMenu.delegate` is a weak reference, so without this they'd
     /// be released the moment refreshMenu finished and their deferred work would never fire.
@@ -281,6 +303,9 @@ extension AppDelegate {
         NSLog("Refreshing menu")
         self.menu.removeAllItems()
         self.submenuDelegates.removeAll()
+        self.issueFlags.removeAll()
+        self.refreshGeneration += 1
+        let generation = self.refreshGeneration
 
         // PRs Without Tickets section: the GitHub search runs in parallel with the Jira fetch, and the
         // per-issue PR collection below feeds the exclusion set (a PR already rendered under
@@ -308,8 +333,10 @@ extension AppDelegate {
             }
         }
 
-        jiraClient.getIssuesByJql() { resp, ranks in
+        jiraClient.getIssuesByJql() { resp, extras in
             self.isRefreshing = false
+            self.recordFlags(extras.flags, generation: generation)
+            let ranks = extras.ranks
             if let issues = resp.issues {
                 self.lastIssues = issues
                 self.statusBarItem.button?.title = String(issues.count)
@@ -474,6 +501,7 @@ extension AppDelegate {
     private func startTodoFetch() -> PendingSection<[Issue]>? {
         guard let query = AppDelegate.configuredQuery(todoJQL) else { return nil }
 
+        let generation = refreshGeneration
         let wanted = AppDelegate.maxResultsSetting(todoMaxResults)
         let pending = PendingSection<[Issue]>()
         let group = DispatchGroup()
@@ -487,9 +515,10 @@ extension AppDelegate {
         jiraClient.getIssuesByJql(
             jql: query,
             maxResults: AppDelegate.todoFetchSize(wanted) ?? todoMaxResults
-        ) { resp, fetchedRanks in
+        ) { resp, extras in
             fetched = resp.issues ?? []
-            ranks = fetchedRanks
+            ranks = extras.ranks
+            self.recordFlags(extras.flags, generation: generation)
             group.leave()
         }
 
@@ -568,8 +597,10 @@ extension AppDelegate {
     private func startRecentlyClosedFetch() -> PendingSection<[Issue]>? {
         guard let query = AppDelegate.configuredQuery(recentlyClosedJQL) else { return nil }
 
+        let generation = refreshGeneration
         let pending = PendingSection<[Issue]>()
-        jiraClient.getIssuesByJql(jql: query, maxResults: recentlyClosedMaxResults) { resp, _ in
+        jiraClient.getIssuesByJql(jql: query, maxResults: recentlyClosedMaxResults) { resp, extras in
+            self.recordFlags(extras.flags, generation: generation)
             pending.deliver(resp.issues ?? [])
         }
         return pending
@@ -580,11 +611,22 @@ extension AppDelegate {
     private func startRecentlySeenFetch() -> PendingSection<[Issue]>? {
         guard let query = AppDelegate.configuredQuery(recentlySeenJQL) else { return nil }
 
+        let generation = refreshGeneration
         let pending = PendingSection<[Issue]>()
-        jiraClient.getIssuesByJql(jql: query, maxResults: recentlySeenMaxResults) { resp, _ in
+        jiraClient.getIssuesByJql(jql: query, maxResults: recentlySeenMaxResults) { resp, extras in
+            self.recordFlags(extras.flags, generation: generation)
             pending.deliver(resp.issues ?? [])
         }
         return pending
+    }
+
+    /// Records what one search learned about flag state, unless a newer refresh has since started.
+    ///
+    /// The drop is the point — see `refreshGeneration`. A late answer from a superseded refresh is
+    /// about the same tickets but from before whatever the user just did to them.
+    private func recordFlags(_ flags: [String: Bool], generation: Int) {
+        guard generation == refreshGeneration else { return }
+        issueFlags.merge(flags) { _, new in new }
     }
 
     /// Recently Seen rows that are not already on screen in the main list.
@@ -1104,9 +1146,42 @@ extension AppDelegate {
                 )
         }
         issueItem.attributedTitle = title
+        // Only a known flag gets a marker. Unknown renders like unflagged here, unlike the menu
+        // label — a row has no third appearance to offer, and a "we didn't ask" glyph on tickets
+        // whose field isn't on their screen would be permanent noise on every one of them. The
+        // label is where the three-state distinction is load-bearing, because that is the one that
+        // proposes an action; see `flagItemTitle`.
+        if issueFlags[issue.key] == true {
+            issueItem.image = AppDelegate.flagRowImage
+        }
         issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
         return issueItem
     }
+
+    /// The flag marker for a ticket row.
+    ///
+    /// `NSMenuItem.image` rather than a run inside the attributed title: the title is where the
+    /// issue-key and issue-type colours live, and an attachment appended there would have to be
+    /// tinted by hand for light and dark and would push the two-line layout around.
+    ///
+    /// NSMenu sizes one image gutter per menu, so a section gains that gutter the moment any row in
+    /// it is flagged. In the main menu nothing moves — Refresh and its neighbours already carry
+    /// images. The TODO and history submenus hold ticket rows only, so there the whole section
+    /// indents while it has a flagged ticket in it. Accepted: it is a uniform shift of one gutter,
+    /// and the alternative is reserving that space on every menu forever to keep an empty column
+    /// stable.
+    ///
+    /// Explicitly non-template with a palette colour. A template image is repainted in the menu's
+    /// own label colour, which would make the flag black-on-light and white-on-dark — legible, but
+    /// indistinguishable from an ordinary glyph. `.systemRed` is dynamic, so it stays legible in
+    /// both appearances without a second asset.
+    static let flagRowImage: NSImage? = {
+        let config = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
+        let image = NSImage(systemSymbolName: "flag.fill", accessibilityDescription: "Flagged")?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = false
+        return image
+    }()
 
     /// Fetches the ticket's transitions and linked PRs, then hangs the full per-issue submenu
     /// off `item`: transitions, the copy shortcuts, comment/flag/upload, the configured
@@ -1162,9 +1237,16 @@ extension AppDelegate {
             issueMenu.addItem(addCommentItem)
 
             if !self.flagFieldId.trimmingCharacters(in: .whitespaces).isEmpty {
-                let addFlagItem = NSMenuItem(title: "Add Flag", action: #selector(self.addFlagToIssue), keyEquivalent: "")
-                addFlagItem.representedObject = issue.key
-                issueMenu.addItem(addFlagItem)
+                let flagged = self.issueFlags[issue.key]
+                let flagItem = NSMenuItem(
+                    title: AppDelegate.flagItemTitle(flagged: flagged),
+                    action: flagged == true
+                        ? #selector(self.removeFlagFromIssue)
+                        : #selector(self.addFlagToIssue),
+                    keyEquivalent: ""
+                )
+                flagItem.representedObject = issue.key
+                issueMenu.addItem(flagItem)
             }
 
             let uploadItem = NSMenuItem(title: "Upload Files", action: #selector(self.openUploadFiles), keyEquivalent: "")
@@ -1402,10 +1484,41 @@ extension AppDelegate {
         presentDialog(view, title: "Upload: \(issueKey)", size: NSSize(width: 520, height: 540), window: \.uploadWindow)
     }
 
+    /// The flag row's label for a known-flagged, known-unflagged, or unknown ticket.
+    ///
+    /// Unknown keeps "Add Flag" — the label the row has always carried — rather than guessing. The
+    /// wrong guess in the other direction is the expensive one: "Remove Flag" on a ticket nobody has
+    /// flagged would offer to undo something that was never done, and on a *flagged* ticket "Add
+    /// Flag" merely re-writes the same single option, which Jira treats as a no-op.
+    static func flagItemTitle(flagged: Bool?) -> String {
+        flagged == true ? "Remove Flag" : "Add Flag"
+    }
+
     @objc
     func addFlagToIssue(_ sender: NSMenuItem) {
         guard let issueKey = sender.representedObject as? String else { return }
         presentFlagDialog(issueKey: issueKey)
+    }
+
+    /// Clears the flag straight from the menu, with no dialog.
+    ///
+    /// Raising a flag opens `FlagDialog` because an impediment is a claim that wants a sentence of
+    /// explanation, and the comment lands on the ticket where the next person reads it. Clearing one
+    /// is the opposite: it is the removal of that claim, there is nothing to fill in — the dialog's
+    /// only field would be a comment nobody is asking for — and its copy ("Marks the issue as
+    /// Impediment") describes the other direction entirely. A form whose every field is optional is
+    /// a confirmation step in disguise, and this is one field, undone by one more click.
+    ///
+    /// Failures still reach the user: `setFlag` reads the field back and notifies when the write
+    /// didn't land, so there is no silent path here even without a dialog to keep open.
+    @objc
+    func removeFlagFromIssue(_ sender: NSMenuItem) {
+        guard let issueKey = sender.representedObject as? String else { return }
+        jiraClient.setFlag(issueKey: issueKey, flagFieldId: flagFieldId, flagged: false) { [weak self] success in
+            DispatchQueue.main.async {
+                if success { self?.refreshMenu() }
+            }
+        }
     }
 
     private func presentFlagDialog(issueKey: String) {
@@ -1413,9 +1526,10 @@ extension AppDelegate {
             issueKey: issueKey,
             onSubmit: { [weak self] comment, done in
                 guard let self else { done(false); return }
-                self.jiraClient.flagIssue(
+                self.jiraClient.setFlag(
                     issueKey: issueKey,
                     flagFieldId: self.flagFieldId,
+                    flagged: true,
                     comment: comment.isEmpty ? nil : comment
                 ) { success in
                     DispatchQueue.main.async {

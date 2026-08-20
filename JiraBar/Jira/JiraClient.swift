@@ -16,7 +16,8 @@ public class JiraClient {
     @Default(.jql) var jql
     @Default(.maxResults) var maxResults
     @Default(.rankFieldId) var rankFieldId
-    
+    @Default(.flagFieldId) var flagFieldId
+
     @FromKeychain(.jiraToken) var jiraToken
     @FromKeychain(.jiraServerToken) var jiraServerToken
 
@@ -106,28 +107,46 @@ public class JiraClient {
 
     // MARK: - API calls
 
+    /// The per-issue values a search carries that the typed `Issue` struct cannot hold, because
+    /// their JSON keys are user-configured `customfield_XXXXX` ids rather than fixed names.
+    struct IssueExtras {
+        /// Lexorank strings, keyed by issue key. A missing key is unranked.
+        var ranks: [String: String] = [:]
+
+        /// Flag state, keyed by issue key. **A missing key means unknown, not unflagged** — no field
+        /// id is configured, the field is not on that issue's screen, or the search failed outright.
+        /// Rendering unknown as unflagged would put "Add Flag" on a flagged ticket.
+        var flags: [String: Bool] = [:]
+    }
+
     /// Runs a JQL search. Defaults to the user's configured query and result cap; callers can
     /// override both to run a secondary search (e.g. the TODO backlog section).
     func getIssuesByJql(
         jql overrideJQL: String? = nil,
         maxResults overrideMaxResults: String? = nil,
-        completion: @escaping ((JiraResponse, [String: String]) -> Void)
+        completion: @escaping ((JiraResponse, IssueExtras) -> Void)
     ) {
         // An unconfigured instance has nothing to search. Returning empty beats firing a DNS failure
         // at the user as a notification banner — which is exactly what a fresh install, and this
         // app's own test host, used to do on every refresh.
         guard isConfigured else {
-            completion(JiraResponse(), [:])
+            completion(JiraResponse(), IssueExtras())
             return
         }
         // Cloud introduced the /search/jql endpoint; Server only supports /search
         let searchPath = instanceType == .cloud ? "search/jql" : "search"
         let url = "\(baseUrl)/rest/api/\(apiVersion)/\(searchPath)"
 
-        var fieldList = "id,assignee,summary,status,issuetype,project"
         let rankId = rankFieldId.trimmingCharacters(in: .whitespaces)
+        let flagId = flagFieldId.trimmingCharacters(in: .whitespaces)
+        var fieldList = "id,assignee,summary,status,issuetype,project"
         if !rankId.isEmpty {
             fieldList += ",\(rankId)"
+        }
+        // Asked for here rather than per issue on hover: the flag decides how a row renders, so it
+        // has to be in hand before the row is built, and the search is already fetching every issue.
+        if !flagId.isEmpty {
+            fieldList += ",\(flagId)"
         }
 
         let parameters: [String: Any] = [
@@ -146,40 +165,74 @@ public class JiraClient {
                         decoded = try JSONDecoder().decode(JiraResponse.self, from: data)
                     } catch {
                         print("\(url):  decode error \(error)")
-                        completion(JiraResponse(), [:])
+                        completion(JiraResponse(), IssueExtras())
                         sendNotification(body: error.localizedDescription)
                         return
                     }
-                    let ranks = JiraClient.extractRanks(from: data, fieldId: rankId)
-                    completion(decoded, ranks)
+                    completion(decoded, JiraClient.extractIssueExtras(
+                        from: data, rankFieldId: rankId, flagFieldId: flagId
+                    ))
                 case .failure(let error):
                     print("\(url):  \(error)")
-                    completion(JiraResponse(), [:])
+                    completion(JiraResponse(), IssueExtras())
                     sendNotification(body: error.localizedDescription)
                 }
             }
     }
 
-    /// Parses just the rank field out of the search response. Returns [issueKey: rankString].
-    /// The typed Issue/Fields struct can't decode a dynamic customfield_XXXXX key, so we do
-    /// a second pass with JSONSerialization. Empty `fieldId` short-circuits to an empty dict.
-    static func extractRanks(from data: Data, fieldId: String) -> [String: String] {
-        guard !fieldId.isEmpty,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let issues = json["issues"] as? [[String: Any]] else {
-            return [:]
+    /// Second pass over the search response for the two custom fields the typed Issue/Fields struct
+    /// can't decode, because their keys are dynamic `customfield_XXXXX` ids. An empty field id
+    /// short-circuits that half to nothing.
+    static func extractIssueExtras(
+        from data: Data,
+        rankFieldId: String,
+        flagFieldId: String
+    ) -> IssueExtras {
+        guard
+            !(rankFieldId.isEmpty && flagFieldId.isEmpty),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let issues = json["issues"] as? [[String: Any]]
+        else {
+            return IssueExtras()
         }
-        var result: [String: String] = [:]
+        var extras = IssueExtras()
         for issue in issues {
-            if let key = issue["key"] as? String,
-               let fields = issue["fields"] as? [String: Any],
-               let rank = fields[fieldId] as? String {
-                result[key] = rank
+            guard
+                let key = issue["key"] as? String,
+                let fields = issue["fields"] as? [String: Any]
+            else { continue }
+            if !rankFieldId.isEmpty, let rank = fields[rankFieldId] as? String {
+                extras.ranks[key] = rank
+            }
+            // Only a known answer is recorded — see `IssueExtras.flags`.
+            if !flagFieldId.isEmpty, let flagged = JiraClient.isFlagged(fields: fields, fieldId: flagFieldId) {
+                extras.flags[key] = flagged
             }
         }
-        return result
+        return extras
     }
-    
+
+    /// Whether one issue's Flagged field holds a flag, or nil when that can't be established.
+    ///
+    /// Jira's Flagged field is a multi-checkbox. Verified against a live Cloud instance: flagged
+    /// reads back as a one-element array of option objects, `[{"value": "Impediment", "id": ...}]`;
+    /// unflagged reads back as an explicit `null`, including straight after a clear that was
+    /// *written* as `[]`. Both are answers, and the write and read shapes differ, so both the empty
+    /// array and the null have to count as not-flagged.
+    ///
+    /// Unknown (nil) is reserved for the field being *absent* from `fields` — which is how Jira
+    /// reports a field that is not on the issue's screen, and also what a wrong field id in
+    /// Preferences produces — and for a value in a shape we don't recognise, including the bare
+    /// option object a single-select field would return. That last one is deliberately unknown
+    /// rather than flagged: `flagFieldPayload` only ever writes an array, so reading a single-select
+    /// field as flagged would offer a "Remove Flag" whose write that field cannot accept.
+    static func isFlagged(fields: [String: Any], fieldId: String) -> Bool? {
+        guard let raw = fields[fieldId] else { return nil }
+        if raw is NSNull { return false }
+        if let options = raw as? [Any] { return !options.isEmpty }
+        return nil
+    }
+
     func getTransitionsByIssueKey(issueKey: String, completion: @escaping (([Transition]) -> Void)) -> Void {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)/transitions"
 
@@ -515,25 +568,48 @@ public class JiraClient {
         }
     }
 
-    /// Flags an issue by setting Jira's Flagged custom field to a single option (default "Impediment",
-    /// the standard label across Jira Cloud and Server). Posts an optional comment afterward.
-    /// `flagFieldId` is user-configurable because the Flagged field's id varies per install.
-    func flagIssue(
+    /// The value to write to the Flagged field. An array of one option to raise a flag; an empty
+    /// array to clear it.
+    ///
+    /// Empty array rather than `null`, and not a coin toss: `PUT {"fields":{"<flagId>":[]}}` was run
+    /// against a live Cloud instance and the field read back as `null`, so `[]` genuinely clears.
+    /// It is also the type-correct empty for an array-valued field, and the same choice
+    /// `userFieldPayload` makes for a multi-valued clear.
+    static func flagFieldPayload(flagged: Bool, optionValue: String) -> [[String: String]] {
+        flagged ? [["value": optionValue]] : []
+    }
+
+    /// Whether a flag write should be reported as having landed, given what reading the field back
+    /// returned and what was asked for.
+    ///
+    /// A nil read-back is not a failure. The field is not on the issue at all, or the GET itself
+    /// failed — neither is evidence the write was discarded, and claiming failure on no evidence is
+    /// its own kind of lie. Same call, and the same reasoning, as `setIssueUsers`.
+    static func flagWriteLanded(readBack: Bool?, wanted: Bool) -> Bool {
+        guard let readBack else { return true }
+        return readBack == wanted
+    }
+
+    /// Raises or clears Jira's Flagged custom field, then reads it back before reporting success.
+    /// Posts an optional comment afterward. `flagFieldId` is user-configurable because the Flagged
+    /// field's id varies per install.
+    func setFlag(
         issueKey: String,
         flagFieldId: String,
+        flagged: Bool,
         optionValue: String = "Impediment",
-        comment: String?,
+        comment: String? = nil,
         completion: @escaping (Bool) -> Void
     ) {
         let fieldId = flagFieldId.trimmingCharacters(in: .whitespaces)
         guard !fieldId.isEmpty else {
-            sendNotification(body: "Flag failed: no field id configured")
+            sendNotification(body: "\(flagged ? "Flag" : "Unflag") failed: no field id configured")
             completion(false)
             return
         }
 
         let fields: [String: Any] = [
-            fieldId: [["value": optionValue]]
+            fieldId: JiraClient.flagFieldPayload(flagged: flagged, optionValue: optionValue)
         ]
 
         updateIssueFields(issueKey: issueKey, fields: fields) { [self] success, _ in
@@ -541,17 +617,50 @@ public class JiraClient {
                 completion(false)
                 return
             }
-            if let comment, !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                addComment(issueKey: issueKey, comment: comment) { commentOK in
-                    if commentOK {
-                        sendNotification(body: "Flagged \(issueKey)")
-                    }
-                    completion(commentOK)
+            // A 2xx from Jira means the request was accepted, not that the field changed — the
+            // assignee bug in 9c7d420 was exactly that, and a clear is the shape most likely to be
+            // quietly dropped. Reading it back is the only way to know. See `flagWriteLanded`.
+            getIssueFlag(issueKey: issueKey, fieldId: fieldId) { [self] readBack in
+                guard JiraClient.flagWriteLanded(readBack: readBack, wanted: flagged) else {
+                    sendNotification(
+                        body: "\(issueKey): Jira accepted the change but the flag did not update."
+                    )
+                    completion(false)
+                    return
                 }
-            } else {
-                sendNotification(body: "Flagged \(issueKey)")
-                completion(true)
+                finishFlag(issueKey: issueKey, flagged: flagged, comment: comment, completion: completion)
             }
+        }
+    }
+
+    private func finishFlag(
+        issueKey: String,
+        flagged: Bool,
+        comment: String?,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let done = flagged ? "Flagged \(issueKey)" : "Removed flag from \(issueKey)"
+        if let comment, !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            addComment(issueKey: issueKey, comment: comment) { commentOK in
+                if commentOK {
+                    sendNotification(body: done)
+                }
+                completion(commentOK)
+            }
+        } else {
+            sendNotification(body: done)
+            completion(true)
+        }
+    }
+
+    /// The flag state of one issue, or nil when it can't be established — see `isFlagged`.
+    func getIssueFlag(issueKey: String, fieldId: String, completion: @escaping (Bool?) -> Void) {
+        fetchIssueFields(issueKey: issueKey, fieldIds: fieldId) { fields in
+            guard let fields else {
+                completion(nil)
+                return
+            }
+            completion(JiraClient.isFlagged(fields: fields, fieldId: fieldId))
         }
     }
 
@@ -617,9 +726,26 @@ public class JiraClient {
     /// unknown value for an empty one.
     /// Works for both single-user fields (assignee) and multi-user custom fields.
     func getIssueFieldUsers(issueKey: String, fieldId: String, completion: @escaping ([JiraUser]?) -> Void) {
+        fetchIssueFields(issueKey: issueKey, fieldIds: fieldId) { fields in
+            guard let fields else {
+                completion(nil)
+                return
+            }
+            completion(JiraClient.fieldUsers(from: fields, fieldId: fieldId))
+        }
+    }
+
+    /// The raw `fields` object for one issue, restricted to `fieldIds` (comma-separated), or nil when
+    /// the request or the parse failed. Note that a nil here is *only* about the request — a field
+    /// Jira omits because it isn't on the issue is a present dictionary with the key absent, which is
+    /// the distinction `fieldUsers` and `isFlagged` are built on.
+    private func fetchIssueFields(
+        issueKey: String,
+        fieldIds: String,
+        completion: @escaping ([String: Any]?) -> Void
+    ) {
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)"
-        let parameters: [String: Any] = ["fields": fieldId]
-        AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
+        AF.request(url, method: .get, parameters: ["fields": fieldIds], headers: authHeaders())
             .validate(statusCode: 200..<300)
             .responseData { response in
                 switch response.result {
@@ -631,7 +757,7 @@ public class JiraClient {
                         completion(nil)
                         return
                     }
-                    completion(JiraClient.fieldUsers(from: fields, fieldId: fieldId))
+                    completion(fields)
                 case .failure(let error):
                     print("\(url):  \(error)")
                     completion(nil)
