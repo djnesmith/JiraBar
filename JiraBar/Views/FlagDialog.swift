@@ -8,6 +8,7 @@ struct FlagDialog: View {
     let onCancel: () -> Void
 
     @State private var comment: String = ""
+    @State private var mentions: [MentionText.Mention] = []
     @State private var submitting: Bool = false
 
     var body: some View {
@@ -31,9 +32,12 @@ struct FlagDialog: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            TextField("Optional comment", text: $comment, axis: .vertical)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .lineLimit(4...8)
+            MentionTextField(
+                placeholder: "Optional comment",
+                text: $comment,
+                mentions: $mentions,
+                lineLimit: 4...8
+            )
 
             Spacer(minLength: 0)
 
@@ -55,7 +59,7 @@ struct FlagDialog: View {
     private func submit() {
         guard !submitting else { return }
         submitting = true
-        onSubmit(comment) { success in
+        onSubmit(MentionText.wikiBody(text: comment, mentions: mentions)) { success in
             if !success { submitting = false }
         }
     }

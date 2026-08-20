@@ -664,13 +664,23 @@ public class JiraClient {
         }
     }
 
-    /// Posts a comment to an issue. v2 endpoint accepts plain text on both Cloud and Server.
+    /// Posts a comment to an issue. The v2 endpoint takes a wiki-markup string on both Cloud and
+    /// Server, which is what lets an @-mention be `[~accountid:…]` inside the body instead of
+    /// forcing the whole comment format over to v3/ADF.
+    ///
+    /// Any mention in the body is read back afterwards and checked for a real ADF `mention` node: a
+    /// 2xx here means Jira accepted the string, not that it resolved anybody, and a mention that did
+    /// not resolve is a comment whose recipient was never notified.
+    ///
+    /// The ids come out of the body about to be posted rather than being passed in alongside it, so
+    /// that no caller can post a mention this never checks.
     func addComment(issueKey: String, comment: String, completion: @escaping (Bool) -> Void) {
         let trimmed = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             completion(false)
             return
         }
+        let mentionIds = MentionText.mentionedAccountIds(inWiki: trimmed)
         let url = "\(baseUrl)/rest/api/2/issue/\(issueKey)/comment"
         let body: [String: Any] = ["body": trimmed]
 
@@ -679,11 +689,28 @@ public class JiraClient {
 
         AF.request(url, method: .post, parameters: body, encoding: JSONEncoding.default, headers: headers)
             .validate(statusCode: 200..<300)
-            .responseData { response in
+            .responseData { [self] response in
                 switch response.result {
-                case .success:
-                    sendNotification(body: "Comment added to \(issueKey)")
-                    completion(true)
+                case .success(let data):
+                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    verifyMentions(
+                        issueKey: issueKey,
+                        commentId: json?["id"] as? String,
+                        expected: mentionIds
+                    ) { unresolved in
+                        if unresolved.isEmpty {
+                            sendNotification(body: "Comment added to \(issueKey)")
+                        } else {
+                            // Reported as posted, because it was: telling the caller this failed
+                            // would reopen the dialog and invite a duplicate comment. What it must
+                            // not do is call it a success, because nobody was notified.
+                            sendNotification(
+                                body: "\(issueKey): comment posted, but \(unresolved.count) "
+                                    + "mention(s) did not resolve — those people were not notified."
+                            )
+                        }
+                        completion(true)
+                    }
                 case .failure(let error):
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
@@ -692,6 +719,131 @@ public class JiraClient {
                     completion(false)
                 }
             }
+    }
+
+    /// Reads a just-posted comment back and reports which of the expected mentions Jira did *not*
+    /// turn into a real mention.
+    ///
+    /// An empty result means everything landed — including the cases where there was nothing to
+    /// check and where the check itself could not run. A failed read-back is not evidence the
+    /// mention was dropped, and claiming failure on no evidence is its own kind of lie: same call,
+    /// and the same reasoning, as `flagWriteLanded`.
+    private func verifyMentions(
+        issueKey: String,
+        commentId: String?,
+        expected: [String],
+        completion: @escaping ([String]) -> Void
+    ) {
+        // Only Cloud has ADF. Reading a Server comment back through v2 returns the same wiki string
+        // we just sent, so there would be nothing in it to check the mention against.
+        guard instanceType == .cloud, !expected.isEmpty, let commentId else {
+            completion([])
+            return
+        }
+        let url = "\(baseUrl)/rest/api/3/issue/\(issueKey)/comment/\(commentId)"
+        AF.request(url, method: .get, parameters: nil, headers: authHeaders())
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                guard
+                    case .success(let data) = response.result,
+                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else {
+                    print("\(url):  mention read-back failed")
+                    completion([])
+                    return
+                }
+                completion(
+                    JiraClient.unresolvedMentionIds(
+                        expected: expected,
+                        found: JiraClient.mentionIds(inADF: json["body"])
+                    )
+                )
+            }
+    }
+
+    /// Every account id carried by an ADF `mention` node, at any depth.
+    ///
+    /// The distinction that matters: Jira stores `[~accountid:…]` as a `mention` node with the id in
+    /// `attrs.id`, and leaves an unrecognised `@Name` as a plain `text` node. Finding the id here is
+    /// therefore the difference between a notification and a string.
+    static func mentionIds(inADF node: Any?) -> Set<String> {
+        switch node {
+        case let dict as [String: Any]:
+            var ids: Set<String> = []
+            if dict["type"] as? String == "mention",
+               let attrs = dict["attrs"] as? [String: Any],
+               let id = attrs["id"] as? String, !id.isEmpty {
+                ids.insert(id)
+            }
+            for value in dict.values {
+                ids.formUnion(mentionIds(inADF: value))
+            }
+            return ids
+        case let array as [Any]:
+            return array.reduce(into: Set<String>()) { $0.formUnion(mentionIds(inADF: $1)) }
+        default:
+            return []
+        }
+    }
+
+    /// Which expected account ids the stored comment does not actually mention, deduplicated and in
+    /// the order they were asked for.
+    static func unresolvedMentionIds(expected: [String], found: Set<String>) -> [String] {
+        expected.reduce(into: (seen: Set<String>(), missing: [String]())) { result, id in
+            guard !id.isEmpty, !found.contains(id), result.seen.insert(id).inserted else { return }
+            result.missing.append(id)
+        }.missing
+    }
+
+    /// Users matching a free-text query, for @-mention autocomplete.
+    ///
+    /// `/user/search` rather than the `/user/assignable/search` the pickers use: mentioning somebody
+    /// is not assigning them the ticket, and the assignable set hides stakeholders who are perfectly
+    /// mentionable. It also matches server-side across every word of a display name, surname
+    /// included, so the client never has to hold a directory in memory.
+    func searchUsers(query: String, completion: @escaping ([JiraUser]) -> Void) {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            completion([])
+            return
+        }
+        let url = "\(baseUrl)/rest/api/\(apiVersion)/user/search"
+        // Cloud takes `query`; Server/DC takes `username`. Kept disjoint for the same reason
+        // `getAssignableUsers` keeps them disjoint — stricter installs reject unknown params.
+        var parameters: [String: Any] = ["maxResults": 20]
+        switch instanceType {
+        case .cloud:  parameters["query"] = trimmed
+        case .server: parameters["username"] = trimmed
+        }
+
+        AF.request(url, method: .get, parameters: parameters, headers: authHeaders())
+            .validate(statusCode: 200..<300)
+            .responseDecodable(of: [JiraUser].self) { response in
+                switch response.result {
+                case .success(let users):
+                    completion(JiraClient.mentionableUsers(users))
+                case .failure(let error):
+                    // Autocomplete is ambient — a failed lookup shows no rows rather than a banner
+                    // over the comment the user is in the middle of writing.
+                    print("\(url):  \(error)")
+                    completion([])
+                }
+            }
+    }
+
+    /// Drops the accounts nobody means to @-mention.
+    ///
+    /// Not cosmetic: `/user/search` returns add-ons (`app`) and Service Desk portal customers
+    /// (`customer`) alongside people, and on a real instance they outnumber the colleagues badly —
+    /// portal accounts arrive as bare email addresses and bury the name being typed. `accountType` is
+    /// Cloud-only, so a missing one is kept: on Server/DC every result is a user. A missing `active`
+    /// is kept for the same reason, since only Cloud reliably sends it.
+    static func mentionableUsers(_ users: [JiraUser]) -> [JiraUser] {
+        users.filter { user in
+            guard user.active != false else { return false }
+            guard let accountType = user.accountType else { return true }
+            return accountType == "atlassian"
+        }
     }
 
     /// Fetches GitHub pull requests linked to an issue via Jira's dev-status backing API

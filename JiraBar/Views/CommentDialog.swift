@@ -8,6 +8,7 @@ struct CommentDialog: View {
     let onCancel: () -> Void
 
     @State private var comment: String = ""
+    @State private var mentions: [MentionText.Mention] = []
     @State private var submitting: Bool = false
 
     private var trimmed: String { comment.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -23,9 +24,12 @@ struct CommentDialog: View {
                     .foregroundColor(.forIssueKey(issueKey))
             }
 
-            TextField("", text: $comment, axis: .vertical)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .lineLimit(6...12)
+            MentionTextField(
+                placeholder: "",
+                text: $comment,
+                mentions: $mentions,
+                lineLimit: 6...12
+            )
 
             Spacer(minLength: 0)
 
@@ -47,7 +51,7 @@ struct CommentDialog: View {
     private func submit() {
         guard !submitting, !trimmed.isEmpty else { return }
         submitting = true
-        onSubmit(comment) { success in
+        onSubmit(MentionText.wikiBody(text: comment, mentions: mentions)) { success in
             if !success { submitting = false }
         }
     }

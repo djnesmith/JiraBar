@@ -10,6 +10,7 @@ struct UploadFilesDialog: View {
 
     @State private var files: [URL] = []
     @State private var comment: String = ""
+    @State private var mentions: [MentionText.Mention] = []
     @State private var submitting: Bool = false
     @State private var isDropTargeted: Bool = false
 
@@ -62,9 +63,12 @@ struct UploadFilesDialog: View {
 
             Text("Comment (optional)")
                 .font(.headline)
-            TextField("", text: $comment, axis: .vertical)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .lineLimit(3...6)
+            MentionTextField(
+                placeholder: "",
+                text: $comment,
+                mentions: $mentions,
+                lineLimit: 3...6
+            )
 
             Spacer(minLength: 0)
 
@@ -182,7 +186,7 @@ struct UploadFilesDialog: View {
     private func submit() {
         guard !submitting, !files.isEmpty else { return }
         submitting = true
-        onSubmit(files, comment) { success in
+        onSubmit(files, MentionText.wikiBody(text: comment, mentions: mentions)) { success in
             if !success { submitting = false }
         }
     }

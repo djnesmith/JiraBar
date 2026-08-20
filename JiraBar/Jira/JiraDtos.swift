@@ -86,6 +86,9 @@ struct JiraUser: Codable, Identifiable, Hashable {
     var displayName: String
     var emailAddress: String?
     var active: Bool?
+    /// Cloud-only: `atlassian` for a person, `app` for an add-on, `customer` for a Service Desk
+    /// portal account. Absent on Server/DC. See `JiraClient.mentionableUsers`.
+    var accountType: String?
 
     enum CodingKeys: String, CodingKey {
         case accountId
@@ -94,6 +97,7 @@ struct JiraUser: Codable, Identifiable, Hashable {
         case displayName
         case emailAddress
         case active
+        case accountType
     }
 
     /// Whether this is the same person as `other`. Cloud identifies by accountId, Server/DC by
