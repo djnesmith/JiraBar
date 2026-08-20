@@ -60,6 +60,25 @@ final class MentionDropdownTests: XCTestCase {
         XCTAssertFalse(dropdown.isOpen)
     }
 
+    /// Leaving the field closes the list. Without this the dropdown stayed drawn over a field that no
+    /// longer had focus, and the dialogs' mirrored flag stuck — which strands Return on the submit
+    /// button, or lets an invisible dropdown swallow it.
+    func testLosingFocusClosesTheDropdown() {
+        let dropdown = opened()
+        dropdown.setFocused(false)
+        XCTAssertFalse(dropdown.isOpen)
+        XCTAssertNil(dropdown.query)
+        XCTAssertTrue(dropdown.matches.isEmpty)
+    }
+
+    /// And coming back does not resurrect a list built for a query that was abandoned.
+    func testRegainingFocusDoesNotResurrectTheOldList() {
+        let dropdown = opened()
+        dropdown.setFocused(false)
+        dropdown.setFocused(true)
+        XCTAssertFalse(dropdown.isOpen)
+    }
+
     // MARK: - Escape nesting
 
     /// One Escape closes the dropdown and nothing else — and the next keystroke of the same token

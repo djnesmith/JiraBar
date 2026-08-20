@@ -9,6 +9,7 @@ struct CommentDialog: View {
 
     @State private var comment: String = ""
     @State private var mentions: [MentionText.Mention] = []
+    @State private var mentionListOpen = false
     @State private var submitting: Bool = false
 
     private var trimmed: String { comment.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -28,6 +29,7 @@ struct CommentDialog: View {
                 placeholder: "",
                 text: $comment,
                 mentions: $mentions,
+                dropdownOpen: $mentionListOpen,
                 lineLimit: 6...12
             )
 
@@ -40,12 +42,12 @@ struct CommentDialog: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button(submitting ? "Submitting…" : "Add Comment") { submit() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(mentionListOpen ? nil : .defaultAction)
                     .disabled(submitting || trimmed.isEmpty)
             }
         }
         .padding(16)
-        .frame(width: 520, height: 280)
+        .frame(width: 520, height: 340)
     }
 
     private func submit() {

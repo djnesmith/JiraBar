@@ -1551,7 +1551,7 @@ extension AppDelegate {
                 self?.flagWindow = nil
             }
         )
-        presentDialog(view, title: "Flag: \(issueKey)", size: NSSize(width: 480, height: 260), window: \.flagWindow)
+        presentDialog(view, title: "Flag: \(issueKey)", size: NSSize(width: 480, height: 320), window: \.flagWindow)
     }
 
     @objc
@@ -1614,7 +1614,7 @@ extension AppDelegate {
                 self?.commentWindow = nil
             }
         )
-        presentDialog(view, title: "Comment: \(issueKey)", size: NSSize(width: 520, height: 280), window: \.commentWindow)
+        presentDialog(view, title: "Comment: \(issueKey)", size: NSSize(width: 520, height: 340), window: \.commentWindow)
     }
 
     private func presentTransitionDialog(

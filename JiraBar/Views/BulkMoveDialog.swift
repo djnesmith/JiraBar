@@ -41,6 +41,8 @@ struct BulkMoveDialog: View {
 
     // Per-prompt-config field state — only the ones the matching prompt enables actually render.
     @State private var comment: String = ""
+    @State private var mentions: [MentionText.Mention] = []
+    @State private var mentionListOpen = false
     @State private var pickedUsers: Set<JiraUser> = []
     @State private var assignableUsers: [JiraUser] = []
     @State private var userFilter: String = ""
@@ -398,9 +400,13 @@ struct BulkMoveDialog: View {
     private var commentSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Comment (applies to every transitioned issue)").font(.headline)
-            TextField("", text: $comment, axis: .vertical)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .lineLimit(3...6)
+            MentionTextField(
+                placeholder: "",
+                text: $comment,
+                mentions: $mentions,
+                dropdownOpen: $mentionListOpen,
+                lineLimit: 3...6
+            )
         }
     }
 
@@ -414,7 +420,7 @@ struct BulkMoveDialog: View {
             Button(submitting ? "Moving…" : "Move \(checkedKeys.count) issue\(checkedKeys.count == 1 ? "" : "s")") {
                 submit()
             }
-            .keyboardShortcut(.defaultAction)
+            .keyboardShortcut(mentionListOpen ? nil : .defaultAction)
             .disabled(submitting || !canSubmit)
         }
     }
@@ -589,7 +595,7 @@ struct BulkMoveDialog: View {
         ) ?? []
         let includeComment = config?.includeComment ?? true
         let effectiveComment: String? = (includeComment && !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            ? comment : nil
+            ? MentionText.wikiBody(text: comment, mentions: mentions) : nil
 
         var index = 0
         var successfulKeys: [String] = []

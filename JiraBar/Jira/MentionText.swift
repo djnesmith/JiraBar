@@ -159,8 +159,12 @@ enum MentionText {
     /// the same name for a different account: two identical tokens in one comment cannot be told
     /// apart when the body is built, and the failure that produces is notifying the wrong namesake.
     /// The same person picked twice keeps the same token, which is harmless — both stand for one id.
-    static func token(for user: JiraUser, reference: String, existing: [Mention]) -> String {
-        let base = "@\(user.displayName)"
+    static func token(for user: JiraUser, reference: String, existing: [Mention]) -> String? {
+        // A nameless user would give a token of just "@", which would then claim any bare `@`
+        // elsewhere in the comment.
+        let name = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        let base = "@\(name)"
         func clashes(_ candidate: String) -> Bool {
             existing.contains { $0.token == candidate && $0.reference != reference }
         }
@@ -178,23 +182,37 @@ enum MentionText {
     /// mention to record. The box keeps a name; the account id is substituted on submit.
     ///
     /// Nil when the user carries no usable identifier — see `reference(for:cloud:)`.
+    /// `caret` is where the insertion point belongs afterwards — just past the name and its trailing
+    /// space, ready to keep typing. It has to be applied to the field explicitly: replacing a
+    /// SwiftUI `TextField`'s bound string leaves the whole value selected, so the next keystroke
+    /// would type over the name that was just picked.
     static func commit(
         text: String,
         query: Query,
         user: JiraUser,
         cloud: Bool,
         existing: [Mention] = []
-    ) -> (text: String, mention: Mention)? {
-        guard let reference = reference(for: user, cloud: cloud) else { return nil }
+    ) -> (text: String, caret: Int, mention: Mention)? {
+        guard
+            let reference = reference(for: user, cloud: cloud),
+            let token = token(for: user, reference: reference, existing: existing)
+        else { return nil }
         let chars = Array(text)
         guard query.start >= 0, query.end <= chars.count, query.start <= query.end else { return nil }
-        let token = token(for: user, reference: reference, existing: existing)
         // No second space when one is already there, or fixing a mention mid-sentence would leave a
         // gap behind every correction.
         let followedBySpace = query.end < chars.count && chars[query.end] == " "
         let replacement = followedBySpace ? token : token + " "
         let updated = String(chars[0..<query.start]) + replacement + String(chars[query.end...])
-        return (updated, Mention(token: token, reference: reference))
+        // Past the trailing space in both cases: when one was already there, it is the character the
+        // caret should sit after too.
+        let caret = query.start + replacement.count + (followedBySpace ? 1 : 0)
+        return (updated, caret, Mention(token: token, reference: reference))
+    }
+
+    /// `caret`, which counts in `Character`s, as the UTF-16 offset `NSRange` needs.
+    static func utf16Offset(ofCaret caret: Int, in text: String) -> Int {
+        String(text.prefix(max(caret, 0))).utf16.count
     }
 
     // MARK: - Submitting
@@ -203,10 +221,14 @@ enum MentionText {
     /// mention.
     ///
     /// A recorded mention whose token the user has since deleted finds nothing and is skipped, so
-    /// editing the text can only ever drop a mention, never misdirect one. That rests entirely on
-    /// tokens being unique per account (see `token(for:reference:existing:)`): with two identical
-    /// tokens standing for different people, deleting one would hand its account the other's
-    /// occurrence and notify the wrong namesake.
+    /// deleting a name drops its mention rather than redirecting it. That rests on tokens being
+    /// unique per account (see `token(for:reference:existing:)`): with two identical tokens standing
+    /// for different people, deleting one would hand its account the other's occurrence.
+    ///
+    /// The uniqueness lives in text the user can edit, so it is not absolute — hand-deleting the
+    /// *qualifier* off a namesake's token ("@Dana Scully (dana)" back to "@Dana Scully") recreates
+    /// the collision, and the earlier pick then claims it. Short of tracking live ranges through
+    /// every edit there is no fix for that; it needs two deliberate edits to reach.
     ///
     /// Longest token first, because a qualified "@Dana Scully (dana)" contains the bare
     /// "@Dana Scully" and would otherwise have its occurrence claimed by it.
@@ -290,20 +312,35 @@ enum MentionKeys {
     static let keypadEnter: UInt16 = 76
     static let up: UInt16 = 126
     static let down: UInt16 = 125
+    static let n: UInt16 = 45
+    static let p: UInt16 = 35
 
     /// Routes one keypress.
     ///
     /// A closed dropdown is answered `.passThrough` before anything else is considered, which is
-    /// what keeps Tab moving focus between controls and Escape closing the dialog exactly as they
-    /// did before mentions existed. Modified presses pass through for the same reason — ⌘-Return
-    /// still submits with the dropdown open.
+    /// what keeps Tab moving focus between controls, Escape closing the dialog, and ⌃-N/⌃-P moving
+    /// the caret by a line, exactly as they did before mentions existed. ⌘, ⌥ and ⇧ presses pass
+    /// through for the same reason — ⌘-Return still submits with the dropdown open.
     static func action(
         keyCode: UInt16,
-        modified: Bool,
+        control: Bool,
+        otherModifiers: Bool,
         dropdownOpen: Bool,
         hasHighlight: Bool
     ) -> MentionKeyAction {
-        guard dropdownOpen, !modified else { return .passThrough }
+        guard dropdownOpen, !otherModifiers else { return .passThrough }
+
+        if control {
+            // ⌃-N/⌃-P, the Emacs bindings macOS already uses for down/up. A text view binds them to
+            // moving the caret a line, so consuming them here is what keeps the caret still while
+            // they drive the list instead.
+            switch keyCode {
+            case n: return .moveHighlight(by: 1)
+            case p: return .moveHighlight(by: -1)
+            default: return .passThrough
+            }
+        }
+
         switch keyCode {
         case escape:
             return .dismiss

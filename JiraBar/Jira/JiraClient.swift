@@ -673,7 +673,9 @@ public class JiraClient {
     /// not resolve is a comment whose recipient was never notified.
     ///
     /// The ids come out of the body about to be posted rather than being passed in alongside it, so
-    /// that no caller can post a mention this never checks.
+    /// no caller of *this* can post a mention it never checks. Note that a transition's comment does
+    /// not come through here at all — `performTransition` posts it inside the transition payload,
+    /// where there is no comment id to read back, so those mentions go unverified.
     func addComment(issueKey: String, comment: String, completion: @escaping (Bool) -> Void) {
         let trimmed = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {

@@ -216,6 +216,46 @@ final class MentionTextTests: XCTestCase {
         XCTAssertEqual(result?.mention.reference, "[~accountid:acct-9]")
     }
 
+    /// The caret lands past the name and its space, ready to keep typing. Without applying this the
+    /// field editor keeps the whole replaced value selected and the next keystroke wipes the name.
+    func testCommitReportsACaretPastTheNameAndItsSpace() {
+        let query = MentionText.activeQuery(text: "ping @love", caret: 10)!
+        let result = MentionText.commit(
+            text: "ping @love",
+            query: query,
+            user: user("Ada Lovelace", accountId: "acct-9"),
+            cloud: true
+        )
+        XCTAssertEqual(result?.text, "ping @Ada Lovelace ")
+        XCTAssertEqual(result?.caret, 19)
+        XCTAssertEqual(result?.text.count, 19, "caret sits at the very end here, with nothing selected")
+    }
+
+    /// Mid-sentence, the caret still lands after the existing space rather than before it.
+    func testCaretClearsAnExistingSpaceItReused() {
+        let query = MentionText.activeQuery(text: "hi @ge and more", caret: 6)!
+        let result = MentionText.commit(
+            text: "hi @ge and more",
+            query: query,
+            user: user("Ada Lovelace", accountId: "acct-1"),
+            cloud: true
+        )
+        XCTAssertEqual(result?.text, "hi @Ada Lovelace and more")
+        let caret = result!.caret
+        XCTAssertEqual(String(result!.text.prefix(caret)), "hi @Ada Lovelace ")
+    }
+
+    /// `NSRange` counts UTF-16 units, so a caret measured in Characters has to be converted or an
+    /// emoji earlier in the comment would put the insertion point in the wrong place.
+    func testCaretConvertsToAUTF16OffsetForTheFieldEditor() {
+        XCTAssertEqual(MentionText.utf16Offset(ofCaret: 3, in: "abcdef"), 3)
+        // A flag is one Character but two UTF-16 surrogate pairs.
+        XCTAssertEqual(MentionText.utf16Offset(ofCaret: 1, in: "🇺🇸ab"), 4)
+        XCTAssertEqual(MentionText.utf16Offset(ofCaret: 0, in: "abc"), 0)
+        XCTAssertEqual(MentionText.utf16Offset(ofCaret: -5, in: "abc"), 0)
+        XCTAssertEqual(MentionText.utf16Offset(ofCaret: 99, in: "abc"), 3)
+    }
+
     /// Fixing a mention mid-sentence must not leave a double space where the old token ended.
     func testCommitDoesNotDoubleTheSpaceItLandsBefore() {
         let query = MentionText.activeQuery(text: "hi @ge and more", caret: 6)!
@@ -290,6 +330,24 @@ final class MentionTextTests: XCTestCase {
             existing: existing
         )
         XCTAssertEqual(token, "@Dana Scully (dscully)")
+    }
+
+    /// A nameless user gets no token, because "@" alone would claim any bare `@` in the comment.
+    func testANamelessUserGetsNoToken() {
+        for name in ["", "   "] {
+            XCTAssertNil(
+                MentionText.token(
+                    for: user(name, accountId: "acct-1"), reference: "[~accountid:acct-1]", existing: []
+                ),
+                "display name \(name.debugDescription)"
+            )
+        }
+        let query = MentionText.activeQuery(text: "@ab", caret: 3)!
+        XCTAssertNil(
+            MentionText.commit(
+                text: "@ab", query: query, user: user("", accountId: "acct-1"), cloud: true
+            )
+        )
     }
 
     func testNamesakeWithNoEmailFallsBackToACounter() {
@@ -372,12 +430,17 @@ final class MentionKeyRoutingTests: XCTestCase {
 
     private func action(
         _ keyCode: UInt16,
-        modified: Bool = false,
+        control: Bool = false,
+        otherModifiers: Bool = false,
         open: Bool = true,
         highlight: Bool = true
     ) -> MentionKeyAction {
         MentionKeys.action(
-            keyCode: keyCode, modified: modified, dropdownOpen: open, hasHighlight: highlight
+            keyCode: keyCode,
+            control: control,
+            otherModifiers: otherModifiers,
+            dropdownOpen: open,
+            hasHighlight: highlight
         )
     }
 
@@ -444,12 +507,44 @@ final class MentionKeyRoutingTests: XCTestCase {
 
     // MARK: - Modifiers
 
-    /// ⌘-Return must still submit the dialog with the dropdown open, so modified presses pass
-    /// through untouched.
+    /// ⌘-Return must still submit the dialog with the dropdown open, so ⌘/⌥/⇧ presses pass through
+    /// untouched.
     func testModifiedPressesAlwaysPassThrough() {
         for key in [MentionKeys.returnKey, MentionKeys.tab, MentionKeys.escape, MentionKeys.down] {
-            XCTAssertEqual(action(key, modified: true, open: true), .passThrough, "\(key)")
+            XCTAssertEqual(action(key, otherModifiers: true, open: true), .passThrough, "\(key)")
         }
+    }
+
+    // MARK: - Emacs bindings
+
+    func testControlNAndControlPMoveTheHighlight() {
+        XCTAssertEqual(action(MentionKeys.n, control: true), .moveHighlight(by: 1))
+        XCTAssertEqual(action(MentionKeys.p, control: true), .moveHighlight(by: -1))
+    }
+
+    /// A text view binds ⌃-N/⌃-P to moving the caret a line, so driving the list has to consume them
+    /// or the caret would jump at the same time.
+    func testControlNAndControlPAreConsumedWhileOpen() {
+        XCTAssertTrue(action(MentionKeys.n, control: true).consumesEvent)
+        XCTAssertTrue(action(MentionKeys.p, control: true).consumesEvent)
+    }
+
+    /// With the dropdown closed they go back to being ordinary caret movement.
+    func testControlNAndControlPAreLeftAloneWhileClosed() {
+        XCTAssertEqual(action(MentionKeys.n, control: true, open: false), .passThrough)
+        XCTAssertEqual(action(MentionKeys.p, control: true, open: false), .passThrough)
+    }
+
+    func testPlainNAndPStillType() {
+        XCTAssertEqual(action(MentionKeys.n), .passThrough)
+        XCTAssertEqual(action(MentionKeys.p), .passThrough)
+    }
+
+    /// ⌃ with anything else held is not the binding, and ⌃ with another letter is somebody else's.
+    func testOtherControlCombinationsPassThrough() {
+        XCTAssertEqual(action(MentionKeys.n, control: true, otherModifiers: true), .passThrough)
+        XCTAssertEqual(action(MentionKeys.returnKey, control: true), .passThrough)
+        XCTAssertEqual(action(0 /* "a" */, control: true), .passThrough)
     }
 
     func testOrdinaryTypingPassesThrough() {

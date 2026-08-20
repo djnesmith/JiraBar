@@ -11,6 +11,7 @@ struct UploadFilesDialog: View {
     @State private var files: [URL] = []
     @State private var comment: String = ""
     @State private var mentions: [MentionText.Mention] = []
+    @State private var mentionListOpen = false
     @State private var submitting: Bool = false
     @State private var isDropTargeted: Bool = false
 
@@ -67,6 +68,7 @@ struct UploadFilesDialog: View {
                 placeholder: "",
                 text: $comment,
                 mentions: $mentions,
+                dropdownOpen: $mentionListOpen,
                 lineLimit: 3...6
             )
 
@@ -79,7 +81,7 @@ struct UploadFilesDialog: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button(submitting ? "Uploading…" : "Upload") { submit() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(mentionListOpen ? nil : .defaultAction)
                     .disabled(submitting || files.isEmpty)
             }
         }

@@ -20,9 +20,12 @@ final class MentionDropdown: ObservableObject {
     /// of a token the user has already said no to.
     private var suppressedStart: Int?
     private var previousText = ""
-    private var focused = false
+    /// Published because `isOpen` is derived from it and is read from `body`. Left unobserved, a
+    /// focus change alone would not invalidate the view: the list would stay drawn over a field that
+    /// no longer has focus, and the dialogs' mirrored `dropdownOpen` would stick — stranding Return,
+    /// or worse, letting an invisible dropdown swallow it.
+    @Published private var focused = false
 
-    private var monitor: Any?
     /// The window the field is hosted in. The monitor is app-wide, so without this it would act on
     /// keys typed in Preferences.
     weak var host: NSWindow?
@@ -39,7 +42,14 @@ final class MentionDropdown: ObservableObject {
 
     func setFocused(_ value: Bool) {
         focused = value
-        syncMonitor()
+        // Leaving the field abandons the suggestion, rather than parking it to be resurrected by a
+        // later click — coming back to a list built for a query you have stopped typing is worse
+        // than no list.
+        if !value {
+            close()
+        } else {
+            syncMonitor()
+        }
     }
 
     /// Recomputes the trigger after an edit. Runs on every keystroke — only the network lookup is
@@ -118,18 +128,16 @@ final class MentionDropdown: ObservableObject {
 
     private func syncMonitor() {
         if isOpen {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                self?.handle(event) ?? event
-            }
+            MentionKeyMonitor.shared.activate(self)
         } else {
-            removeMonitor()
+            MentionKeyMonitor.shared.resign(self)
         }
     }
 
-    func removeMonitor() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
+    /// Hands the monitor back. The shared handler itself stays installed for the app's lifetime —
+    /// it early-returns with nobody active — so this is a stand-down, not a teardown.
+    func resignMonitor() {
+        MentionKeyMonitor.shared.resign(self)
     }
 
     /// The single place a keypress is either swallowed or handed on.
@@ -138,21 +146,24 @@ final class MentionDropdown: ObservableObject {
     /// `.cancelAction` and `.defaultAction` buttons never see it; returning it untouched is the only
     /// other outcome. `MentionKeyAction.consumesEvent` picks which, and `.passThrough` is its only
     /// non-consuming case — so one Escape can close the dropdown *or* cancel the dialog, never both.
-    private func handle(_ event: NSEvent) -> NSEvent? {
+    func handle(_ event: NSEvent) -> NSEvent? {
         // These dialogs are hosted in windows that are never released and carry no delegate, so
         // closing one does not tear the SwiftUI graph down and `onDisappear` never fires. Left to
-        // `isOpen` alone this app-wide monitor would outlive its dropdown and start eating Escape and
-        // Tab everywhere in the app — so it retires itself the moment its window is gone.
+        // `isOpen` alone this dropdown would keep answering for a dialog that is gone and start
+        // eating Escape and Tab everywhere in the app — so it stands itself down instead.
         guard let host, host.isVisible else {
-            removeMonitor()
+            resignMonitor()
             return event
         }
         guard event.window === host else { return event }
 
-        let modifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+        // Caps lock, and the `.function`/`.numericPad` flags the arrow keys carry, are deliberately
+        // not consulted — only the four modifiers that change what a press means here.
+        let flags = event.modifierFlags
         let action = MentionKeys.action(
             keyCode: event.keyCode,
-            modified: !event.modifierFlags.intersection(modifiers).isEmpty,
+            control: flags.contains(.control),
+            otherModifiers: !flags.intersection([.command, .option, .shift]).isEmpty,
             dropdownOpen: isOpen,
             hasHighlight: matches.indices.contains(highlight)
         )
@@ -170,8 +181,51 @@ final class MentionDropdown: ObservableObject {
     }
 }
 
-/// A comment box with Jira @-mention autocomplete. All three comment dialogs use this instead of a
-/// bare `TextField`, so the interaction — and the key handling that makes it safe — exists once.
+/// The one app-wide key monitor for mention dropdowns.
+///
+/// A single shared monitor, not one per field. `addLocalMonitorForEvents` installs an app-wide
+/// handler, and these dialogs live in windows that are never released and carry no delegate, so a
+/// per-field monitor was left behind by every dialog that had ever been opened. With several
+/// installed, one stale monitor handing the event on was enough to let a single Return both commit
+/// the mention and submit the comment.
+@MainActor
+final class MentionKeyMonitor {
+    static let shared = MentionKeyMonitor()
+
+    private weak var active: MentionDropdown?
+    private var monitor: Any?
+
+    private init() {}
+
+    func activate(_ dropdown: MentionDropdown) {
+        active = dropdown
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            MentionKeyMonitor.shared.route(event)
+        }
+    }
+
+    /// Stands the given dropdown down. Ignored when another one has since taken over, so a closing
+    /// dialog cannot switch off the dropdown of the one that replaced it.
+    func resign(_ dropdown: MentionDropdown) {
+        guard active === dropdown else { return }
+        active = nil
+    }
+
+    private func route(_ event: NSEvent) -> NSEvent? {
+        guard let active, active.isOpen else { return event }
+        return active.handle(event)
+    }
+}
+
+/// A comment box with Jira @-mention autocomplete. Every box whose text becomes a Jira comment uses
+/// this instead of a bare `TextField`, so the interaction — and the key handling that makes it safe —
+/// exists once: Comment, Flag, Upload, Transition and BulkMove.
+///
+/// The other multi-line fields are deliberately left alone. `TransitionDialog`'s review comment goes
+/// to GitHub, where Jira mention markup would be literal text; the `freeText` fields in Transition
+/// and BulkMove are custom *field* values, not comments; and the user-picker filters are not text
+/// anybody sends anywhere.
 ///
 /// `text` stays readable: the box shows "@Ada Lovelace", never an account id. `mentions` collects
 /// the wiki markup each committed name stands for, and callers submit
@@ -180,6 +234,9 @@ struct MentionTextField: View {
     let placeholder: String
     @Binding var text: String
     @Binding var mentions: [MentionText.Mention]
+    /// Mirrors whether the dropdown is showing. Dialogs use it to drop the plain-Return shortcut off
+    /// their submit button while it is, so Return can only ever commit the highlighted name.
+    @Binding var dropdownOpen: Bool
     let lineLimit: ClosedRange<Int>
 
     @StateObject private var dropdown = MentionDropdown()
@@ -201,9 +258,8 @@ struct MentionTextField: View {
             valueChanged: { _ in runSearch() },
             debounceSeconds: 0.2
         )
-        // Anchored to the top of the box and hanging over the text rather than below the field: the
-        // dialogs are fixed-height, and a list dropped below a twelve-line box would run off the
-        // bottom where its rows could be arrow-selected but neither seen nor clicked.
+        // Anchored to the top of the box and hanging over the text rather than below the field, for
+        // the reason `MentionText.maxSuggestions` gives.
         .overlay(alignment: .topLeading) { list.offset(y: Self.rowHeight + 2) }
         .background(WindowReader { dropdown.host = $0 })
         .zIndex(1)
@@ -211,9 +267,10 @@ struct MentionTextField: View {
             dropdown.seed(text: text)
             dropdown.onCommit = commit
         }
-        .onDisappear { dropdown.removeMonitor() }
+        .onDisappear { dropdown.resignMonitor() }
         .onChange(of: text) { dropdown.retrigger(text: $0) }
         .onChange(of: focused) { dropdown.setFocused($0) }
+        .onChange(of: dropdown.isOpen) { dropdownOpen = $0 }
     }
 
     // MARK: - Dropdown
@@ -286,6 +343,34 @@ struct MentionTextField: View {
         text = result.text
         dropdown.seed(text: result.text)
         mentions.append(result.mention)
+        placeCaret(at: result.caret, in: result.text)
+    }
+
+    /// Drops the insertion point after the name just inserted, with nothing selected.
+    ///
+    /// Replacing a SwiftUI `TextField`'s bound string leaves the field editor holding the whole new
+    /// value selected, so without this the next character typed would wipe out the name that was
+    /// just picked.
+    ///
+    /// Retried rather than attempted once: the field editor does not carry the new string until
+    /// SwiftUI has pushed it down, and a commit almost always *lengthens* the text, so giving up on
+    /// a stale editor would fail in the common case and leave no trace of having done so.
+    private func placeCaret(at caret: Int, in updated: String, attemptsLeft: Int = 4) {
+        DispatchQueue.main.async {
+            // Only ever this field's own editor. `firstResponder` is whichever text view has focus,
+            // and the Transition and BulkMove dialogs have several.
+            guard focused, let editor = dropdown.host?.firstResponder as? NSTextView else { return }
+            guard editor.string == updated else {
+                if attemptsLeft > 0 {
+                    placeCaret(at: caret, in: updated, attemptsLeft: attemptsLeft - 1)
+                } else {
+                    NSLog("MentionTextField: gave up placing the caret; the field editor never took the new text")
+                }
+                return
+            }
+            let offset = MentionText.utf16Offset(ofCaret: caret, in: updated)
+            editor.setSelectedRange(NSRange(location: min(offset, (editor.string as NSString).length), length: 0))
+        }
     }
 }
 

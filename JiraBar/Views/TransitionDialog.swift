@@ -401,6 +401,8 @@ struct TransitionDialog: View {
     let onCancel: () -> Void
 
     @State private var comment: String = ""
+    @State private var mentions: [MentionText.Mention] = []
+    @State private var mentionListOpen = false
     @State private var freeText: String = ""
     @State private var selectedUsers: Set<JiraUser> = []
     @State private var availableUsers: [JiraUser] = []
@@ -841,9 +843,13 @@ struct TransitionDialog: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Comment")
                 .font(.headline)
-            TextField("", text: $comment, axis: .vertical)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .lineLimit(5...10)
+            MentionTextField(
+                placeholder: "",
+                text: $comment,
+                mentions: $mentions,
+                dropdownOpen: $mentionListOpen,
+                lineLimit: 5...10
+            )
         }
     }
 
@@ -993,7 +999,7 @@ struct TransitionDialog: View {
                     .keyboardShortcut(.cancelAction)
                     .disabled(submitting)
                 Button(submitButtonTitle) { submit() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(mentionListOpen ? nil : .defaultAction)
                     .disabled(!canSubmit)
             }
         }
@@ -1016,7 +1022,10 @@ struct TransitionDialog: View {
         prNote = nil
         let flag = showGithubMirrorCheckbox && updateGithub
         let choices = currentPRChoices
-        onSubmit(comment, Array(selectedUsers), freeText, selectedOptionValue, flag, choices) { outcome in
+        onSubmit(
+            MentionText.wikiBody(text: comment, mentions: mentions),
+            Array(selectedUsers), freeText, selectedOptionValue, flag, choices
+        ) { outcome in
             switch outcome {
             case .jiraRefused(let message, let fieldsWritten):
                 // Stay open, say why, and be honest about whether anything was persisted.

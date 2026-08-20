@@ -9,6 +9,7 @@ struct FlagDialog: View {
 
     @State private var comment: String = ""
     @State private var mentions: [MentionText.Mention] = []
+    @State private var mentionListOpen = false
     @State private var submitting: Bool = false
 
     var body: some View {
@@ -36,6 +37,7 @@ struct FlagDialog: View {
                 placeholder: "Optional comment",
                 text: $comment,
                 mentions: $mentions,
+                dropdownOpen: $mentionListOpen,
                 lineLimit: 4...8
             )
 
@@ -48,12 +50,12 @@ struct FlagDialog: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button(submitting ? "Flagging…" : "Add Flag") { submit() }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(mentionListOpen ? nil : .defaultAction)
                     .disabled(submitting)
             }
         }
         .padding(16)
-        .frame(width: 480, height: 260)
+        .frame(width: 480, height: 320)
     }
 
     private func submit() {
