@@ -80,11 +80,10 @@ private final class IssueSubmenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
-/// Defers work until a menu is first opened, then runs it once. Used by the TODO and Recently Closed
-/// sections,
-/// whose per-ticket submenus each cost a transitions call plus a dev-status call: paying that
-/// for a whole backlog on every refresh — for a section that often goes unopened — would
-/// multiply the app's request volume for nothing.
+/// Defers work until a menu is first opened, then runs it once. Used by TODO, Recently Closed,
+/// Recently Seen and Recently Approved PRs, whose per-ticket submenus each cost a transitions call
+/// plus a dev-status call: paying that for a whole backlog on every refresh — for a section that
+/// often goes unopened — would multiply the app's request volume for nothing.
 private final class LazyMenuDelegate: NSObject, NSMenuDelegate {
     private let populate: () -> Void
     private var populated = false
@@ -696,6 +695,12 @@ extension AppDelegate {
     /// Adds the Recently Closed section under TODO: tickets the user's query returns, each showing its
     /// PRs — including merged and closed ones, which for a finished ticket are the artifact worth seeing.
     ///
+    /// Submenus are the full per-issue set, same as everywhere else. Done is not the end of a
+    /// ticket's life: a workflow that offers a way back out of it says so through the transitions
+    /// endpoint like any other status, and a closed ticket still takes a comment or an attachment —
+    /// evidence tends to arrive after the fact, not before. A workflow with no outgoing transitions
+    /// from Done simply renders no transition block, which is the same thing this section did before.
+    ///
     /// Submenus are built on first open — see `LazyMenuDelegate` for why that matters at a request per
     /// ticket.
     private func appendRecentlyClosedSection(_ pending: PendingSection<[Issue]>) {
@@ -724,7 +729,7 @@ extension AppDelegate {
             }
             let delegate = LazyMenuDelegate {
                 for (row, issue) in rows {
-                    self.attachClosedIssueSubmenu(to: row, issue: issue)
+                    self.attachIssueSubmenu(to: row, issue: issue, onPRsCollected: nil)
                 }
             }
             closedMenu.delegate = delegate
@@ -739,9 +744,18 @@ extension AppDelegate {
     /// The status is the point of the row — it is what you changed — so it renders like Recently
     /// Closed's does, from the user's own status colours.
     ///
-    /// Submenus are the finished-ticket set: copy shortcuts and PR rows, no transitions. These are not
-    /// your tickets, and offering to move someone else's from a rollup invites a misclick with no
-    /// context.
+    /// Submenus are the full per-issue set, the same one the main list and TODO get. These tickets are
+    /// someone else's but they are still open and still moving, and handing one off is not a reason to
+    /// make it read-only from here — this is often the only place it still appears.
+    ///
+    /// The transitions come from Jira's per-issue endpoint, so they are already the ones valid for
+    /// that ticket in that status and nothing narrows them on this side.
+    ///
+    /// Note what Jira's permissions do *not* cover: with its checkbox left on, a user-field shortcut
+    /// mirrors to GitHub — assigning the viewer (not the assignee) to the PR and rewriting its
+    /// requested reviewers, dropping any that are in the mapping file but not on the ticket. See
+    /// `mirrorReviewersToGithub`. Documented rather than defaulted off for this section alone, since
+    /// TODO carries the same exposure on rows that are, by its own filter, not the viewer's either.
     private func appendRecentlySeenSection(_ pending: PendingSection<[Issue]>) {
         let separator = NSMenuItem.separator()
         let header = AppDelegate.makeSectionHeader(title: "Recently Seen", symbolName: "eye")
@@ -768,46 +782,12 @@ extension AppDelegate {
             }
             let delegate = LazyMenuDelegate {
                 for (row, issue) in rows {
-                    self.attachClosedIssueSubmenu(to: row, issue: issue)
+                    self.attachIssueSubmenu(to: row, issue: issue, onPRsCollected: nil)
                 }
             }
             seenMenu.delegate = delegate
             self.submenuDelegates.append(delegate)
             header.submenu = seenMenu
-        }
-    }
-
-    /// A finished ticket's submenu: the copy shortcuts, which cost nothing, and its PR rows. No
-    /// transitions, comment, flag, upload or user-field shortcuts — each is either a mutation or a request
-    /// per ticket, and this section is a rollup of history.
-    private func attachClosedIssueSubmenu(to item: NSMenuItem, issue: Issue) {
-        let issueMenu = NSMenu()
-        item.submenu = issueMenu
-
-        let copyKeyItem = NSMenuItem(title: "Copy Key", action: #selector(self.copyToClipboard), keyEquivalent: "")
-        copyKeyItem.representedObject = issue.key
-        issueMenu.addItem(copyKeyItem)
-
-        let copyURLItem = NSMenuItem(title: "Copy URL", action: #selector(self.copyToClipboard), keyEquivalent: "")
-        copyURLItem.representedObject = "\(self.baseUrl)/browse/\(issue.key)"
-        issueMenu.addItem(copyURLItem)
-
-        let copyTitleItem = NSMenuItem(title: "Copy Title", action: #selector(self.copyToClipboard), keyEquivalent: "")
-        copyTitleItem.representedObject = issue.fields.summary
-        issueMenu.addItem(copyTitleItem)
-
-        jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
-            self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
-                guard !merged.isEmpty else { return }
-                self.fetchGithubStatuses(for: merged) { statusByURL in
-                    DispatchQueue.main.async {
-                        issueMenu.addItem(.separator())
-                        for pr in merged {
-                            self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1109,7 +1089,11 @@ extension AppDelegate {
     /// Builds the two-line ticket row: truncated summary, then `#KEY · assignee · type`.
     /// Clicking opens the ticket in the browser. The submenu is attached separately by
     /// `attachIssueSubmenu` so callers can decide when to pay for it.
-    private func makeIssueRow(
+    ///
+    /// The row's own action is what keeps it out of NSMenu's enabling latch while it is still
+    /// waiting for that submenu — see `LazySectionSubmenuTests`, which is why this is reachable
+    /// from the tests.
+    func makeIssueRow(
         for issue: Issue,
         highlightAssigned: Bool = false,
         showStatus: Bool = false
@@ -1192,8 +1176,9 @@ extension AppDelegate {
     /// user-field shortcuts (whose current values load lazily on hover), and PR rows.
     ///
     /// `onPRsCollected` receives the merged PR list so the main-menu path can feed the
-    /// PRs Without Tickets exclusion set. It's nil for TODO rows, which are built lazily and
-    /// may never be opened — that section can't wait on work that might not happen.
+    /// PRs Without Tickets exclusion set. Only the main list passes it. The three lazy sections
+    /// (TODO, Recently Closed, Recently Seen) pass nil: their rows are populated on first hover and
+    /// may never be opened at all, so the exclusion set can't wait on work that might not happen.
     private func attachIssueSubmenu(
         to item: NSMenuItem,
         issue: Issue,
