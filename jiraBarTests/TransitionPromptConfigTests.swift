@@ -750,7 +750,7 @@ final class TransitionOutcomeTextTests: XCTestCase {
     /// review refused, the transition already applied.
     func testSingleFailedReviewRendersTheWholeReport() {
         var tally = AppDelegate.PRActionTally()
-        tally.reviewFailed = ["Tradeswell/tw-utils #36"]
+        tally.reviewFailed = ["Umbrella/utils #36"]
 
         guard case .failures(let lines) = tally.report else {
             return XCTFail("a refused review is a failure, not a skip: \(tally.report)")
@@ -760,7 +760,7 @@ final class TransitionOutcomeTextTests: XCTestCase {
             TransitionOutcomeText.prActionsIncomplete(count: lines.count),
             "The Jira transition WAS applied, but 1 PR action did not:"
         )
-        XCTAssertEqual(lines, ["Review not submitted on Tradeswell/tw-utils #36"])
+        XCTAssertEqual(lines, ["Review not submitted on Umbrella/utils #36"])
     }
 
     func testPluralisesOnMoreThanOneFailure() {
@@ -1136,7 +1136,7 @@ final class ResolveConversationsTests: XCTestCase {
     func testOnlyUnresolvedThreadsAreCollected() {
         let nodes: [[String: Any]] = [
             ["id": "T1", "isResolved": false, "comments": ["nodes": [["author": ["login": "djnesmith"]]]]],
-            ["id": "T2", "isResolved": true, "comments": ["nodes": [["author": ["login": "jgerman"]]]]],
+            ["id": "T2", "isResolved": true, "comments": ["nodes": [["author": ["login": "jdoe"]]]]],
         ]
         let threads = GithubClient.unresolvedThreads(fromNodes: nodes)
         XCTAssertEqual(threads.map(\.id), ["T1"])
@@ -1250,13 +1250,13 @@ final class ResolveConversationsTests: XCTestCase {
         var choices = PRActionChoices.disabled
         choices.resolveThreads = true
         var tally = AppDelegate.PRActionTally()
-        tally.resolved = [(label: "acme/api #698", authors: ["djnesmith", "jgerman"])]
+        tally.resolved = [(label: "acme/api #698", authors: ["djnesmith", "jdoe"])]
 
         let text = AppDelegate.prActionsSummaryBody(
             issueKey: "JB-1", actions: choices, candidateCount: 1,
             plan: PRActionsStatus.ReviewPlan(), tally: tally
         )
-        XCTAssertTrue(text.contains("resolved 2 conversations on acme/api #698 (djnesmith, jgerman)"), text)
+        XCTAssertTrue(text.contains("resolved 2 conversations on acme/api #698 (djnesmith, jdoe)"), text)
     }
 
     /// A resolve-only prompt on a PR with nothing open must not report "no changes" — the action ran.
@@ -1300,7 +1300,7 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     func testCleanBatchReportsOnlyTheMoveCount() {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 5, jiraFailures: [],
-            prResults: [("DATA-1", tally(reviewOK: 2)), ("DATA-2", tally(reviewOK: 1))]
+            prResults: [("DEV-1", tally(reviewOK: 2)), ("DEV-2", tally(reviewOK: 1))]
         )
         XCTAssertEqual(text, "Moved 5 issues", "a clean ticket contributes no line")
     }
@@ -1310,34 +1310,34 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     func testProblemsLeadWithAnExplicitTotal() {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 3,
-            jiraFailures: [("DATA-9", "Testers are required before moving into QA.")],
-            prResults: [("DATA-1", tally(reviewFailed: ["acme/api #7"]))]
+            jiraFailures: [("DEV-9", "Testers are required before moving into QA.")],
+            prResults: [("DEV-1", tally(reviewFailed: ["acme/api #7"]))]
         )
         XCTAssertTrue(text.hasPrefix("2 PROBLEMS — Moved 3 issues:"), text)
-        XCTAssertTrue(text.contains("DATA-9 not moved: Testers are required"), text)
-        XCTAssertTrue(text.contains("DATA-1: Review not submitted on acme/api #7"), text)
+        XCTAssertTrue(text.contains("DEV-9 not moved: Testers are required"), text)
+        XCTAssertTrue(text.contains("DEV-1: Review not submitted on acme/api #7"), text)
     }
 
     /// Mixed outcomes stay legible: which ticket didn't move, and which ticket's PR didn't get actioned.
     func testMixedOutcomesAreAttributedSeparately() {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 2,
-            jiraFailures: [("DATA-9", "Testers are required before moving into QA.")],
+            jiraFailures: [("DEV-9", "Testers are required before moving into QA.")],
             prResults: [
-                ("DATA-1", tally(reviewOK: 1)),
-                ("DATA-2", tally(reviewFailed: ["acme/web #3"])),
+                ("DEV-1", tally(reviewOK: 1)),
+                ("DEV-2", tally(reviewFailed: ["acme/web #3"])),
             ]
         )
         XCTAssertEqual(text, """
         2 PROBLEMS — Moved 2 issues:
-        DATA-9 not moved: Testers are required before moving into QA.
-        DATA-2: Review not submitted on acme/web #3
+        DEV-9 not moved: Testers are required before moving into QA.
+        DEV-2: Review not submitted on acme/web #3
         """)
     }
 
     func testSingularProblem() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 1, jiraFailures: [("DATA-9", nil)], prResults: []
+            moved: 1, jiraFailures: [("DEV-9", nil)], prResults: []
         )
         XCTAssertTrue(text.hasPrefix("1 PROBLEM — Moved 1 issue:"), text)
     }
@@ -1347,15 +1347,15 @@ final class BulkPRActionsSummaryTests: XCTestCase {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 3,
             jiraFailures: [
-                ("DATA-9", "Testers are required before moving into QA."),
-                ("DATA-8", nil),
+                ("DEV-9", "Testers are required before moving into QA."),
+                ("DEV-8", nil),
             ],
             prResults: []
         )
         XCTAssertEqual(text, """
         2 PROBLEMS — Moved 3 issues:
-        DATA-9 not moved: Testers are required before moving into QA.
-        DATA-8 not moved
+        DEV-9 not moved: Testers are required before moving into QA.
+        DEV-8 not moved
         """)
     }
 
@@ -1364,13 +1364,13 @@ final class BulkPRActionsSummaryTests: XCTestCase {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 2, jiraFailures: [],
             prResults: [
-                ("DATA-1", tally(reviewOK: 1)),
-                ("DATA-2", tally(reviewFailed: ["acme/api #7"])),
+                ("DEV-1", tally(reviewOK: 1)),
+                ("DEV-2", tally(reviewFailed: ["acme/api #7"])),
             ]
         )
         XCTAssertEqual(text, """
         1 PROBLEM — Moved 2 issues:
-        DATA-2: Review not submitted on acme/api #7
+        DEV-2: Review not submitted on acme/api #7
         """)
     }
 
@@ -1378,11 +1378,11 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     func testATicketWhereNothingRanSaysWhy() {
         let text = AppDelegate.bulkPRActionsSummary(
             moved: 1, jiraFailures: [],
-            prResults: [("DATA-1", tally(blocked: "No open linked PRs were found, so no PR action ran."))]
+            prResults: [("DEV-1", tally(blocked: "No open linked PRs were found, so no PR action ran."))]
         )
         XCTAssertEqual(text, """
         1 PROBLEM — Moved 1 issue:
-        DATA-1: No open linked PRs were found, so no PR action ran.
+        DEV-1: No open linked PRs were found, so no PR action ran.
         """)
     }
 
@@ -1431,18 +1431,17 @@ final class PRResolveOfferTests: XCTestCase {
 
     // MARK: - single-issue wording
 
-    /// The real case: Tradeswell/data-service-manager#285 — 3 unresolved, all jgerman's, two of them
-    /// outdated, which still count because an outdated thread still blocks the merge.
+    /// Outdated threads are counted too, because an outdated thread still blocks the merge.
     func testOnePRNamesTheCountAndWhose() {
         var candidate = PRResolveOffer.candidates(from: [pr(285, unresolved: 3)])
-        candidate[0].authors = ["jgerman", "jgerman", "jgerman"]
-        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 3 open conversations (jgerman)")
+        candidate[0].authors = ["jdoe", "jdoe", "jdoe"]
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 3 open conversations (jdoe)")
     }
 
     func testAuthorsAreDedupedAndSorted() {
         var candidate = PRResolveOffer.candidates(from: [pr(1, unresolved: 4)])
-        candidate[0].authors = ["jgerman", "alice", "jgerman"]
-        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 4 open conversations (alice, jgerman)")
+        candidate[0].authors = ["jdoe", "alice", "jdoe"]
+        XCTAssertEqual(PRResolveOffer.label(for: candidate), "Resolve 4 open conversations (alice, jdoe)")
     }
 
     /// Names may still be loading, or their read may have failed. The offer stands on the count.
@@ -1463,7 +1462,7 @@ final class PRResolveOfferTests: XCTestCase {
         var candidates = PRResolveOffer.candidates(from: [
             pr(1, unresolved: 3), pr(2, unresolved: 2), pr(3, unresolved: 2),
         ])
-        candidates[0].authors = ["jgerman"]
+        candidates[0].authors = ["jdoe"]
         XCTAssertEqual(PRResolveOffer.label(for: candidates), "Resolve 7 open conversations across 3 PRs")
     }
 

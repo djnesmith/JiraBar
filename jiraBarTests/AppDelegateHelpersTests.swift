@@ -389,9 +389,9 @@ final class OwnershipSegmentsTests: XCTestCase {
         let segments = AppDelegate.ownershipSegments(
             assignees: ["djnesmith"],
             pendingReviewers: ["alice"],
-            reviews: [review("jgerman", "APPROVED")]
+            reviews: [review("jdoe", "APPROVED")]
         )
-        XCTAssertEqual(line(segments), "assignee: djnesmith · approved: jgerman · pending: alice")
+        XCTAssertEqual(line(segments), "assignee: djnesmith · approved: jdoe · pending: alice")
     }
 
     /// Reviewers sharing a state are named once under it, as the assignee segment already does for two
@@ -400,9 +400,9 @@ final class OwnershipSegmentsTests: XCTestCase {
         let segments = AppDelegate.ownershipSegments(
             assignees: [],
             pendingReviewers: ["bob"],
-            reviews: [review("jgerman", "APPROVED"), review("alice", "APPROVED")]
+            reviews: [review("jdoe", "APPROVED"), review("alice", "APPROVED")]
         )
-        XCTAssertEqual(line(segments), "unassigned · approved: jgerman, alice · pending: bob")
+        XCTAssertEqual(line(segments), "unassigned · approved: jdoe, alice · pending: bob")
     }
 
     /// Groups keep the order their state was first seen in, so nothing reshuffles as reviews arrive.
@@ -480,9 +480,9 @@ final class OwnershipSegmentsTests: XCTestCase {
 
     func testReviewerNameIsSystemYellowWhetherTheyReviewedOrNot() {
         let segments = AppDelegate.ownershipSegments(
-            assignees: [], pendingReviewers: ["alice"], reviews: [review("jgerman", "APPROVED")]
+            assignees: [], pendingReviewers: ["alice"], reviews: [review("jdoe", "APPROVED")]
         )
-        XCTAssertEqual(colour(of: "jgerman", in: segments), NSColor.systemYellow)
+        XCTAssertEqual(colour(of: "jdoe", in: segments), NSColor.systemYellow)
         XCTAssertEqual(colour(of: "alice", in: segments), NSColor.systemYellow)
     }
 
@@ -654,18 +654,18 @@ final class StatusElementColorTests: XCTestCase {
 final class RecentlyApprovedQueryTests: XCTestCase {
 
     func testQueryScopesToTheOrgsAndSortsByUpdatedDescending() {
-        let q = GithubClient.recentlyApprovedQuery(orgs: ["Tradeswell"])
+        let q = GithubClient.recentlyApprovedQuery(orgs: ["Umbrella"])
         XCTAssertTrue(q.contains("is:pr"), q)
         XCTAssertTrue(q.contains("reviewed-by:@me"), q)
-        XCTAssertTrue(q.contains("org:Tradeswell"), q)
+        XCTAssertTrue(q.contains("org:Umbrella"), q)
         // updated, not created or merged: they diverge on a PR approved days ago and pushed to today.
         XCTAssertTrue(q.contains("sort:updated-desc"), q)
         XCTAssertFalse(q.contains("is:open"), "merged PRs are the point here: " + q)
     }
 
     func testSeveralOrgsAndBlanksDropped() {
-        let q = GithubClient.recentlyApprovedQuery(orgs: [" Tradeswell ", "", "acme"])
-        XCTAssertTrue(q.contains("org:Tradeswell"), q)
+        let q = GithubClient.recentlyApprovedQuery(orgs: [" Umbrella ", "", "acme"])
+        XCTAssertTrue(q.contains("org:Umbrella"), q)
         XCTAssertTrue(q.contains("org:acme"), q)
     }
 

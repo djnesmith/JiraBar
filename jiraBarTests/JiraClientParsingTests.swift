@@ -352,8 +352,8 @@ final class ReviewerConnectionParsingTests: XCTestCase {
     }
 
     func testUserReviewerReadsItsLogin() {
-        let connection: [String: Any] = ["nodes": [["requestedReviewer": ["login": "jgerman"]]]]
-        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: connection), ["jgerman"])
+        let connection: [String: Any] = ["nodes": [["requestedReviewer": ["login": "jdoe"]]]]
+        XCTAssertEqual(GithubClient.pendingReviewers(fromConnection: connection), ["jdoe"])
     }
 
     /// A requested reviewer can be a Team, which has a name and no login. Dropping it made the row claim
@@ -371,12 +371,12 @@ final class ReviewerConnectionParsingTests: XCTestCase {
     func testReviewsReadAuthorAndState() {
         let connection: [String: Any] = [
             "nodes": [
-                ["state": "APPROVED", "author": ["login": "jgerman"]],
+                ["state": "APPROVED", "author": ["login": "jdoe"]],
                 ["state": "CHANGES_REQUESTED", "author": ["login": "alice"]],
             ]
         ]
         let reviews = GithubClient.reviews(fromConnection: connection)
-        XCTAssertEqual(reviews?.map(\.login), ["jgerman", "alice"])
+        XCTAssertEqual(reviews?.map(\.login), ["jdoe", "alice"])
         XCTAssertEqual(reviews?.map(\.state), ["APPROVED", "CHANGES_REQUESTED"])
     }
 

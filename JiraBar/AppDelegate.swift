@@ -927,7 +927,7 @@ extension AppDelegate {
         }
 
         // Grouped by state rather than one segment per reviewer, so a shared state is named once —
-        // "approved: jgerman, alice" — and each segment reads "label: name" like the assignee one above.
+        // "approved: jdoe, alice" — and each segment reads "label: name" like the assignee one above.
         // An ordered array rather than a dictionary: the groups appear in the order their state was first
         // seen, and merging by word means a pending group cannot duplicate a review group of the same name.
         var grouped: [(word: String, logins: [String])] = []

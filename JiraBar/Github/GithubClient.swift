@@ -43,8 +43,8 @@ struct GithubPRStatus {
     /// Logins (or team names) asked for a review who haven't left one yet. nil when the connection was
     /// absent from the response — unknown, which must not render as "nobody was asked".
     var pendingReviewers: [String]?
-    /// Reviews actually left, one per reviewer. Distinct from `pendingReviewers`: "asked jgerman" and
-    /// "jgerman requested changes" are different facts. nil when absent, as above.
+    /// Reviews actually left, one per reviewer. Distinct from `pendingReviewers`: "asked jdoe" and
+    /// "jdoe requested changes" are different facts. nil when absent, as above.
     var reviews: [PRReview]?
     /// Merge methods the repo permits. Used by the auto-merge flow to skip PRs whose repo
     /// disallows the chosen method.
