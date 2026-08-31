@@ -234,6 +234,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// "New version available" item on every rebuild (removeAllItems would otherwise eat it).
     private var latestReleaseURL: URL?
 
+    /// Debounces the external refresh notification (`com.dnesmith.jirabar.refresh`) — see
+    /// `registerExternalRefreshObserver`, which creates it.
+    private var externalRefreshDebouncer: RefreshDebouncer?
+
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         migrateStatusOrderIfNeeded()
         NotificationCenter.default.addObserver(self, selector: #selector(AppDelegate.windowClosed), name: NSWindow.willCloseNotification, object: nil)
@@ -251,6 +255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarItem.menu = menu
 
         scheduleRefreshTimer()
+        registerExternalRefreshObserver()
 
         NSApp.setActivationPolicy(.accessory)
 
@@ -273,6 +278,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         t.fire()
+    }
+
+    /// Instant refresh from outside the app: `notifyutil -p com.dnesmith.jirabar.refresh` (from
+    /// any shell or script that just moved a ticket) refreshes the menu without waiting for the
+    /// poll timer. Darwin notify rather than NSDistributedNotificationCenter because notifyutil
+    /// can post it with no payload and the sandbox permits observing it.
+    private func registerExternalRefreshObserver() {
+        externalRefreshDebouncer = RefreshDebouncer { [weak self] in
+            guard let self = self else { return }
+            if self.isRefreshing {
+                // The in-flight refresh's searches started before the notification and can
+                // predate the ticket move — re-arm instead of letting refreshMenu's guard
+                // silently drop the request.
+                self.externalRefreshDebouncer?.poke()
+            } else {
+                self.refreshMenu()
+            }
+        }
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+                NSLog("External refresh notification received")
+                // Hop to main explicitly — poke() is main-queue-only, and relying on Darwin
+                // notify delivering on the registering thread's run loop is too quiet a contract.
+                DispatchQueue.main.async { delegate.externalRefreshDebouncer?.poke() }
+            },
+            "com.dnesmith.jirabar.refresh" as CFString,
+            nil,
+            .deliverImmediately
+        )
     }
 
     /// Moves any entries the user had under the legacy `statusOrder` [String] key into the
