@@ -373,10 +373,14 @@ extension AppDelegate {
         jiraClient.getIssuesByJql() { resp, extras in
             self.isRefreshing = false
             self.recordFlags(extras.flags, generation: generation)
+            let countTitle = AppDelegate.statusBarCountTitle(
+                issueCount: resp.issues?.count, fetchFailed: extras.fetchFailed
+            )
+            self.statusBarItem.button?.title = countTitle
+            NSLog("Refresh finished, menubar shows %@", countTitle)
             let ranks = extras.ranks
             if let issues = resp.issues {
                 self.lastIssues = issues
-                self.statusBarItem.button?.title = String(issues.count)
                 let display = self.statusDisplay
                 let positionFor: (String) -> Int = { name in
                     display.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) ?? Int.max
@@ -432,10 +436,6 @@ extension AppDelegate {
                     }
                 }
             }
-            else {
-                self.statusBarItem.button?.title = String(0)
-            }
-
             if let todoPending { self.appendTodoSection(todoPending) }
             if let recentlyClosedPending { self.appendRecentlyClosedSection(recentlyClosedPending) }
             if let recentlySeenPending { self.appendRecentlySeenSection(recentlySeenPending) }
@@ -1001,6 +1001,14 @@ extension AppDelegate {
         case "COMMENTED":         return "commented"
         default:                  return nil
         }
+    }
+
+    /// The menubar text beside the icon: the issue count, or ✕ when the fetch failed, so a zeroed
+    /// count never masquerades as live data. A nil count *without* a failure is an unconfigured
+    /// instance — or a 2xx body with no issues array — and stays "0", matching what a fresh
+    /// install has always shown.
+    static func statusBarCountTitle(issueCount: Int?, fetchFailed: Bool) -> String {
+        fetchFailed ? "✕" : String(issueCount ?? 0)
     }
 
     /// What a user-field shortcut should read once its value is known.

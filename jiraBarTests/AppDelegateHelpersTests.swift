@@ -1627,3 +1627,26 @@ final class UserFieldSelectionTests: XCTestCase {
         XCTAssertEqual(after.map(\.accountId), ["new"], "two names on assignee is the ambiguous write")
     }
 }
+
+final class StatusBarCountTitleTests: XCTestCase {
+    func testASuccessfulFetchShowsTheCount() {
+        XCTAssertEqual(AppDelegate.statusBarCountTitle(issueCount: 7, fetchFailed: false), "7")
+        XCTAssertEqual(AppDelegate.statusBarCountTitle(issueCount: 0, fetchFailed: false), "0")
+    }
+
+    func testAFailedFetchShowsAnXInsteadOfACount() {
+        XCTAssertEqual(AppDelegate.statusBarCountTitle(issueCount: nil, fetchFailed: true), "✕")
+    }
+
+    /// The load-bearing precedence: even if a failure ever arrives with partially-decoded issues,
+    /// the ✕ must win — a stale count masquerading as live data is the bug this feature exists for.
+    func testFailureBeatsACountThatArrivedWithIt() {
+        XCTAssertEqual(AppDelegate.statusBarCountTitle(issueCount: 5, fetchFailed: true), "✕")
+    }
+
+    /// nil issues without a failure is the unconfigured fresh install — it has always shown 0,
+    /// and an ✕ there would send a new user hunting for a network problem that doesn't exist.
+    func testAnUnconfiguredInstanceStaysZeroNotX() {
+        XCTAssertEqual(AppDelegate.statusBarCountTitle(issueCount: nil, fetchFailed: false), "0")
+    }
+}

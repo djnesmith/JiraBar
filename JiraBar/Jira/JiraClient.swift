@@ -117,6 +117,11 @@ public class JiraClient {
         /// id is configured, the field is not on that issue's screen, or the search failed outright.
         /// Rendering unknown as unflagged would put "Add Flag" on a flagged ticket.
         var flags: [String: Bool] = [:]
+
+        /// True when the search itself failed — transport error, non-2xx status, or an undecodable
+        /// body — as opposed to succeeding with zero issues or being skipped as unconfigured.
+        /// The menubar renders these as ✕ rather than a count.
+        var fetchFailed = false
     }
 
     /// Runs a JQL search. Defaults to the user's configured query and result cap; callers can
@@ -165,7 +170,7 @@ public class JiraClient {
                         decoded = try JSONDecoder().decode(JiraResponse.self, from: data)
                     } catch {
                         print("\(url):  decode error \(error)")
-                        completion(JiraResponse(), IssueExtras())
+                        completion(JiraResponse(), IssueExtras(fetchFailed: true))
                         sendNotification(body: error.localizedDescription)
                         return
                     }
@@ -174,7 +179,7 @@ public class JiraClient {
                     ))
                 case .failure(let error):
                     print("\(url):  \(error)")
-                    completion(JiraResponse(), IssueExtras())
+                    completion(JiraResponse(), IssueExtras(fetchFailed: true))
                     sendNotification(body: error.localizedDescription)
                 }
             }
