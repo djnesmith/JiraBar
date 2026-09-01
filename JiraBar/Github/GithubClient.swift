@@ -64,6 +64,137 @@ struct GithubPRStatus {
 
 public class GithubClient {
 
+    /// Every GitHub **search** request this process has made, logged as it goes out, together with
+    /// what GitHub said was left of the search budget when it answered. See `GithubPRIndex` for why
+    /// search is the budget that matters. The running number is what has to stay flat as the ticket
+    /// list grows, which is why it is logged rather than merely counted.
+    private static let searchMeterQueue = DispatchQueue(label: "githubSearch.meter")
+    private static var searchRequestCount = 0
+
+    /// Records one outgoing search and returns its running number.
+    @discardableResult
+    static func noteSearchRequest(_ label: String) -> Int {
+        let count = searchMeterQueue.sync { () -> Int in
+            searchRequestCount += 1
+            return searchRequestCount
+        }
+        NSLog("github search #%d: %@", count, label)
+        return count
+    }
+
+    /// Logs GitHub's own account of the search budget straight from a response, so the remaining
+    /// count comes from the token actually in use rather than from a separate `/rate_limit` call.
+    static func logSearchBudget(_ label: String, _ response: HTTPURLResponse?) {
+        guard let response else { return }
+        let value = { (name: String) in response.value(forHTTPHeaderField: name) ?? "?" }
+        NSLog("github search budget after %@: resource=%@ remaining=%@/%@ (HTTP %d)",
+              label,
+              value("x-ratelimit-resource"),
+              value("x-ratelimit-remaining"),
+              value("x-ratelimit-limit"),
+              response.statusCode)
+    }
+
+    /// Why a search came back without results.
+    ///
+    /// `rateLimited` is the case that must never render as "no PRs": GitHub answers an exhausted
+    /// search budget with a 403 (or a 429) carrying `x-ratelimit-remaining: 0`, which is a
+    /// statement about us, not about the PRs.
+    enum SearchFailure: Error, Equatable {
+        case rateLimited
+        case other
+    }
+
+    /// Whether a failed response is GitHub refusing on rate grounds rather than reporting absence.
+    ///
+    /// Both status codes occur: 403 for the primary limit, 429 for the secondary ones. `retry-after`
+    /// is checked as well as the remaining counter because a secondary-limit refusal does not zero
+    /// the primary counter — it is still a rate limit, and still not an empty result.
+    static func searchFailure(from response: HTTPURLResponse?) -> SearchFailure {
+        guard let response, response.statusCode == 403 || response.statusCode == 429 else {
+            return .other
+        }
+        if response.value(forHTTPHeaderField: "retry-after") != nil { return .rateLimited }
+        if response.value(forHTTPHeaderField: "x-ratelimit-remaining") == "0" { return .rateLimited }
+        return .other
+    }
+
+    /// One page of a PR search: the parsed hits, how many hits the page actually held, and
+    /// GitHub's count of everything that matched — the last two are how the caller knows whether it
+    /// has seen all of it. `itemCount` is separate from `prs.count` because a hit this app cannot
+    /// parse still occupies a slot on the page.
+    struct PRSearchPage {
+        let prs: [JiraPullRequest]
+        let itemCount: Int
+        let totalCount: Int
+    }
+
+    /// The search behind the per-issue PR fallback, asked once per **project** rather than once per
+    /// ticket — see `GithubPRIndex` for why that distinction is the whole point.
+    ///
+    /// The bare project key, not a full issue key: GitHub's search tokenizes on the hyphen, so
+    /// `"PROJ-42" in:title` and `PROJ in:title` reach the same index term for the project half, and
+    /// the number adds no precision the local match doesn't already supply. Deliberately not
+    /// `is:open` — a merged PR is the artifact worth seeing on a finished ticket, which is what the
+    /// Recently Closed section shows.
+    ///
+    /// `sort:updated-desc` is what makes the page cap survivable: when a project has more matching
+    /// PRs than are fetched, the ones kept are the ones with recent activity. Verified to be read as
+    /// a qualifier rather than a search term — `total_count` is unchanged by adding it, while the
+    /// result order changes from relevance to descending `updated_at`.
+    static func projectPRsQuery(projectKey: String, orgs: [String]) -> String {
+        let orgTerms = orgs
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { "org:\($0)" }
+            .joined(separator: " ")
+        return "\(projectKey) in:title is:pr sort:updated-desc \(orgTerms)"
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// One page of `search/issues`, with the failure reason preserved. Every other search in this
+    /// file collapses a failure to an empty array; this one must not, because its caller has to
+    /// tell a refusal from an absence.
+    func searchPRs(
+        query: String,
+        page: Int,
+        perPage: Int,
+        token: String,
+        completion: @escaping (Result<PRSearchPage, SearchFailure>) -> Void
+    ) {
+        let label = "\(query) [page \(page)]"
+        GithubClient.noteSearchRequest(label)
+        AF.request(
+            "https://api.github.com/search/issues",
+            method: .get,
+            parameters: ["q": query, "per_page": perPage, "page": page],
+            headers: apiHeaders(token: token)
+        )
+        .validate(statusCode: 200..<300)
+        .responseData { response in
+            GithubClient.logSearchBudget(label, response.response)
+            switch response.result {
+            case .success(let data):
+                guard
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let items = json["items"] as? [[String: Any]]
+                else {
+                    completion(.failure(.other))
+                    return
+                }
+                completion(.success(PRSearchPage(
+                    prs: items.compactMap { GithubClient.searchHitAsPR($0) },
+                    itemCount: items.count,
+                    totalCount: json["total_count"] as? Int ?? items.count
+                )))
+            case .failure(let error):
+                let failure = GithubClient.searchFailure(from: response.response)
+                print("github searchPRs (\(failure)): \(error)")
+                completion(.failure(failure))
+            }
+        }
+    }
+
     /// Standard REST-API headers shared by every endpoint. `json: true` adds the JSON
     /// content type for calls that send a body.
     private func apiHeaders(token: String, json: Bool = false) -> HTTPHeaders {
@@ -235,86 +366,6 @@ public class GithubClient {
             }
     }
 
-    /// Fallback lookup used when Jira's dev-status API returns no PRs for an issue — searches
-    /// GitHub for PRs whose title contains the exact issue key, scoped to the caller-supplied
-    /// orgs. Reconstructs `JiraPullRequest` values so the renderer path stays unchanged.
-    func searchPRsForIssueKey(
-        _ key: String,
-        orgs: [String],
-        token: String,
-        completion: @escaping ([JiraPullRequest]) -> Void
-    ) {
-        let trimmedOrgs = orgs
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        guard !token.isEmpty, !trimmedOrgs.isEmpty, !key.isEmpty else {
-            completion([])
-            return
-        }
-
-        // GitHub's search tokenizes on hyphen even inside quotes, so searching for a key like
-        // "PROJ-42" will happily return a PR titled "OTHER-42 …" — it matches on the numeric
-        // half. We still ask GitHub to narrow (quotes reduce false positives and cost quota)
-        // but the returned titles are re-verified below with an exact case-insensitive
-        // substring check on the full key.
-        let orgTerms = trimmedOrgs.map { "org:\($0)" }.joined(separator: " ")
-        let q = "\"\(key)\" in:title is:pr \(orgTerms)"
-        let normalizedKey = key.lowercased()
-
-        let headers = apiHeaders(token: token)
-
-        AF.request(
-            "https://api.github.com/search/issues",
-            method: .get,
-            parameters: ["q": q, "per_page": 20],
-            headers: headers
-        )
-        .validate(statusCode: 200..<300)
-        .responseData { response in
-            switch response.result {
-            case .success(let data):
-                guard
-                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                    let items = json["items"] as? [[String: Any]]
-                else {
-                    completion([])
-                    return
-                }
-                let prs: [JiraPullRequest] = items.compactMap { item in
-                    guard
-                        let htmlURL = item["html_url"] as? String,
-                        let number = item["number"] as? Int,
-                        let title = item["title"] as? String
-                    else { return nil }
-                    // Exact-key substring check — drops false positives that share the numeric
-                    // half of the key (see the tokenization note where the query is built).
-                    guard title.lowercased().contains(normalizedKey) else { return nil }
-                    let state = (item["state"] as? String)?.lowercased() ?? "open"
-                    let mergedAt = (item["pull_request"] as? [String: Any])?["merged_at"] as? String
-                    let status: String
-                    if state == "open" {
-                        status = "OPEN"
-                    } else if mergedAt != nil {
-                        status = "MERGED"
-                    } else {
-                        status = "DECLINED"
-                    }
-                    return JiraPullRequest(
-                        id: "#\(number)",
-                        name: title,
-                        url: htmlURL,
-                        status: status,
-                        reviewers: nil
-                    )
-                }
-                completion(prs)
-            case .failure(let error):
-                print("github search: \(error)")
-                completion([])
-            }
-        }
-    }
-
     /// Searches GitHub for open PRs relevant to the token's user — ones they authored, ones
     /// assigned to them, and ones with their review requested — the candidate pool that the
     /// "PRs Without Tickets" menu section then filters down.
@@ -343,6 +394,7 @@ public class GithubClient {
 
         for (relation, q) in queries {
             group.enter()
+            GithubClient.noteSearchRequest(q)
             AF.request(
                 "https://api.github.com/search/issues",
                 method: .get,
@@ -351,6 +403,7 @@ public class GithubClient {
             )
             .validate(statusCode: 200..<300)
             .responseData { response in
+                GithubClient.logSearchBudget(q, response.response)
                 var parsed: [(pr: JiraPullRequest, assignees: [String])] = []
                 switch response.result {
                 case .success(let data):
@@ -460,14 +513,17 @@ public class GithubClient {
             completion([])
             return
         }
+        let query = GithubClient.recentlyApprovedQuery(orgs: orgs)
+        GithubClient.noteSearchRequest(query)
         AF.request(
             "https://api.github.com/search/issues",
             method: .get,
-            parameters: ["q": GithubClient.recentlyApprovedQuery(orgs: orgs), "per_page": limit],
+            parameters: ["q": query, "per_page": limit],
             headers: apiHeaders(token: token)
         )
         .validate(statusCode: 200..<300)
         .responseData { response in
+            GithubClient.logSearchBudget(query, response.response)
             switch response.result {
             case .success(let data):
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

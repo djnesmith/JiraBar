@@ -2822,10 +2822,13 @@ extension AppDelegate {
         }
     }
 
-    /// When Jira's dev-status API returns no PRs for an issue, fall back to searching GitHub
+    /// When Jira's dev-status API returns no PRs for an issue, fall back to the GitHub PR index
     /// for PRs whose title contains the issue key (Jira only links PRs when the key is in the
     /// branch name on some integration configs). Deduped by URL before returning so a PR that
     /// somehow appeared in both sources renders once.
+    ///
+    /// Goes through `GithubPRIndex`, not a search per issue: this runs for every row the menu
+    /// builds, and the search budget cannot absorb that. See `GithubPRIndex`.
     private func prsWithGithubFallback(
         _ jiraPRs: [JiraPullRequest],
         issueKey: String,
@@ -2847,7 +2850,7 @@ extension AppDelegate {
             return
         }
 
-        GithubClient().searchPRsForIssueKey(issueKey, orgs: orgs, token: token) { fallbackPRs in
+        GithubPRIndex.shared.prs(forIssueKey: issueKey, orgs: orgs, token: token) { fallbackPRs in
             completion(dedup(jiraPRs + fallbackPRs))
         }
     }
