@@ -221,6 +221,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let menu: NSMenu = NSMenu()
 
     var timer: Timer? = nil
+
+    /// Refreshes again after one of JiraBar's own writes — see `refreshAfterWrite`. Built lazily
+    /// because its `isBusy` closure reads `self`.
+    private lazy var catchUpSchedule = CatchUpRefreshSchedule(
+        isBusy: { [weak self] in self?.isRefreshing ?? false },
+        action: { [weak self] in self?.refreshMenu() }
+    )
     
     var preferencesWindow: NSWindow!
     var aboutWindow: NSWindow!
@@ -326,6 +333,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         t.fire()
+    }
+
+    /// The refresh to run after *JiraBar itself* wrote to Jira: now, and again on a schedule.
+    /// `CatchUpRefreshSchedule` carries why one refresh is not enough.
+    ///
+    /// Only for writes that change what the search returns or renders — transitions, the user-field
+    /// write (the user's JQL can match those fields directly) and the flag writes (the row marker
+    /// comes from the search's own field value). Comments and attachments are excluded not because
+    /// they change nothing — they bump `updated`, which reorders the Recently Seen section — but
+    /// because a reorder inside a history submenu is not the vanishing row this exists to fix, and
+    /// is not worth five extra rebuilds. An external refresh and the poll timer have no write of
+    /// ours to catch up with, so both keep the plain `refreshMenu`.
+    ///
+    /// A manual Refresh neither starts nor cancels a schedule. It is not a write, and cancelling on
+    /// it would strip the catch-up at exactly the moment the user is hand-refreshing *because* the
+    /// menu looks wrong.
+    ///
+    /// Known trade-off, deliberately accepted: `refreshMenu` empties the menu and only repopulates
+    /// when the searches return, so a tick landing while the menu is held open blanks it briefly and
+    /// loses hover position, and `submenuDelegates.removeAll()` drops any hover-triggered
+    /// field-value load in flight (its completion is `[weak self]`), leaving those rows on their
+    /// placeholder label. The poll timer has always been able to do this — it is registered in
+    /// `.common` mode precisely so it fires while a menu is open — but these ticks make it
+    /// systematic rather than a rare accident. Deferring a tick while the menu is open would be the
+    /// wrong fix: the whole point is the user reopening the menu seconds after a move to check it
+    /// landed. The right fix is a non-destructive rebuild, which is its own change.
+    private func refreshAfterWrite() {
+        refreshMenu()
+        catchUpSchedule.restart()
     }
 
     /// Instant refresh from outside the app: `notifyutil -p com.dnesmith.jirabar.refresh` (from
@@ -1509,8 +1545,15 @@ extension AppDelegate {
             return
         }
 
-        jiraClient.transitionIssue(issueKey: issueKey, to: transitionId) {
-            self.refreshMenu()
+        // The result-carrying overload, not the shorthand that discards it: a transition Jira
+        // refuses changed nothing, and starting a catch-up schedule for it would spend five menu
+        // rebuilds chasing a write that never happened.
+        jiraClient.transitionIssue(
+            issueKey: issueKey, to: transitionId, comment: nil, fieldUpdates: []
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                if case .success = result { self?.refreshAfterWrite() }
+            }
         }
     }
 
@@ -1580,7 +1623,13 @@ extension AppDelegate {
                 DispatchQueue.main.async {
                     self?.bulkMoveWindow?.close()
                     self?.bulkMoveWindow = nil
-                    self?.refreshMenu()
+                    // Nothing moved means nothing to catch up with — a batch Jira refused outright
+                    // still reports through the notification below.
+                    if successfulKeys.isEmpty {
+                        self?.refreshMenu()
+                    } else {
+                        self?.refreshAfterWrite()
+                    }
 
                     let mirrorReviewers: () -> Void = {
                         guard updateGithub, let self else { return }
@@ -1691,7 +1740,7 @@ extension AppDelegate {
         guard let issueKey = sender.representedObject as? String else { return }
         jiraClient.setFlag(issueKey: issueKey, flagFieldId: flagFieldId, flagged: false) { [weak self] success in
             DispatchQueue.main.async {
-                if success { self?.refreshMenu() }
+                if success { self?.refreshAfterWrite() }
             }
         }
     }
@@ -1711,7 +1760,7 @@ extension AppDelegate {
                         if success {
                             self.flagWindow?.close()
                             self.flagWindow = nil
-                            self.refreshMenu()
+                            self.refreshAfterWrite()
                         }
                         done(success)
                     }
@@ -1748,7 +1797,7 @@ extension AppDelegate {
                         if success {
                             self?.userFieldWindow?.close()
                             self?.userFieldWindow = nil
-                            self?.refreshMenu()
+                            self?.refreshAfterWrite()
                             if updateGithub {
                                 self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
                             }
@@ -1878,6 +1927,11 @@ extension AppDelegate {
         ) { [weak self] result in
             DispatchQueue.main.async {
                 if case .failed(let message, let fieldsWritten) = result {
+                    // The fields go up as a PUT before the transition POST, so a refusal can leave
+                    // them persisted — which is what `fieldsAlreadyWritten` reports. Those are the
+                    // fields the menu groups and renders from, so a write that landed still needs
+                    // the refresh even though the move did not happen.
+                    if fieldsWritten { self?.refreshAfterWrite() }
                     // Jira refused, or was unreachable. The window stays up carrying the server's
                     // own words — a message like "Testers are required before moving into QA." is
                     // only useful where it can be read.
@@ -1887,7 +1941,7 @@ extension AppDelegate {
                     ))
                     return
                 }
-                self?.refreshMenu()
+                self?.refreshAfterWrite()
                 if updateGithub, config.hasUserField {
                     self?.mirrorReviewersToGithub(issueKey: issueKey, jiraReviewers: users)
                 }
