@@ -138,6 +138,43 @@ final class PendingSection<T> {
     }
 }
 
+/// What the app knows about the TODO backlog at the moment the bulk-move dialog is opened.
+///
+/// `loading` is deliberately distinct from `loaded([])`. The TODO search runs concurrently with the
+/// main one (see `startTodoFetch`), so a dialog opened in the ~0.3-0.5s after launch or a manual
+/// Refresh can be built before that answer lands — and an empty To Do bucket reads as "the backlog
+/// is empty", which is a different claim from "we have not heard back yet". This is the screen the
+/// user decides what to move from, so the two must not look alike.
+enum TodoBacklogState {
+    /// No TODO JQL configured — there is no backlog, and nothing to say about one.
+    case unconfigured
+    /// A search is in flight and has never delivered. The dialog says so rather than showing zero rows.
+    case loading
+    /// The search came back as a failure and we have never had rows. Distinct from `loading` only in
+    /// what the dialog says: "we could not reach Jira" and "we are still asking" lead to different
+    /// user actions, and neither is "the backlog is empty".
+    case failed
+    /// The rows the most recent completed search delivered, in the order the menu renders them.
+    case loaded([Issue])
+
+    /// The rows to offer as bulk-move candidates — none until a search has actually answered.
+    var issues: [Issue] {
+        if case .loaded(let issues) = self { return issues }
+        return []
+    }
+
+    /// Why the backlog rows may be missing from a bulk-move candidate list built right now, or nil
+    /// when they are not. Only these two states have empty `issues` that must not read as
+    /// "the backlog is empty".
+    var gap: BulkBacklogGap? {
+        switch self {
+        case .loading:                return .searching
+        case .failed:                 return .unreachable
+        case .unconfigured, .loaded:  return nil
+        }
+    }
+}
+
 @main
 class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -197,6 +234,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Snapshot of the issues currently rendered in the menu. Captured at each refresh so the
     /// bulk-move dialog has a list of candidates without a fresh API call.
     private var lastIssues: [Issue] = []
+
+    /// The TODO backlog rows the bulk-move dialog offers alongside `lastIssues`, and whether their
+    /// search has answered yet — see `TodoBacklogState`.
+    ///
+    /// Held separately rather than merged into `lastIssues` on purpose. `lastIssues` is the *rendered
+    /// main list*, and two other things read it as exactly that: `recentlySeenRows(alreadyShown:)`,
+    /// whose whole job is "not already on screen above", and the menu-item gate below. Folding backlog
+    /// keys into it would silently widen that exclusion set and drop Recently Seen rows that are not
+    /// on screen at all. The merge belongs at the one call site that wants both — see
+    /// `bulkMoveCandidates`.
+    private var todoBacklog: TodoBacklogState = .unconfigured
 
     /// Flag state for every issue this refresh's searches reported on, keyed by issue key.
     ///
@@ -351,6 +399,9 @@ extension AppDelegate {
             && !self.gitHubToken.trimmingCharacters(in: .whitespaces).isEmpty
         // Runs concurrently with the main search below — see startTodoFetch.
         let todoPending = self.startTodoFetch()
+        self.todoBacklog = AppDelegate.todoBacklogAtRefresh(
+            searchStarted: todoPending != nil, current: self.todoBacklog
+        )
         let recentlyClosedPending = self.startRecentlyClosedFetch()
         let recentlySeenPending = self.startRecentlySeenFetch()
         let myPRsGroup = DispatchGroup()
@@ -500,7 +551,7 @@ extension AppDelegate {
             createNewItem.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
             self.menu.addItem(createNewItem)
 
-            if !self.lastIssues.isEmpty {
+            if AppDelegate.shouldOfferBulkMove(main: self.lastIssues, backlog: self.todoBacklog) {
                 let moveManyItem = NSMenuItem(title: "Move Multiple Issues…", action: #selector(self.openBulkMove), keyEquivalent: "")
                 moveManyItem.image = NSImage(systemSymbolName: "arrow.left.arrow.right.square", accessibilityDescription: nil)
                 self.menu.addItem(moveManyItem)
@@ -547,6 +598,7 @@ extension AppDelegate {
         var fetched: [Issue] = []
         var ranks: [String: String] = [:]
         var me: JiraUser?
+        var searchFailed = false
 
         group.enter()
         jiraClient.getIssuesByJql(
@@ -555,6 +607,7 @@ extension AppDelegate {
         ) { resp, extras in
             fetched = resp.issues ?? []
             ranks = extras.ranks
+            searchFailed = extras.fetchFailed
             self.recordFlags(extras.flags, generation: generation)
             group.leave()
         }
@@ -570,8 +623,28 @@ extension AppDelegate {
             // sorting the whole over-fetch would let the cap select by rank instead of by the
             // user's own ORDER BY — a different set of tickets on any query not already ordered by
             // rank, which is not a change this section's filter has any business making.
-            let rows = AppDelegate.todoRows(fetched, excluding: me, limit: wanted)
-            pending.deliver(AppDelegate.orderedByRank(rows, ranks: ranks))
+            let rows = AppDelegate.orderedByRank(
+                AppDelegate.todoRows(fetched, excluding: me, limit: wanted), ranks: ranks
+            )
+            // Generation-guarded for the reason `recordFlags` is: a superseded refresh's answer
+            // describes these tickets from before whatever the user just did to them, and this list
+            // is what a bulk move would be aimed at.
+            //
+            // A failed search must not be recorded as `.loaded([])`. That is the conflation
+            // `TodoBacklogState` exists to prevent, and it is worse here than in the menu: an empty
+            // To Do bucket reads as "the backlog is empty", and it also empties `backlogOnlyKeys`,
+            // which silently returns that status to auto-checking every row. The menubar `✕` only
+            // answers for the main search, so a TODO-only failure has no other signal.
+            if generation == self.refreshGeneration {
+                self.todoBacklog = AppDelegate.todoBacklogAfterFetch(
+                    rows: rows, searchFailed: searchFailed, current: self.todoBacklog
+                )
+            }
+            // Deliberately not generation-guarded, unlike the line above: `PendingSection` is
+            // one-shot per refresh and `appendTodoSection` re-checks that its menu item still
+            // belongs to the live menu, so the section already drops a superseded answer by a
+            // different route. The two are not inconsistent; they are guarded in different places.
+            pending.deliver(rows)
         }
         return pending
     }
@@ -689,6 +762,67 @@ extension AppDelegate {
         let rows = issues.filter { !($0.fields.assignee?.isSame(as: me) ?? false) }
         guard let limit, limit > 0 else { return rows }
         return Array(rows.prefix(limit))
+    }
+
+    /// Whether to offer "Move Multiple Issues…" at all.
+    ///
+    /// Rows in hand, from either search, or a backlog search that may still deliver some — the last
+    /// clause is what stops the item blinking out for the moments of a refresh. An answered-empty
+    /// backlog with an empty main list is false: the dialog would open onto nothing.
+    static func shouldOfferBulkMove(main: [Issue], backlog: TodoBacklogState) -> Bool {
+        !main.isEmpty || !backlog.issues.isEmpty || backlog.gap != nil
+    }
+
+    /// The backlog state a refresh should start from, given whether it started a search.
+    ///
+    /// A refresh over rows we already have **keeps them**. Dropping back to `.loading` on every
+    /// timer tick would open a window on each one where the bulk dialog's To Do bucket blanks and it
+    /// tells the user to reopen — for data it is holding and could have shown. A previous failure is
+    /// not kept: this refresh is a fresh attempt, and `.loading` is the true state of it.
+    static func todoBacklogAtRefresh(
+        searchStarted: Bool, current: TodoBacklogState
+    ) -> TodoBacklogState {
+        guard searchStarted else { return .unconfigured }
+        if case .loaded = current { return current }
+        return .loading
+    }
+
+    /// The candidate list the bulk-move dialog works from: the rendered main list plus the TODO
+    /// backlog rows, deduplicated by key.
+    ///
+    /// The dedupe is not defensive padding — the two searches genuinely overlap, which is why
+    /// `todoRows` and `recentlySeenRows` exist at all. `todoRows` drops tickets already assigned to
+    /// you and that covers most of it, but only when the `/myself` lookup succeeded (a nil `me`
+    /// filters nothing, deliberately), and the TODO JQL is the user's own text and may be scoped
+    /// wider than the main query. Two `Issue` values under one key would render two checkbox rows
+    /// for one ticket and then transition it twice in the same batch.
+    ///
+    /// Main-list order first, and main wins a collision: it is the copy already on screen above, and
+    /// the copy whose status grouping the user just read.
+    static func bulkMoveCandidates(main: [Issue], backlog: [Issue]) -> [Issue] {
+        var seen = Set(main.map(\.key))
+        // `insert` reports whether it was new, so this also drops a key repeated inside `backlog`.
+        return main + backlog.filter { seen.insert($0.key).inserted }
+    }
+
+    /// What a completed TODO search leaves behind.
+    ///
+    /// A failure with rows already in hand **keeps them and shows no notice** — stale beats absent
+    /// for a backlog rollup, and a rollup one refresh out of date is not worth interrupting a bulk
+    /// move over. The failure is surfaced only when there is nothing to keep, and then it is
+    /// recorded as a failure rather than as an answered, empty backlog.
+    static func todoBacklogAfterFetch(
+        rows: [Issue], searchFailed: Bool, current: TodoBacklogState
+    ) -> TodoBacklogState {
+        guard searchFailed else { return .loaded(rows) }
+        if case .loaded = current { return current }
+        return .failed
+    }
+
+    /// The candidate keys that came only from the TODO backlog. Drives the dialog's row marker, and
+    /// tells it which from-status holds back its auto-check — see `BulkMoveDialog.autoCheckedKeys`.
+    static func backlogOnlyKeys(main: [Issue], backlog: [Issue]) -> Set<String> {
+        Set(backlog.map(\.key)).subtracting(main.map(\.key))
     }
 
     /// How many rows to ask for when a section filters its results after the search, so the
@@ -1429,8 +1563,14 @@ extension AppDelegate {
     }
 
     private func presentBulkMoveDialog() {
+        let backlog = self.todoBacklog.issues
         let view = BulkMoveDialog(
-            issues: self.lastIssues,
+            issues: AppDelegate.bulkMoveCandidates(main: self.lastIssues, backlog: backlog),
+            backlogOnlyKeys: AppDelegate.backlogOnlyKeys(main: self.lastIssues, backlog: backlog),
+            // Captured at open, not observed. Letting the candidate list grow under an open dialog
+            // would move rows around a checkbox column the user is mid-way through, and could add
+            // rows to a from-status whose set they had already settled.
+            backlogGap: self.todoBacklog.gap,
             transitionPrompts: self.transitionPrompts,
             statusOrder: self.statusDisplay,
             showMirrorFor: { [weak self] fieldId in

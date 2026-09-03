@@ -18,6 +18,15 @@ final class BulkMoveDefaultTransitionTests: XCTestCase {
         Transition(name: name, id: id, to: target.map { IssueStatus(name: $0, iconUrl: nil) })
     }
 
+    /// Available out of "To Do". Measured against a live Jira, like the sets below.
+    private var fromToDo: [Transition] {
+        [
+            transition("11", "Start Progress", to: "In Progress"),
+            transition("161", "Send to Backlog", to: "Open"),
+            transition("61", "Force Close", to: "Done"),
+        ]
+    }
+
     /// Available out of "In Progress".
     private var fromInProgress: [Transition] {
         [
@@ -35,6 +44,17 @@ final class BulkMoveDefaultTransitionTests: XCTestCase {
         ]
     }
 
+    /// Available out of "Ready for Release". Measured against a live Jira.
+    ///
+    /// Note what is *not* here: `Force Close` is not offered from this status at all, so the
+    /// alphabetical tie it would have won under the old code was never reachable here either.
+    private var fromReadyForRelease: [Transition] {
+        [
+            transition("51", "Close", to: "Done"),
+            transition("121", "Back to QA", to: "QA"),
+        ]
+    }
+
     /// Available out of "QA".
     private var fromQA: [Transition] {
         [
@@ -44,33 +64,57 @@ final class BulkMoveDefaultTransitionTests: XCTestCase {
         ]
     }
 
-    // MARK: - The three real edges
+    // MARK: - The forward edges, measured
 
-    func testInProgressDefaultsToTheReviewTransition() {
-        XCTAssertEqual(
-            BulkMoveDialog.defaultTransitionName(
-                fromStatus: "In Progress", statusOrder: statusOrder, available: fromInProgress
-            ),
-            "Ready for Review"
-        )
+    /// Every status in a real configured order, against the transition set a live Jira actually
+    /// offers from it. The table is the point: the measured answer for a whole workflow rather than
+    /// a claim about one edge, and it is what covers the two statuses with no test of their own.
+    ///
+    /// Note the Ready for Release row. `Close` targets Done, and Done *is* the next status from
+    /// there — so defaulting to it is the legitimate forward move, not the failure
+    /// `testNeverDefaultsToAClosingTransition` guards against. That is why the invariant is stated
+    /// as "never defaults *past* the next status", not "never defaults to something that closes the
+    /// ticket", and why Ready for Release is not in that test's list.
+    ///
+    /// To Do is the edge the TODO-backlog bulk move lands on: under the old name-matching code the
+    /// fallback there was "Force Close".
+    func testTheDefaultForEveryStatusInTheRealOrder() {
+        let expected: [(String, [Transition], String)] = [
+            ("To Do", fromToDo, "Start Progress"),
+            ("In Progress", fromInProgress, "Ready for Review"),
+            ("Review and Test", fromReviewAndTest, "Ready for QA"),
+            ("QA", fromQA, "To Release"),
+            ("Ready for Release", fromReadyForRelease, "Close"),
+            ("Done", [], ""),
+        ]
+        for (from, available, want) in expected {
+            XCTAssertEqual(
+                BulkMoveDialog.defaultTransitionName(
+                    fromStatus: from, statusOrder: statusOrder, available: available
+                ),
+                want,
+                "wrong default out of \(from)"
+            )
+        }
     }
 
-    func testReviewAndTestDefaultsToTheQATransition() {
-        XCTAssertEqual(
-            BulkMoveDialog.defaultTransitionName(
-                fromStatus: "Review and Test", statusOrder: statusOrder, available: fromReviewAndTest
-            ),
-            "Ready for QA"
-        )
-    }
-
-    func testQADefaultsToTheReleaseTransition() {
-        XCTAssertEqual(
-            BulkMoveDialog.defaultTransitionName(
-                fromStatus: "QA", statusOrder: statusOrder, available: fromQA
-            ),
-            "To Release"
-        )
+    /// `Force Close` is offered from To Do and In Progress, and is never what either defaults to.
+    /// It is not offered at all from Ready for Release, the one status whose next entry is Done —
+    /// so there is no status in this workflow from which it can be the default.
+    func testForceCloseIsNeverTheDefaultFromAnyStatusThatOffersIt() {
+        for (from, available) in [("To Do", fromToDo), ("In Progress", fromInProgress)] {
+            XCTAssertTrue(
+                available.contains { $0.name == "Force Close" },
+                "fixture for \(from) no longer offers Force Close — this test has stopped testing anything"
+            )
+            XCTAssertNotEqual(
+                BulkMoveDialog.defaultTransitionName(
+                    fromStatus: from, statusOrder: statusOrder, available: available
+                ),
+                "Force Close",
+                "defaulted to Force Close out of \(from)"
+            )
+        }
     }
 
     /// The regression this replaces. Every one of these transition names differs from the status it
@@ -79,6 +123,7 @@ final class BulkMoveDefaultTransitionTests: XCTestCase {
     /// out of QA. Both close the ticket, applied to every checked issue at once.
     func testNeverDefaultsToAClosingTransition() {
         for (from, available) in [
+            ("To Do", fromToDo),
             ("In Progress", fromInProgress),
             ("Review and Test", fromReviewAndTest),
             ("QA", fromQA),

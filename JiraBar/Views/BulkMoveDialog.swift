@@ -1,5 +1,29 @@
 import SwiftUI
 
+/// Why the To Do rows in a bulk-move candidate list may be short, when they are.
+///
+/// Two reasons, because they lead to different user actions: waiting a moment and reopening fixes
+/// one, and nothing the user does in this dialog fixes the other. Neither may be shown as an empty
+/// backlog — see `TodoBacklogState`.
+enum BulkBacklogGap {
+    case searching
+    case unreachable
+}
+
+/// Who put the current selection in the bulk dialog's user picker.
+///
+/// A bool could not express this. Three states matter, and the middle two are what keep a bulk
+/// write honest: nothing has been chosen and a preselect may fill it in; the dialog filled it in,
+/// so it may be dropped and re-resolved when the prompt config changes under it; the user decided,
+/// so it is never overwritten and never re-preselected. **Deciding on nobody is a decision** — an
+/// empty picker the user emptied must not be refilled, which is why this is not inferred from
+/// `pickedUsers.isEmpty`.
+enum BulkUserSelectionOrigin {
+    case untouched
+    case preselect
+    case user
+}
+
 /// Move multiple issues to a new status in one shot.
 ///
 /// Flow: pick a "from" status (only statuses that currently have issues are listed) → pick issues
@@ -9,6 +33,15 @@ import SwiftUI
 /// its own transition POST (with the same field payload), serially, with a progress indicator.
 struct BulkMoveDialog: View {
     let issues: [Issue]
+    /// Candidate keys that came from the TODO backlog rather than the rendered ticket list.
+    ///
+    /// Two separate jobs, deliberately not merged: this labels individual rows with a trailing
+    /// `backlog` marker, and — at *status* granularity, never row by row — it is what
+    /// `autoCheckedKeys` reads to decide whether a from-status auto-checks at all.
+    let backlogOnlyKeys: Set<String>
+    /// Set when the To Do rows may be missing or short, and why — nil when they are complete.
+    /// Surfaced rather than swallowed: an absent bucket must not read as an empty backlog.
+    let backlogGap: BulkBacklogGap?
     let transitionPrompts: [TransitionPromptConfig]
     let statusOrder: [StatusDisplay]
     /// Returns true when the given Jira user-field id qualifies for the GitHub mirror
@@ -43,6 +76,10 @@ struct BulkMoveDialog: View {
     /// transition — this dialog applies its choice to every checked issue at once — so when the
     /// intersection stops offering it, it clears and Submit goes back to needing a decision.
     @State private var transitionSelectionIsDefault: Bool = true
+    /// Whose choice `pickedUsers` currently is — see `BulkUserSelectionOrigin`. Same provenance rule
+    /// as `transitionSelectionIsDefault`, and also what lets a required field satisfied purely by
+    /// the preselect say so.
+    @State private var userSelectionOrigin: BulkUserSelectionOrigin = .untouched
 
     // Per-prompt-config field state — only the ones the matching prompt enables actually render.
     @State private var comment: String = ""
@@ -50,6 +87,18 @@ struct BulkMoveDialog: View {
     @State private var mentionListOpen = false
     @State private var pickedUsers: Set<JiraUser> = []
     @State private var assignableUsers: [JiraUser] = []
+    /// Monotonic id of the newest `getAssignableUsers` request, so only its answer is applied.
+    ///
+    /// Two things make this load-bearing rather than tidiness. The picker is loaded from two places
+    /// on a single open (a transitions completion and the transition's `onChange`), and
+    /// `assignableUsers.isEmpty` cannot dedupe them because it only flips in a *completion* — so
+    /// without this, the later answer overwrites the list the preselect was mapped against and can
+    /// delete the row showing it. And `applyFromStatusChange` cannot cancel a request already
+    /// pivoted on the previous status's issue; bumping this is what stops that answer landing.
+    @State private var assignableUsersRequest = 0
+    /// True while a request is outstanding, so the second caller on one pass does not issue a
+    /// duplicate at all rather than issuing one whose answer is then discarded.
+    @State private var loadingUsers = false
     @State private var userFilter: String = ""
     @State private var freeText: String = ""
     @State private var selectValue: String = ""
@@ -62,18 +111,11 @@ struct BulkMoveDialog: View {
 
     // MARK: - Derived
 
-    private func sortPosition(for name: String) -> Int {
-        statusOrder.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) ?? Int.max
-    }
-
+    /// Every status present in `issues`, in the user's configured order, with anything they have
+    /// not ordered falling to the end alphabetically. Every candidate status is offered — the
+    /// backlog's included — because the from-picker is how the user reaches it deliberately.
     private var availableFromStatuses: [String] {
-        let names = Set(issues.map { $0.fields.status.name })
-        return names.sorted { lhs, rhs in
-            let lp = sortPosition(for: lhs)
-            let rp = sortPosition(for: rhs)
-            if lp != rp { return lp < rp }
-            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-        }
+        BulkMoveDialog.orderedStatuses(issues, order: statusOrder.map(\.name))
     }
 
     private var issuesInFromStatus: [Issue] {
@@ -138,6 +180,8 @@ struct BulkMoveDialog: View {
                 VStack(alignment: .leading, spacing: 12) {
                     header
 
+                    backlogNotice
+
             fromStatusSection
 
                     if !fromStatus.isEmpty {
@@ -189,9 +233,18 @@ struct BulkMoveDialog: View {
         .padding(16)
         .frame(width: 600)
         .frame(minHeight: 700, maxHeight: .infinity)
+        // On the outermost container, not on the "To" picker it watches: that picker renders only
+        // once something is checked, and a modifier on a view that is not in the tree observes
+        // nothing. Here it cannot be conditioned out from under the preselect.
+        .onChange(of: selectedTransitionName) { _ in applyTransitionChange() }
         .onAppear {
-            // Pre-pick the first status that has issues.
-            if fromStatus.isEmpty, let first = availableFromStatuses.first {
+            // Pre-pick the opening status — see `initialFromStatus` for why this is not simply the
+            // first entry the picker offers.
+            if fromStatus.isEmpty,
+               let first = BulkMoveDialog.initialFromStatus(
+                   candidates: issues, backlogOnly: backlogOnlyKeys,
+                   order: statusOrder.map(\.name)
+               ) {
                 fromStatus = first
             }
             // When the from status is settled, default-check every issue in it.
@@ -270,7 +323,45 @@ struct BulkMoveDialog: View {
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color(NSColor.separatorColor), lineWidth: 1)
                 )
+                // Says why nothing is ticked. Without it an empty column in one status and a full
+                // one in every other reads as a bug, and the user cannot tell it was deliberate.
+                // Deliberately does not point at "Select all": the rule exists because a
+                // pre-filled list gets submitted unread, and recommending the button that fills it
+                // in one click argues against itself. It is right there for whoever wants it.
+                if issuesInFromStatus.contains(where: { backlogOnlyKeys.contains($0.key) }) {
+                    Text("This status includes backlog issues, so nothing starts checked — pick the ones you want to move.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
             }
+        }
+    }
+
+    /// Named when the To Do rows may be missing, with the reason — see `BulkBacklogGap`. Orange, not
+    /// the accent colour: this is "attend to it before this does what you want", which is what
+    /// orange means here — see `ValidationHints`.
+    ///
+    /// It also covers a second thing, which is why the wording is about the rows rather than about
+    /// the network: with no backlog rows in the list, `autoCheckedKeys` has nothing to hold back on,
+    /// so the To Do status auto-checks the user's own tickets there as it did before this feature.
+    @ViewBuilder
+    private var backlogNotice: some View {
+        if let backlogGap {
+            Label(
+                BulkMoveDialog.backlogNoticeText(backlogGap),
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.footnote).foregroundColor(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    static func backlogNoticeText(_ gap: BulkBacklogGap) -> String {
+        switch gap {
+        case .searching:
+            return "Your TODO backlog is still loading, so To Do issues may be missing here. Close and reopen this dialog to include them."
+        case .unreachable:
+            return "Your TODO backlog couldn't be loaded, so To Do issues are missing here. This list is everything else."
         }
     }
 
@@ -281,7 +372,14 @@ struct BulkMoveDialog: View {
                 .foregroundColor(isChecked ? .accentColor : .secondary)
             VStack(alignment: .leading, spacing: 0) {
                 Text(AppDelegate.attributedColoringIssueKeys(issue.fields.summary)).lineLimit(1)
-                Text(issue.key).font(.caption).foregroundColor(.forIssueKey(issue.key))
+                HStack(spacing: 4) {
+                    Text(issue.key).font(.caption).foregroundColor(.forIssueKey(issue.key))
+                    // Trails the key rather than leading the row: the checkbox column is the row's
+                    // anchor, and a marker in front of it would compete with the thing being read.
+                    if backlogOnlyKeys.contains(issue.key) {
+                        Text("backlog").font(.caption).foregroundColor(.secondary)
+                    }
+                }
             }
             Spacer()
         }
@@ -383,6 +481,10 @@ struct BulkMoveDialog: View {
             } else {
                 pickedUsers = [user]
             }
+            // Touched, so it is theirs now: it survives a transition change, it stops being
+            // reported as a requirement satisfied without a decision, and — including when they
+            // just emptied the picker — it is never refilled by the preselect.
+            userSelectionOrigin = .user
         }
     }
 
@@ -442,8 +544,37 @@ struct BulkMoveDialog: View {
         }
     }
 
+    @ViewBuilder
     private var requirementsSection: some View {
+        if preselectSatisfiesRequirementSilently, let config = matchingPromptConfig {
+            // Blue, not the orange below — same split as `TransitionDialog.validationSection`:
+            // orange says "this is why the button is disabled", and this says the opposite, that the
+            // requirement is met but not by a decision. They can show together, so they must differ.
+            Label(
+                "\(config.userFieldLabel) is required and was prefilled with you for all \(checkedKeys.count) issue\(checkedKeys.count == 1 ? "" : "s") — change it if someone else should be named.",
+                systemImage: "info.circle"
+            )
+            .font(.footnote).foregroundColor(.accentColor)
+            .fixedSize(horizontal: false, vertical: true)
+        }
         ValidationHints(problems: missingRequirements)
+    }
+
+    /// A required user field that only the current-user preselect is satisfying. Not a blocker — the
+    /// default was configured deliberately — but this dialog writes that one selection to every
+    /// checked issue, so naming yourself across a batch you never looked at is a quiet wrong
+    /// outcome. Ported from `TransitionDialog.prefillSatisfiesRequirementSilently`; the count is the
+    /// part that is specific to here.
+    ///
+    /// Manual flag only, matching `missingRequirements` — this dialog reads no per-issue metadata.
+    private var preselectSatisfiesRequirementSilently: Bool {
+        guard let config = matchingPromptConfig else { return false }
+        return config.hasUserField
+            && config.fieldIsRequired(
+                config.userFieldId, manualFlag: config.userFieldRequired, jiraRequiredFieldIds: []
+            )
+            && userSelectionOrigin == .preselect
+            && !pickedUsers.isEmpty
     }
 
     /// The batch's PR-action choices, from the same config the single-issue dialog uses. No per-PR rows:
@@ -529,13 +660,19 @@ struct BulkMoveDialog: View {
     // MARK: - State transitions
 
     private func applyFromStatusChange() {
-        let inStatus = issuesInFromStatus
-        // Default all in-state issues to checked when the from-status changes.
-        checkedKeys = Set(inStatus.map(\.key))
+        // Default the in-status issues to checked, minus the backlog ones — see `backlogOnlyKeys`.
+        checkedKeys = BulkMoveDialog.autoCheckedKeys(
+            inStatus: issuesInFromStatus, backlogOnly: backlogOnlyKeys
+        )
         selectedTransitionName = ""
         transitionSelectionIsDefault = true
         pickedUsers = []
+        userSelectionOrigin = .untouched
         assignableUsers = []
+        // A load already pivoted on the previous status's issue must not land on this one — see
+        // `assignableUsersRequest`.
+        assignableUsersRequest += 1
+        loadingUsers = false
         userFilter = ""
         freeText = ""
         selectValue = ""
@@ -562,12 +699,81 @@ struct BulkMoveDialog: View {
                 self.fetchingFor.remove(key)
                 // Once we have a default-able transition list, pre-pick the "next logical" one.
                 self.applyDefaultSelectionIfNeeded()
-                // If a user-picker section becomes relevant, load assignable users for it once.
-                if let config = self.matchingPromptConfig, config.hasUserField, self.assignableUsers.isEmpty {
-                    self.loadAssignableUsers()
-                }
+                // Belt and braces with the `selectedTransitionName` onChange: this fires when a
+                // fetch completion resolves the default, that fires when the picker's value moves,
+                // and which one covers a given path depends on whether the lists were already
+                // cached. Silently losing the preselect is worse than resolving it twice — and
+                // running twice is safe only because of `loadingUsers` and `assignableUsersRequest`,
+                // not because either call is idempotent on its own.
+                self.loadUsersAndPreselectIfNeeded()
             }
         }
+    }
+
+    /// The statuses present in a set of issues, in the user's configured order. Pure, and shared by
+    /// the from-picker and the opening pick so the two cannot order things differently.
+    static func orderedStatuses(_ issues: [Issue], order: [String]) -> [String] {
+        let position: (String) -> Int = { name in
+            order.firstIndex(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) ?? Int.max
+        }
+        return Set(issues.map { $0.fields.status.name }).sorted { lhs, rhs in
+            let lp = position(lhs)
+            let rp = position(rhs)
+            if lp != rp { return lp < rp }
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+    }
+
+    /// The status the dialog opens on, or nil when there is nothing to open on.
+    ///
+    /// **Computed over the main-list rows only.** The project backlog must not decide which view
+    /// the dialog lands in. On any order that puts the backlog's status early (a typical one runs
+    /// Reopened, To Do, In Progress, …) counting backlog rows would make that status the opening
+    /// view whenever the ones before it are empty — so the status the dialog has always opened on
+    /// would silently change. The backlog's status is still offered by the picker; it just is not
+    /// landed on.
+    ///
+    /// The fallback to the full candidate list covers the one case where the backlog may decide it:
+    /// the main list is empty, and opening on nothing while there are backlog rows to move is worse.
+    ///
+    /// This filters *rows* by where they came from, never *statuses* by name — the distinction
+    /// matters. A main list that legitimately holds the user's own tickets in the backlog's status
+    /// makes that status eligible and possibly first, exactly as today; nothing here suppresses it.
+    static func initialFromStatus(
+        candidates: [Issue], backlogOnly: Set<String>, order: [String]
+    ) -> String? {
+        let mainList = candidates.filter { !backlogOnly.contains($0.key) }
+        return orderedStatuses(mainList, order: order).first
+            ?? orderedStatuses(candidates, order: order).first
+    }
+
+    /// The keys checked for the user when a from-status settles.
+    ///
+    /// **All of the status's rows or none of them, never a mixture.** A status the TODO backlog
+    /// feeds starts entirely unchecked — including the rows that came from the main list and are
+    /// already the user's own. Holding only the backlog rows back would open this dialog on a
+    /// half-checked list whose two halves differ by which of two JQL searches answered, which is
+    /// not visible from the UI and is exactly the state where someone hits Select all or Return
+    /// without reading it. Unchecked is also the gesture the feature is for: you grab the ones you
+    /// want. Every other status keeps the existing auto-check untouched.
+    ///
+    /// Keyed off the backlog rather than off a status named "To Do": status names belong to the
+    /// user's workflow and nothing else in this app hard-codes one. So the rule generalises, and the
+    /// general form is the one to hold in mind — **any** status the TODO query feeds stops
+    /// auto-checking, not only the status a single-status query happens to name. A TODO JQL scoped
+    /// by something other than status (`assignee is EMPTY AND project = ABC`, which the Preferences
+    /// copy invites) will therefore hold back every status its rows land in. That is the intended
+    /// reading, not an accident of a one-status query: what makes a status unsafe to pre-tick is
+    /// containing rows the user did not put there, whatever its name.
+    ///
+    /// It fails safe in either direction — fewer boxes ticked, never more.
+    ///
+    /// A backlog search that failed or has not answered leaves `backlogOnly` empty, so that status
+    /// auto-checks as it did before this feature. There are no unselected backlog rows in the list
+    /// to protect against, and `backlogNotice` is already saying the list is short.
+    static func autoCheckedKeys(inStatus: [Issue], backlogOnly: Set<String>) -> Set<String> {
+        let keys = Set(inStatus.map(\.key))
+        return keys.isDisjoint(with: backlogOnly) ? keys : []
     }
 
     private func defaultTransitionName() -> String {
@@ -655,13 +861,107 @@ struct BulkMoveDialog: View {
         )
     }
 
+    /// Re-resolves the user picker after the selected transition changes.
+    ///
+    /// Same provenance rule the transition itself follows (see `resolvedSelection`): a preselect the
+    /// dialog applied is dropped, because it named people for the *previous* prompt config's field
+    /// and carrying it over would arm the new transition's field with them. A pick the user made
+    /// themselves is kept — it was a decision about people, and it also blocks the new preselect
+    /// below, so a deliberate choice is never overwritten.
+    private func applyTransitionChange() {
+        if userSelectionOrigin == .preselect {
+            pickedUsers = []
+            userSelectionOrigin = .untouched
+        }
+        loadUsersAndPreselectIfNeeded()
+    }
+
+    /// Loads the assignable users for the selected transition's user field, if it has one, and
+    /// applies the preselect. Re-uses whatever is already loaded rather than re-fetching.
+    private func loadUsersAndPreselectIfNeeded() {
+        guard let config = matchingPromptConfig, config.hasUserField else { return }
+        if assignableUsers.isEmpty {
+            loadAssignableUsers()   // applies the preselect from its own completion
+        } else {
+            applyUserPreselectIfNeeded()
+        }
+    }
+
     private func loadAssignableUsers() {
-        guard let pivot = checkedKeys.first else { return }
+        guard !loadingUsers else { return }
+        // Sorted, for the reason `availableTransitions` sorts: `Set.first` is not stable across
+        // runs, and an arbitrary pivot means an arbitrary user list — which decides whether the
+        // preselect below finds itself a row to light up.
+        guard let pivot = checkedKeys.sorted().first else { return }
+        assignableUsersRequest += 1
+        let request = assignableUsersRequest
+        loadingUsers = true
         client.getAssignableUsers(issueKey: pivot) { result in
             DispatchQueue.main.async {
+                // Superseded — a from-status change, or a newer load — so this answer describes a
+                // pivot that is no longer the one on screen. Dropping it is the point.
+                guard request == self.assignableUsersRequest else { return }
+                self.loadingUsers = false
                 if case .success(let users) = result {
                     self.assignableUsers = users
+                    // Every assignment to `assignableUsers` has to be followed by this, or a
+                    // selection made before the list arrived loses the row that shows it.
+                    self.keepPickedUsersVisible()
+                    // After the list, never before: `pickedUsers` is a `Set<JiraUser>` and the rows
+                    // test membership by hash, so the preselect has to be mapped onto the instance
+                    // that is actually in the list or the checkbox stays empty while the field is
+                    // armed. Same reason `TransitionDialog.applyPrefill` maps.
+                    self.applyUserPreselectIfNeeded()
                 }
+            }
+        }
+    }
+
+    /// Keeps every picked user on screen, selected rows first.
+    ///
+    /// `getAssignableUsers` is paged and pivots on one issue, so a legitimate account can be absent
+    /// from what it returns. A selection with no row to show it is the worst state this dialog can
+    /// reach: the field is armed with a person the user cannot see and cannot untick, across every
+    /// checked issue, while the requirement banner reports it as satisfied. Mirrors
+    /// `TransitionDialog.arrangeSelectedFirst`.
+    private func keepPickedUsersVisible() {
+        let pickedInList = assignableUsers.filter { pickedUsers.contains($0) }
+        let pickedNotInList = pickedUsers.filter { !assignableUsers.contains($0) }
+        let rest = assignableUsers.filter { !pickedUsers.contains($0) }
+        assignableUsers = pickedInList + Array(pickedNotInList) + rest
+    }
+
+    /// Preselects the current user in the picker when the prompt config asks for it.
+    ///
+    /// **`.currentUser` only.** `.assignee` and `.fieldValue` both answer from *one* issue, and this
+    /// dialog writes a single selection to every checked issue — prefilling from an arbitrary member
+    /// of the batch would arm that one ticket's people onto all the others. `.currentUser` is the
+    /// only preselect whose answer is the same for every issue in the batch, so it is the only one
+    /// that means anything here. A prompt configured either other way gets no preselect and, when
+    /// its field is required, keeps Submit disabled until the user picks — which is the correct
+    /// outcome for a per-issue value, not a gap.
+    private func applyUserPreselectIfNeeded() {
+        guard let config = matchingPromptConfig,
+              config.hasUserField,
+              config.userFieldPreselect == .currentUser,
+              userSelectionOrigin == .untouched
+        else { return }
+        client.getCurrentUser { me in
+            DispatchQueue.main.async {
+                guard let me else { return }
+                // Re-checked against live state: `/myself` is a round trip, and the transition, the
+                // checked set or the user's own pick can all have moved while it was in flight.
+                // `.untouched` rather than `pickedUsers.isEmpty`: the reload-users button also
+                // routes here, and an empty picker the user emptied themselves must stay empty.
+                guard let live = self.matchingPromptConfig,
+                      live.hasUserField,
+                      live.userFieldPreselect == .currentUser,
+                      self.userSelectionOrigin == .untouched
+                else { return }
+                self.pickedUsers = [self.assignableUsers.first(where: { $0.isSame(as: me) }) ?? me]
+                self.userSelectionOrigin = .preselect
+                // Guarantees the row exists even when `/myself` is not in the returned page.
+                self.keepPickedUsersVisible()
             }
         }
     }
