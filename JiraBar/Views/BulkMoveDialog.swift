@@ -38,6 +38,11 @@ struct BulkMoveDialog: View {
     @State private var transitionsByIssue: [String: [Transition]] = [:]
     @State private var fetchingFor: Set<String> = []
     @State private var selectedTransitionName: String = ""
+    /// True while `selectedTransitionName` holds an auto-applied default the user has not
+    /// overridden. A pick the user made themselves is never silently swapped for a different
+    /// transition — this dialog applies its choice to every checked issue at once — so when the
+    /// intersection stops offering it, it clears and Submit goes back to needing a decision.
+    @State private var transitionSelectionIsDefault: Bool = true
 
     // Per-prompt-config field state — only the ones the matching prompt enables actually render.
     @State private var comment: String = ""
@@ -81,7 +86,10 @@ struct BulkMoveDialog: View {
         guard !checkedKeys.isEmpty else { return [] }
         var representative: [String: Transition] = [:]
         var counts: [String: Int] = [:]
-        for key in checkedKeys {
+        // Sorted, not raw Set order: `representative` is last-write-wins, and two issues can expose
+        // the same transition name with different target statuses. Undefined order there decides
+        // whether the default matches, so the order has to be fixed.
+        for key in checkedKeys.sorted() {
             guard let ts = transitionsByIssue[key] else { return [] }  // not all loaded yet
             for t in ts {
                 representative[t.name] = t
@@ -232,11 +240,15 @@ struct BulkMoveDialog: View {
                     Button("Select all") {
                         checkedKeys = Set(issuesInFromStatus.map(\.key))
                         loadTransitionsForChecked()
+                        applyDefaultSelectionIfNeeded()
                     }
                     .controlSize(.small)
-                    Button("Clear") { checkedKeys.removeAll() }
-                        .controlSize(.small)
-                        .disabled(checkedKeys.isEmpty)
+                    Button("Clear") {
+                        checkedKeys.removeAll()
+                        applyDefaultSelectionIfNeeded()
+                    }
+                    .controlSize(.small)
+                    .disabled(checkedKeys.isEmpty)
                 }
             }
 
@@ -283,10 +295,9 @@ struct BulkMoveDialog: View {
                 checkedKeys.insert(issue.key)
                 fetchTransitionsIfNeeded(for: issue.key)
             }
-            // If the new selection invalidates the chosen transition, clear it.
-            if !availableTransitions.contains(where: { $0.name == selectedTransitionName }) {
-                selectedTransitionName = ""
-            }
+            // The changed intersection may no longer offer the chosen transition. Re-resolve:
+            // a default gets re-defaulted, the user's own pick clears.
+            applyDefaultSelectionIfNeeded()
         }
     }
 
@@ -306,7 +317,13 @@ struct BulkMoveDialog: View {
                         .font(.footnote)
                 }
             } else {
-                Picker("", selection: $selectedTransitionName) {
+                Picker("", selection: Binding(
+                    get: { selectedTransitionName },
+                    set: { picked in
+                        selectedTransitionName = picked
+                        transitionSelectionIsDefault = false
+                    }
+                )) {
                     Text("— Choose —").tag("")
                     ForEach(availableTransitions, id: \.name) { t in
                         Text(t.name).tag(t.name)
@@ -516,12 +533,16 @@ struct BulkMoveDialog: View {
         // Default all in-state issues to checked when the from-status changes.
         checkedKeys = Set(inStatus.map(\.key))
         selectedTransitionName = ""
+        transitionSelectionIsDefault = true
         pickedUsers = []
         assignableUsers = []
         userFilter = ""
         freeText = ""
         selectValue = ""
         loadTransitionsForChecked()
+        // Sync, after the loads: whatever is already cached can be defaulted right now, and the
+        // ones still in flight come back through the completion above.
+        applyDefaultSelectionIfNeeded()
     }
 
     private func loadTransitionsForChecked() {
@@ -540,9 +561,7 @@ struct BulkMoveDialog: View {
                 self.transitionsByIssue[key] = transitions
                 self.fetchingFor.remove(key)
                 // Once we have a default-able transition list, pre-pick the "next logical" one.
-                if self.selectedTransitionName.isEmpty {
-                    self.selectedTransitionName = self.defaultTransitionName()
-                }
+                self.applyDefaultSelectionIfNeeded()
                 // If a user-picker section becomes relevant, load assignable users for it once.
                 if let config = self.matchingPromptConfig, config.hasUserField, self.assignableUsers.isEmpty {
                     self.loadAssignableUsers()
@@ -551,19 +570,89 @@ struct BulkMoveDialog: View {
         }
     }
 
-    /// Picks the next status in the user's status-order list as the default target, when present
-    /// in the intersection. Falls back to the first valid transition.
     private func defaultTransitionName() -> String {
-        let transitions = availableTransitions
-        guard !transitions.isEmpty else { return "" }
-        if let fromIdx = statusOrder.firstIndex(where: { $0.name.caseInsensitiveCompare(fromStatus) == .orderedSame }),
-           fromIdx + 1 < statusOrder.count {
-            let nextName = statusOrder[fromIdx + 1].name
-            if let match = transitions.first(where: { $0.name.caseInsensitiveCompare(nextName) == .orderedSame }) {
-                return match.name
-            }
-        }
-        return transitions.first?.name ?? ""
+        BulkMoveDialog.defaultTransitionName(
+            fromStatus: fromStatus,
+            statusOrder: statusOrder.map(\.name),
+            available: availableTransitions
+        )
+    }
+
+    /// The transition that moves an issue to the next status in the user's configured order — the
+    /// "next logical" move out of `fromStatus` — or `""` when there isn't one.
+    ///
+    /// Matched on each transition's **target status**, not its name. A workflow names transitions
+    /// for the action and statuses for the state, so "Ready for Review" is what moves an issue to
+    /// "Review and Test": comparing the two strings only ever matched where a workflow happened to
+    /// name them alike, and otherwise fell through.
+    ///
+    /// No match selects nothing, deliberately. What this replaced fell back to the
+    /// alphabetically-first available transition, and this dialog applies its choice to every
+    /// checked issue at once — out of "In Progress" that arbitrary pick was "Force Close", and out
+    /// of "QA" it was "Done - Release Not Required". Both close tickets. An absent default costs
+    /// one click; a wrong one is not recoverable in bulk.
+    ///
+    /// Only the immediately-next status, never scanning further ahead: a forward scan past an
+    /// unreachable neighbour walks toward the terminal status and finds exactly the closing
+    /// transition this exists to stop selecting.
+    static func defaultTransitionName(
+        fromStatus: String,
+        statusOrder: [String],
+        available: [Transition]
+    ) -> String {
+        guard
+            let fromIdx = statusOrder.firstIndex(where: {
+                $0.caseInsensitiveCompare(fromStatus) == .orderedSame
+            }),
+            fromIdx + 1 < statusOrder.count
+        else { return "" }
+
+        let next = statusOrder[fromIdx + 1]
+        return available.first {
+            $0.to?.name.caseInsensitiveCompare(next) == .orderedSame
+        }?.name ?? ""
+    }
+
+    /// Re-resolves the picker against the current intersection.
+    ///
+    /// Called from every place the intersection can change rather than only from the fetch
+    /// completion: with every checked issue's transition list already cached no request is made,
+    /// so no completion fires and the default would never be applied at all.
+    private func applyDefaultSelectionIfNeeded() {
+        let resolved = BulkMoveDialog.resolvedSelection(
+            current: selectedTransitionName,
+            isDefault: transitionSelectionIsDefault,
+            available: availableTransitions,
+            fromStatus: fromStatus,
+            statusOrder: statusOrder.map(\.name)
+        )
+        selectedTransitionName = resolved.name
+        transitionSelectionIsDefault = resolved.isDefault
+    }
+
+    /// What the picker should hold after the available set changes, and whether that is still an
+    /// auto-applied default.
+    ///
+    /// A selection still on offer is left alone, whoever made it. Once it is not on offer, the
+    /// answer depends on who chose it: a default is replaced by the new default, while the user's
+    /// own pick clears to nothing. Substituting a different transition for one the user chose would
+    /// leave Submit armed with a value they never selected, across every checked issue — and the
+    /// pick they lost may have been deliberate, including a closing one they actually wanted.
+    static func resolvedSelection(
+        current: String,
+        isDefault: Bool,
+        available: [Transition],
+        fromStatus: String,
+        statusOrder: [String]
+    ) -> (name: String, isDefault: Bool) {
+        if available.contains(where: { $0.name == current }) { return (current, isDefault) }
+        guard isDefault else { return ("", false) }
+        return (
+            defaultTransitionName(
+                fromStatus: fromStatus, statusOrder: statusOrder, available: available
+            ),
+            true
+        )
     }
 
     private func loadAssignableUsers() {

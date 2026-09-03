@@ -126,10 +126,19 @@ struct TransitionsResponse: Codable {
 struct Transition: Codable {
     var name: String
     var id: String
+    /// The status this transition moves the issue to. Optional so a response that omits it still
+    /// decodes — the transition list itself must not fail to parse over a field only the default
+    /// target-picking reads.
+    ///
+    /// Needed because a workflow names transitions for the action and statuses for the state:
+    /// "Ready for Review" moves an issue to "Review and Test". Anything deciding which transition
+    /// reaches a given status has to read this, not `name`.
+    var to: IssueStatus?
 
     enum CodingKeys: String, CodingKey {
         case name
         case id
+        case to
     }
 }
 
