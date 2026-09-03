@@ -30,7 +30,7 @@ Native MacOS menubar application to show Jira issues in your menu bar:
 - **Board order within a group** — set the Jira Lexorank field id (commonly `customfield_10019` on Cloud) and each status group sorts by rank ascending, matching your board.
 - **Open Search results / Open All Issues / Open Dashboard / Open My Dashboard** — quick links under the ticket list. The two dashboard slots each take a full URL or a path relative to your Jira base; the second is handy for a filtered "just me" board view.
 - **Refresh** and **Create issue** entries at the bottom.
-- **Instant refresh from scripts** — `notifyutil -p com.dnesmith.jirabar.refresh` from any shell refreshes the menu immediately, so automation that moves tickets over REST doesn't wait for the poll timer. A burst of notifications is debounced into a single refresh. Because Jira's search index trails a write by up to ~11 seconds, each notification then refreshes again at 2 and 20 seconds, so a ticket that moved shows up without a second nudge.
+- **Instant refresh from scripts** — `notifyutil -p com.dnesmith.jirabar.refresh` from any shell refreshes the menu immediately, so automation that moves tickets over REST doesn't wait for the poll timer. A burst of notifications is debounced into a single refresh. Because Jira's search index trails a write by up to ~11 seconds, each notification then refreshes again at 3 and 20 seconds, so a ticket that moved shows up without a second nudge.
 
 ## Per-issue submenu
 

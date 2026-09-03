@@ -26,6 +26,14 @@ final class CatchUpRefreshSchedule {
     /// and the second catches the outlier. Ticks at 5, 10 and 30 were tried and dropped — they
     /// covered nothing that was ever observed.
     ///
+    /// The first tick is 3s rather than 2s for headroom, and the headroom is the point. The slowest
+    /// non-outlier miss measured 1630ms, so a 2s tick clears it by 370ms while 3s clears it by
+    /// ~1.4s — about four times the margin for the same three rebuilds. The failure that matters is
+    /// a miss landing *between* the two ticks, because then nothing corrects it until 20s; widening
+    /// the first tick is what makes falling into that gap unlikely. A middle tick at ~8s would
+    /// shrink the gap further and was considered, but it costs a third more requests (see below) to
+    /// cover a region no measurement has ever put a miss in.
+    ///
     /// The count is load-bearing on the cost side, which is why it is not padded "just in case".
     /// Each tick is a full menu rebuild, and a rebuild spends 3 *uncached* GitHub search requests
     /// on `searchMyPRs` against a 30/minute authenticated budget (the per-project PR searches are
@@ -34,7 +42,7 @@ final class CatchUpRefreshSchedule {
     /// in 45 seconds — over budget, where GitHub answers 403 and "PRs Without Tickets" renders
     /// empty with nothing said. Adding ticks trades a section of the menu for coverage of a tail
     /// nobody has measured.
-    static let defaultDelays: [TimeInterval] = [2, 20]
+    static let defaultDelays: [TimeInterval] = [3, 20]
 
     private let delays: [TimeInterval]
     private let rearmInterval: TimeInterval

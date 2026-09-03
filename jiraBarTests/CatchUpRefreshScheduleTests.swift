@@ -39,10 +39,17 @@ final class CatchUpRefreshScheduleTests: XCTestCase {
     func testShippedDelaysCoverTheMeasuredMisses() {
         let measuredMisses: [TimeInterval] = [0.719, 0.787, 1.041, 1.099, 1.452, 1.630, 11.167]
         let shipped = CatchUpRefreshSchedule.defaultDelays
-        XCTAssertEqual(shipped, [2, 20])
+        XCTAssertEqual(shipped, [3, 20])
         XCTAssertEqual(
             measuredMisses.filter { $0 < shipped.first! }.count, 6,
             "the first tick is what makes this cheap — it must still clear the cluster"
+        )
+        // Headroom, not just coverage: the first tick has to clear the slowest non-outlier by a
+        // real margin, or a miss slightly worse than anything measured falls into the gap before
+        // the second tick and waits the whole way for it.
+        XCTAssertGreaterThan(
+            shipped.first! - 1.630, 1.0,
+            "the first tick must clear the slowest non-outlier miss by more than a second"
         )
         XCTAssertGreaterThan(
             shipped.last!, measuredMisses.max()!,
