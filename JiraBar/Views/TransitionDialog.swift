@@ -439,7 +439,7 @@ struct TransitionDialog: View {
     /// Only interesting for a required field: a prefill satisfies the gate without a decision being
     /// made, so it gets said out loud rather than passing silently.
     @State private var userSelectionIsUntouchedPrefill: Bool = false
-    /// Whether that prefill came from `userFieldDefaultsToCurrentUser` rather than the ticket.
+    /// Whether that prefill came from `.currentUser` preselect rather than from the ticket.
     @State private var prefillWasCurrentUser: Bool = false
     /// True once Jira has accepted the transition. The window may still be open — waiting on PR
     /// actions, or reporting that some failed — but re-submitting is no longer the right offer.
@@ -1108,27 +1108,31 @@ struct TransitionDialog: View {
     }
 
     /// Pre-fills the user picker so the user sees who's already assigned before deciding.
-    /// `userFieldDefaultsToCurrentUser` (used for "Start Progress") wins; otherwise we read
-    /// whatever's currently in the configured field on the issue.
+    /// Which person that is, is `config.userFieldPreselect`'s call.
     private func preselectIfNeeded() {
         guard selectedUsers.isEmpty else { return }
-        if config.userFieldDefaultsToCurrentUser {
+        if let source = config.preselectSource {
+            readFieldForPrefill(source)
+        } else {
             client.getCurrentUser { me in
                 DispatchQueue.main.async {
                     if let me { self.applyPrefill([me], wasCurrentUser: true) }
                 }
             }
-        } else {
-            client.getIssueFieldUsers(issueKey: issueKey, fieldId: config.userFieldId) { existing in
-                DispatchQueue.main.async {
-                    // A failed read must be surfaced — submitting an empty picker clears the
-                    // field, so silently presenting an empty selection would be destructive.
-                    guard let existing else {
-                        self.loadError = "Couldn't load the field's current users — submitting may clear it."
-                        return
-                    }
-                    self.applyPrefill(existing)
+        }
+    }
+
+    /// Reads one user field on the issue and prefills from whoever it holds.
+    private func readFieldForPrefill(_ source: PreselectSource) {
+        client.getIssueFieldUsers(issueKey: issueKey, fieldId: source.fieldId) { existing in
+            DispatchQueue.main.async {
+                // A failed read must be surfaced — submitting an empty picker clears the
+                // field, so silently presenting an empty selection would be destructive.
+                guard let existing else {
+                    self.loadError = source.readFailureMessage
+                    return
                 }
+                self.applyPrefill(existing)
             }
         }
     }

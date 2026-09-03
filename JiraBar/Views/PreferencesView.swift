@@ -595,7 +595,15 @@ private struct TransitionPromptRow: View {
                             TextField("Label (e.g. Reviewers)", text: $prompt.userFieldLabel)
                                 .textFieldStyle(RoundedBorderTextFieldStyle())
                             Toggle("Allow selecting multiple users", isOn: $prompt.userFieldAllowsMultiple)
-                            Toggle("Default to current user", isOn: $prompt.userFieldDefaultsToCurrentUser)
+                            // One picker, not three checkboxes: the dialog opens with one
+                            // selection, so the modes can't be combined.
+                            Picker("Preselect:", selection: $prompt.userFieldPreselect) {
+                                Text("Whoever the field already holds").tag(UserFieldPreselect.fieldValue)
+                                Text("Current user").tag(UserFieldPreselect.currentUser)
+                                Text("The issue's assignee").tag(UserFieldPreselect.assignee)
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 400)
                             // Needed even though JiraBar reads Jira's own required flags: a rule
                             // enforced by a workflow validator reports required:false and still
                             // rejects the transition. See TransitionPromptConfig.userFieldRequired.

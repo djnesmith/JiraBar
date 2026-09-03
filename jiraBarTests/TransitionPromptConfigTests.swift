@@ -48,6 +48,151 @@ final class TransitionPromptConfigTests: XCTestCase {
         XCTAssertEqual(config.prReviewAction, .requestChanges)
     }
 
+    // MARK: - userFieldPreselect
+
+    func testPreselectDefaultsToFieldValue() {
+        XCTAssertEqual(TransitionPromptConfig().userFieldPreselect, .fieldValue)
+    }
+
+    func testPreselectReadsBackingFlags() {
+        var config = TransitionPromptConfig()
+        config.userFieldDefaultsToCurrentUser = true
+        XCTAssertEqual(config.userFieldPreselect, .currentUser)
+
+        config.userFieldDefaultsToCurrentUser = false
+        config.userFieldDefaultsToAssignee = true
+        XCTAssertEqual(config.userFieldPreselect, .assignee)
+    }
+
+    func testSettingPreselectIsExclusive() {
+        var config = TransitionPromptConfig()
+
+        config.userFieldPreselect = .currentUser
+        XCTAssertTrue(config.userFieldDefaultsToCurrentUser)
+        XCTAssertFalse(config.userFieldDefaultsToAssignee)
+
+        config.userFieldPreselect = .assignee
+        XCTAssertFalse(config.userFieldDefaultsToCurrentUser)
+        XCTAssertTrue(config.userFieldDefaultsToAssignee)
+
+        config.userFieldPreselect = .fieldValue
+        XCTAssertFalse(config.userFieldDefaultsToCurrentUser)
+        XCTAssertFalse(config.userFieldDefaultsToAssignee)
+    }
+
+    /// The picker can't set both, a hand-edited settings file can. Assignee wins because it answers
+    /// from the issue, where current-user would name you on a ticket that is not yours.
+    func testBothPreselectFlagsResolveToAssignee() {
+        var config = TransitionPromptConfig()
+        config.userFieldDefaultsToCurrentUser = true
+        config.userFieldDefaultsToAssignee = true
+        XCTAssertEqual(config.userFieldPreselect, .assignee)
+    }
+
+    // MARK: - preselectSource
+
+    func testFieldValuePreselectReadsTheConfiguredField() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99030"
+        XCTAssertEqual(config.preselectSource?.fieldId, "customfield_99030")
+    }
+
+    /// These ids are typed or pasted by hand, and `hasUserField` accepts a padded one. Untrimmed it
+    /// would miss Jira's field lookup and report a load error for a field submit writes just fine.
+    func testFieldValuePreselectTrimsTheConfiguredField() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "  customfield_99030  "
+        XCTAssertEqual(config.preselectSource?.fieldId, "customfield_99030")
+    }
+
+    /// The whole point of the mode: the picker prefills from `assignee` rather than from the field
+    /// it is about to write, which on a fresh ticket is empty.
+    func testAssigneePreselectReadsTheAssigneeField() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99030"
+        config.userFieldPreselect = .assignee
+        XCTAssertEqual(config.preselectSource?.fieldId, "assignee")
+    }
+
+    /// Independent of who the assignee turns out to be — an assignee that is you is still the
+    /// answer, so there is no second field to read and nothing to special-case.
+    func testAssigneePreselectIgnoresTheConfiguredFieldId() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = ""
+        config.userFieldPreselect = .assignee
+        XCTAssertEqual(config.preselectSource?.fieldId, "assignee")
+    }
+
+    /// nil, not a field id: this mode's answer comes from `/myself`, not from the issue.
+    func testCurrentUserPreselectReadsNoField() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99030"
+        config.userFieldPreselect = .currentUser
+        XCTAssertNil(config.preselectSource)
+    }
+
+    /// In assignee mode the field read is not the field written, so the message has to name the
+    /// assignee — and still warn that an empty picker clears the field it does write.
+    func testAssigneeReadFailureNamesTheAssigneeAndTheWrittenField() {
+        var config = TransitionPromptConfig()
+        config.userFieldLabel = "Testers"
+        config.userFieldPreselect = .assignee
+
+        let message = config.preselectSource?.readFailureMessage
+        XCTAssertEqual(message, "Couldn't load the assignee — submitting may clear Testers.")
+    }
+
+    /// The field-value mode reads the field it writes, so its long-standing wording still holds.
+    func testFieldValueReadFailureKeepsItsMessage() {
+        var config = TransitionPromptConfig()
+        config.userFieldId = "customfield_99030"
+        XCTAssertEqual(
+            config.preselectSource?.readFailureMessage,
+            "Couldn't load the field's current users — submitting may clear it."
+        )
+    }
+
+    /// A settings file written before the assignee mode existed must decode with it off, not fail
+    /// and take the whole prompt array with it.
+    func testDecodesSettingsWithNoPreselectKeys() throws {
+        let config = try decode("""
+        {
+          "transitionName": "Review and Test",
+          "userFieldId": "customfield_99030",
+          "userFieldDefaultsToCurrentUser": false
+        }
+        """)
+        XCTAssertEqual(config.userFieldPreselect, .fieldValue)
+        XCTAssertFalse(config.userFieldDefaultsToAssignee)
+    }
+
+    /// The precedence has to hold coming off disk, not just through the setter — a hand-edited
+    /// file is exactly where a contradictory pair comes from.
+    func testDecodesBothPreselectFlagsAsAssignee() throws {
+        let config = try decode("""
+        {
+          "transitionName": "Review and Test",
+          "userFieldId": "customfield_99030",
+          "userFieldDefaultsToCurrentUser": true,
+          "userFieldDefaultsToAssignee": true
+        }
+        """)
+        XCTAssertEqual(config.userFieldPreselect, .assignee)
+        XCTAssertEqual(config.preselectSource?.fieldId, "assignee")
+    }
+
+    /// The new key has to survive a round trip — a stored property missing from `CodingKeys`
+    /// encodes to nothing and the setting silently never persists.
+    func testAssigneePreselectSurvivesRoundTrip() throws {
+        var config = TransitionPromptConfig()
+        config.userFieldPreselect = .assignee
+
+        let restored = try JSONDecoder().decode(
+            TransitionPromptConfig.self, from: try JSONEncoder().encode(config)
+        )
+        XCTAssertEqual(restored.userFieldPreselect, .assignee)
+    }
+
     // MARK: - allowsPRMerge / hasPRActions
 
     func testRequestChangesWithdrawsMerge() {

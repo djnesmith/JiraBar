@@ -37,6 +37,32 @@ enum PRResolveThreadsMode: Hashable {
     case ask
 }
 
+/// Who the transition dialog's user picker starts with.
+///
+/// Deliberately not `Codable`, for the same reason as `PRReviewAction`: the `Bool`s behind it are
+/// what persist, so a settings file can never carry an unknown case whose decode would fail and
+/// take the whole prompt array with it.
+enum UserFieldPreselect: Hashable {
+    /// Whoever the configured field already holds on the issue.
+    case fieldValue
+    /// The authenticated user.
+    case currentUser
+    /// The issue's assignee, whoever that is — including you, on your own ticket. For a field like
+    /// Testers that is the whole rule: reviewing and testing are separate seats, so the author
+    /// verifies their own work and the assignee is the answer either way.
+    case assignee
+}
+
+/// Where the transition dialog's user picker prefills from, for the modes that read the issue.
+struct PreselectSource: Hashable {
+    /// The issue field to read.
+    let fieldId: String
+    /// Shown when that read fails. Names what failed to load, because in `.assignee` mode it is not
+    /// the field the dialog writes; warns about the clear either way, since an empty picker on
+    /// submit clears the written field.
+    let readFailureMessage: String
+}
+
 /// Per-transition prompt configuration. Generic by design — users define which transition names
 /// open a prompt and which custom fields to expose. Nothing in this struct is specific to any
 /// particular Jira workflow or instance.
@@ -55,9 +81,11 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     var userFieldLabel: String = "Users"
     /// `true` posts the field as a JSON array (multi-user picker); `false` posts a single object.
     var userFieldAllowsMultiple: Bool = true
-    /// Pre-selects the authenticated Jira user when the dialog opens.
+    /// Backing store for `userFieldPreselect == .currentUser`. Read `userFieldPreselect` instead.
     /// Useful for transitions like "Start Progress" where the assignee defaults to whoever's acting.
     var userFieldDefaultsToCurrentUser: Bool = false
+    /// Backing store for `userFieldPreselect == .assignee`. Read `userFieldPreselect` instead.
+    var userFieldDefaultsToAssignee: Bool = false
     /// Marks this field required even when Jira's transition screen does not.
     ///
     /// **Not** a fallback for metadata we failed to fetch — see `requiredFieldIds`. A rule enforced
@@ -146,6 +174,46 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         set {
             enablePRResolveThreads = (newValue == .always)
             enablePRAskResolveThreads = (newValue == .ask)
+        }
+    }
+
+    /// Who the user picker starts with, over the two stored flags. The setter writes them
+    /// exclusively, so the Preferences picker can't produce a contradictory pair.
+    ///
+    /// A hand-edited file still can, and there `.assignee` wins: it answers from the issue, which is
+    /// checkable against the ticket in front of you, while `.currentUser` answers from whoever is
+    /// running JiraBar and would name you on a ticket that is not yours.
+    var userFieldPreselect: UserFieldPreselect {
+        get {
+            if userFieldDefaultsToAssignee { return .assignee }
+            return userFieldDefaultsToCurrentUser ? .currentUser : .fieldValue
+        }
+        set {
+            userFieldDefaultsToCurrentUser = (newValue == .currentUser)
+            userFieldDefaultsToAssignee = (newValue == .assignee)
+        }
+    }
+
+    /// Where the picker prefills from, or nil for `.currentUser`, whose answer comes from `/myself`
+    /// rather than from the issue. Pure, so the mapping is testable without a dialog.
+    ///
+    /// Trimmed for `.fieldValue`, matching `fieldUpdates` and `fieldIsRequired`: a stored trailing
+    /// space passes `hasUserField` but misses Jira's field lookup, which would fail the prefill —
+    /// and report a load error — for a field the submit path writes just fine.
+    var preselectSource: PreselectSource? {
+        switch userFieldPreselect {
+        case .currentUser:
+            return nil
+        case .assignee:
+            return PreselectSource(
+                fieldId: "assignee",
+                readFailureMessage: "Couldn't load the assignee — submitting may clear \(userFieldLabel)."
+            )
+        case .fieldValue:
+            return PreselectSource(
+                fieldId: userFieldId.trimmingCharacters(in: .whitespaces),
+                readFailureMessage: "Couldn't load the field's current users — submitting may clear it."
+            )
         }
     }
 
@@ -312,6 +380,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
     enum CodingKeys: String, CodingKey {
         case id, transitionName, includeComment
         case userFieldId, userFieldLabel, userFieldAllowsMultiple, userFieldDefaultsToCurrentUser
+        case userFieldDefaultsToAssignee
         case textFieldId, textFieldLabel, textFieldMultiline
         case selectFieldId, selectFieldLabel, selectOptions
         case userFieldRequired, textFieldRequired, selectFieldRequired
@@ -328,6 +397,7 @@ struct TransitionPromptConfig: Codable, Defaults.Serializable, Identifiable, Has
         self.userFieldLabel = try c.decodeIfPresent(String.self, forKey: .userFieldLabel) ?? "Users"
         self.userFieldAllowsMultiple = try c.decodeIfPresent(Bool.self, forKey: .userFieldAllowsMultiple) ?? true
         self.userFieldDefaultsToCurrentUser = try c.decodeIfPresent(Bool.self, forKey: .userFieldDefaultsToCurrentUser) ?? false
+        self.userFieldDefaultsToAssignee = try c.decodeIfPresent(Bool.self, forKey: .userFieldDefaultsToAssignee) ?? false
         self.textFieldId = try c.decodeIfPresent(String.self, forKey: .textFieldId) ?? ""
         self.textFieldLabel = try c.decodeIfPresent(String.self, forKey: .textFieldLabel) ?? "Notes"
         self.textFieldMultiline = try c.decodeIfPresent(Bool.self, forKey: .textFieldMultiline) ?? true
