@@ -335,7 +335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         t.fire()
     }
 
-    /// The refresh to run after *JiraBar itself* wrote to Jira: now, and again on a schedule.
+    /// The refresh to run after a write to Jira: now, and again on a schedule.
     /// `CatchUpRefreshSchedule` carries why one refresh is not enough.
     ///
     /// Only for writes that change what the search returns or renders — transitions, the user-field
@@ -343,12 +343,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// comes from the search's own field value). Comments and attachments are excluded not because
     /// they change nothing — they bump `updated`, which reorders the Recently Seen section — but
     /// because a reorder inside a history submenu is not the vanishing row this exists to fix, and
-    /// is not worth five extra rebuilds. An external refresh and the poll timer have no write of
-    /// ours to catch up with, so both keep the plain `refreshMenu`.
+    /// is not worth the extra rebuilds.
     ///
-    /// A manual Refresh neither starts nor cancels a schedule. It is not a write, and cancelling on
-    /// it would strip the catch-up at exactly the moment the user is hand-refreshing *because* the
-    /// menu looks wrong.
+    /// Also used by the external notify path, whose whole purpose is to announce a write made
+    /// outside the app — see `registerExternalRefreshObserver`, including why that one caller
+    /// cannot gate on success. The poll timer keeps the plain `refreshMenu`: it has no write to
+    /// catch up with.
+    ///
+    /// A manual Refresh neither starts nor cancels a schedule, while an external notification —
+    /// also not a write in itself — gets the full one. The difference is what each *means*: the
+    /// Refresh item means "rebuild now", so a schedule would be extra rebuilds nobody asked for,
+    /// and cancelling one would strip the catch-up at the moment the user is hand-refreshing
+    /// *because* the menu looks wrong. The notification means "something moved a ticket" (README's
+    /// "automation that moves tickets over REST"), so a write is exactly what it is reporting.
     ///
     /// Known trade-off, deliberately accepted: `refreshMenu` empties the menu and only repopulates
     /// when the searches return, so a tick landing while the menu is held open blanks it briefly and
@@ -368,6 +375,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// any shell or script that just moved a ticket) refreshes the menu without waiting for the
     /// poll timer. Darwin notify rather than NSDistributedNotificationCenter because notifyutil
     /// can post it with no payload and the sandbox permits observing it.
+    ///
+    /// Goes through `refreshAfterWrite`, not the plain rebuild: a notification exists to say a
+    /// ticket just moved, so this path faces the same lagging search index as the app's own writes.
+    /// It was previously covered only by accident — the debouncer's 1s fuse happened to put the
+    /// search past most of the index window.
+    ///
+    /// **Fires the schedule unconditionally, unlike every in-app caller, which gate on the write
+    /// having succeeded.** That asymmetry is the mechanism, not an oversight: a Darwin notification
+    /// carries no payload — which is exactly why it is one — so there is nothing here to tell us
+    /// whether the write it refers to landed, or whether it referred to a write at all. Faking a
+    /// success check would mean inventing an answer.
     private func registerExternalRefreshObserver() {
         externalRefreshDebouncer = RefreshDebouncer { [weak self] in
             guard let self = self else { return }
@@ -377,7 +395,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // silently drop the request.
                 self.externalRefreshDebouncer?.poke()
             } else {
-                self.refreshMenu()
+                // A burst from a shell loop is coalesced twice over: the debouncer collapses the
+                // pokes into one fire, and `refreshAfterWrite` restarts the catch-up schedule
+                // rather than laying a second set of timers over the first. Ten notifications in a
+                // loop therefore leave one schedule, not ten.
+                self.refreshAfterWrite()
             }
         }
         CFNotificationCenterAddObserver(

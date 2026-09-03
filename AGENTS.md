@@ -70,6 +70,26 @@ Practical guidance for AI agents working on JiraBar.
   `JiraUser.id` tiers the same three fields for a different purpose — it must never be nil,
   so it falls back to displayName, which `isSame` must never do
 
+## Reading the running app's logs
+
+Two things make the installed app look like it logs nothing. Both cost an hour once.
+
+- **`log` is a zsh builtin and shadows `/usr/bin/log` in a non-interactive shell.** `log show ...`
+  from a script or an agent's shell silently returns nothing at all. Always invoke `/usr/bin/log`
+  by absolute path.
+- **A Release build ad-hoc signed without `get-task-allow` redacts os_log dynamic data to
+  `<private>`.** So `NSLog("Refresh finished, menubar shows %@", count)` is present in the log but
+  unreadable, while a Debug/test-host build shows the text because it is debuggable. **Timestamps
+  are not redacted**, so the timing and count of log calls is still usable evidence — that is how
+  the post-write refresh schedule was verified on a live install:
+
+      /usr/bin/log show --predicate 'processIdentifier == <pid> AND senderImagePath CONTAINS "Foundation"' \
+        --start '<time>' --end '<time>' --style compact
+
+  Unredacting needs `sudo log config --mode private_data:on`, a system-wide privacy change — ask
+  first. The better fix is `os_log` with the app's own subsystem and `%{public}` on the values worth
+  reading; not done yet.
+
 ## Entitlements
 
 - Keep sandbox/network client entitlements as-is

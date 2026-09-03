@@ -21,11 +21,20 @@ import Foundation
 final class CatchUpRefreshSchedule {
     /// Seconds after the write to refresh again.
     ///
-    /// The first tick clears the great majority of observed misses and the fourth clears the worst
-    /// one; the rest are insurance either side, since the tail beyond a fourteen-sample measurement
-    /// is guesswork. Each tick is a full menu rebuild — four searches plus the GitHub wave — so the
-    /// count is not free, and it is the number to cut first if request volume ever bites.
-    static let defaultDelays: [TimeInterval] = [2, 5, 10, 20, 30]
+    /// Two ticks, matched to the measured distribution rather than padded past it: every observed
+    /// miss cleared under 1.7s except a single 11.2s outlier, so the first tick catches the cluster
+    /// and the second catches the outlier. Ticks at 5, 10 and 30 were tried and dropped — they
+    /// covered nothing that was ever observed.
+    ///
+    /// The count is load-bearing on the cost side, which is why it is not padded "just in case".
+    /// Each tick is a full menu rebuild, and a rebuild spends 3 *uncached* GitHub search requests
+    /// on `searchMyPRs` against a 30/minute authenticated budget (the per-project PR searches are
+    /// cached by `GithubPRIndex`, so those do not multiply). At three rebuilds per write that is 9
+    /// requests; at six it was 18 inside 30 seconds, and a burst of ten writes reached roughly 45
+    /// in 45 seconds — over budget, where GitHub answers 403 and "PRs Without Tickets" renders
+    /// empty with nothing said. Adding ticks trades a section of the menu for coverage of a tail
+    /// nobody has measured.
+    static let defaultDelays: [TimeInterval] = [2, 20]
 
     private let delays: [TimeInterval]
     private let rearmInterval: TimeInterval
@@ -60,8 +69,9 @@ final class CatchUpRefreshSchedule {
     /// the one worth counting from.
     ///
     /// Call only from `queue` — replacing the pending items is not synchronized against itself,
-    /// which matches `RefreshDebouncer.poke` and holds for the same reason: every caller is already
-    /// on main (Alamofire's default response queue).
+    /// which matches `RefreshDebouncer.poke`. Every caller is on main: the in-app write sites from
+    /// Alamofire's default response queue, and the external notify path from a work item already
+    /// hopped there.
     func restart() {
         cancel()
         pending = delays.map { delay in

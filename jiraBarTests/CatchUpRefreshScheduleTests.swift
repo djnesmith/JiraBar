@@ -5,7 +5,9 @@ import XCTest
 /// a transition's completion often cannot see it and the menu has to be rebuilt again later.
 final class CatchUpRefreshScheduleTests: XCTestCase {
 
-    /// Compressed stand-in for the shipped `[2, 5, 10, 20, 30]`, same shape at test speed.
+    /// Five compressed delays, deliberately not the shipped two: these exercise the mechanism —
+    /// fires, restarts, cancellation — at test speed and independently of how many ticks ship.
+    /// `testShippedDelaysCoverTheMeasuredMisses` is what pins the shipped values.
     private let delays: [TimeInterval] = [0.05, 0.10, 0.15, 0.20, 0.25]
 
     private func settle(_ seconds: TimeInterval) {
@@ -30,10 +32,14 @@ final class CatchUpRefreshScheduleTests: XCTestCase {
     /// only defensible in terms of them: the first tick has to clear the cluster and the last has to
     /// land past the outlier. Asserted as the two claims rather than per-miss — the list is
     /// ascending, so "some tick is later than this miss" is implied by the last one being.
+    ///
+    /// The count is asserted too, and deliberately. Each tick costs 3 uncached GitHub search
+    /// requests against a 30/minute budget, so a tick added without a measured miss behind it
+    /// spends a section of the menu on nothing — this is the test that makes that argument again.
     func testShippedDelaysCoverTheMeasuredMisses() {
         let measuredMisses: [TimeInterval] = [0.719, 0.787, 1.041, 1.099, 1.452, 1.630, 11.167]
         let shipped = CatchUpRefreshSchedule.defaultDelays
-        XCTAssertEqual(shipped, [2, 5, 10, 20, 30])
+        XCTAssertEqual(shipped, [2, 20])
         XCTAssertEqual(
             measuredMisses.filter { $0 < shipped.first! }.count, 6,
             "the first tick is what makes this cheap — it must still clear the cluster"
@@ -95,6 +101,27 @@ final class CatchUpRefreshScheduleTests: XCTestCase {
         schedule.restart()
         XCTAssertEqual(schedule.pendingCount, delays.count,
                        "three restarts must leave one schedule's worth of ticks, not three")
+    }
+
+    /// Two ticks deferred into the *same* busy window merge into one refresh rather than each
+    /// surviving as its own. That is the property, and it is not the same as
+    /// `testATickLandingDuringARefreshIsNotLost` above: this one is the only thing guarding the
+    /// single `rearm` slot, so without it a deferred tick could accumulate one refresh per tick and
+    /// nothing would notice. Merging is correct — both ticks want the same thing, and one rebuild
+    /// after the in-flight refresh satisfies both.
+    func testTicksDeferredIntoOneBusyWindowMergeIntoASingleRefresh() {
+        var busy = true
+        var count = 0
+        let schedule = CatchUpRefreshSchedule(
+            delays: [0.05, 0.10], rearmInterval: 0.05, queue: .main,
+            isBusy: { busy }, action: { count += 1 }
+        )
+        schedule.restart()
+        settle(0.3)
+        XCTAssertEqual(count, 0, "nothing may run while the refresh is in flight")
+        busy = false
+        settle(0.4)
+        XCTAssertEqual(count, 1, "two deferred ticks must yield one refresh, not one each")
     }
 
     // MARK: - Cancellation
