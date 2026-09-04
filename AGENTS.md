@@ -90,6 +90,22 @@ Two things make the installed app look like it logs nothing. Both cost an hour o
   first. The better fix is `os_log` with the app's own subsystem and `%{public}` on the values worth
   reading; not done yet.
 
+## Checking a deployed binary with `strings`
+
+`strings` is a valid check that an installed bundle carries an edit **only for literals longer than
+15 UTF-8 bytes.** Swift's small-string optimization stores a literal of 15 bytes or fewer inline in
+the `String` struct rather than as a C string in `__TEXT`, so it never appears in `strings` output.
+Measured on the notification bodies: `transition failed: ` (19 bytes) and `couldn't load
+transitions` (25) were present, while `Transitioned ` (13) and `Moved no issues` (exactly 15) were
+absent from a binary that definitely contained both. Read as "the edit did not land", that is a
+wrong conclusion and an expensive one.
+
+Delivered user notifications are readable without provoking a TCC prompt, which is the better check
+for notification text: the `record` table of
+`~/Library/Group Containers/group.com.apple.usernoted/db2/db`, joined to `app` on `app_id`, where
+each row's `data` is a binary plist whose `req.body` is the banner text. `delivered_date` is seconds
+from the 2001-01-01 UTC epoch, so convert before comparing against local timestamps.
+
 ## Entitlements
 
 - Keep sandbox/network client entitlements as-is
