@@ -1666,7 +1666,7 @@ extension AppDelegate {
                     guard let self, prActions.hasWork, !successfulKeys.isEmpty else {
                         mirrorReviewers()
                         sendNotification(body: AppDelegate.bulkPRActionsSummary(
-                            moved: successfulKeys.count, jiraFailures: failures, prResults: []
+                            movedKeys: successfulKeys, jiraFailures: failures, prResults: []
                         ))
                         return
                     }
@@ -1677,7 +1677,7 @@ extension AppDelegate {
                     // batch is sequential to avoid.
                     self.applyPRActionsForBatch(issueKeys: successfulKeys, actions: prActions) { results in
                         sendNotification(body: AppDelegate.bulkPRActionsSummary(
-                            moved: successfulKeys.count, jiraFailures: failures, prResults: results
+                            movedKeys: successfulKeys, jiraFailures: failures, prResults: results
                         ))
                         mirrorReviewers()
                     }
@@ -2150,7 +2150,7 @@ extension AppDelegate {
         guard !token.isEmpty,
               let map = JiraGithubUserMap.load(fromPath: mapPath, bookmark: self.jiraGithubUserMapBookmark)
         else {
-            sendNotification(body: "GitHub PR update skipped: mapping file not loaded.")
+            sendNotification(body: "GitHub PR update skipped for \(issueKey): mapping file not loaded.")
             return
         }
 
@@ -2455,10 +2455,30 @@ extension AppDelegate {
         next()
     }
 
+    /// How many keys a notification names before it starts counting instead.
+    private static let namedIssueKeyLimit = 3
+
+    /// Names the issues an action covered, collapsing a long list so a banner stays readable.
+    ///
+    /// macOS clips a notification body, and a clipped run of keys loses both the keys it cuts and
+    /// any sense of how many there were — so past the limit this trades the tail for an explicit
+    /// count.
+    ///
+    /// Sorted naturally rather than lexicographically: the caller's keys come out of a `Set`, so
+    /// some order has to be imposed or the same batch names a different three tickets each run —
+    /// and a plain string sort puts DEV-10 and DEV-11 ahead of DEV-2, which makes the three keys on
+    /// show look arbitrary to anyone reading their own ticket numbers.
+    static func issueKeyList(_ keys: [String]) -> String {
+        let sorted = keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        guard sorted.count > namedIssueKeyLimit else { return sorted.joined(separator: ", ") }
+        return sorted.prefix(namedIssueKeyLimit).joined(separator: ", ")
+            + " +\(sorted.count - namedIssueKeyLimit) more"
+    }
+
     /// One line per ticket that had something to report, plus the Jira-side failures. Built from the same
     /// tallies the single path renders, so a batch cannot describe an action differently.
     static func bulkPRActionsSummary(
-        moved: Int,
+        movedKeys: [String],
         jiraFailures: [(key: String, reason: String?)],
         prResults: [(key: String, tally: PRActionTally)]
     ) -> String {
@@ -2482,10 +2502,13 @@ extension AppDelegate {
                 }
             }
         }
-        let moveLine = "Moved \(moved) issue\(moved == 1 ? "" : "s")"
+        let moved = movedKeys.count
+        let moveLine = moved == 0
+            ? "Moved no issues"
+            : "Moved \(moved) issue\(moved == 1 ? "" : "s") (\(AppDelegate.issueKeyList(movedKeys)))"
         guard !problems.isEmpty else { return moveLine }
-        // The count of problems leads, because a banner truncates and "Moved 3 issues" is the one line
-        // that carries nothing. The total is explicit so a clipped list still says how much is missing.
+        // The count of problems leads because a banner truncates: whatever survives the clip should say
+        // that something went wrong and how much of it, rather than opening with what succeeded.
         return (["\(problems.count) PROBLEM\(problems.count == 1 ? "" : "S") — \(moveLine):"] + problems)
             .joined(separator: "\n")
     }

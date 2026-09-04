@@ -1442,23 +1442,26 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     }
 
     /// A clean run stays quiet — one line, no wall of text.
-    func testCleanBatchReportsOnlyTheMoveCount() {
+    func testCleanBatchReportsTheMoveAndItsKeys() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 5, jiraFailures: [],
+            movedKeys: ["DEV-1", "DEV-2", "DEV-3", "DEV-4", "DEV-5"], jiraFailures: [],
             prResults: [("DEV-1", tally(reviewOK: 2)), ("DEV-2", tally(reviewOK: 1))]
         )
-        XCTAssertEqual(text, "Moved 5 issues", "a clean ticket contributes no line")
+        XCTAssertEqual(
+            text, "Moved 5 issues (DEV-1, DEV-2, DEV-3 +2 more)",
+            "a clean ticket contributes no line, but the batch still says which tickets moved"
+        )
     }
 
     /// Problems lead and the total is explicit, because a banner truncates and "Moved 3 issues" is the
     /// one line that carries nothing.
     func testProblemsLeadWithAnExplicitTotal() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 3,
+            movedKeys: ["DEV-1", "DEV-2", "DEV-3"],
             jiraFailures: [("DEV-9", "Testers are required before moving into QA.")],
             prResults: [("DEV-1", tally(reviewFailed: ["acme/api #7"]))]
         )
-        XCTAssertTrue(text.hasPrefix("2 PROBLEMS — Moved 3 issues:"), text)
+        XCTAssertTrue(text.hasPrefix("2 PROBLEMS — Moved 3 issues (DEV-1, DEV-2, DEV-3):"), text)
         XCTAssertTrue(text.contains("DEV-9 not moved: Testers are required"), text)
         XCTAssertTrue(text.contains("DEV-1: Review not submitted on acme/api #7"), text)
     }
@@ -1466,7 +1469,7 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     /// Mixed outcomes stay legible: which ticket didn't move, and which ticket's PR didn't get actioned.
     func testMixedOutcomesAreAttributedSeparately() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 2,
+            movedKeys: ["DEV-1", "DEV-2"],
             jiraFailures: [("DEV-9", "Testers are required before moving into QA.")],
             prResults: [
                 ("DEV-1", tally(reviewOK: 1)),
@@ -1474,7 +1477,7 @@ final class BulkPRActionsSummaryTests: XCTestCase {
             ]
         )
         XCTAssertEqual(text, """
-        2 PROBLEMS — Moved 2 issues:
+        2 PROBLEMS — Moved 2 issues (DEV-1, DEV-2):
         DEV-9 not moved: Testers are required before moving into QA.
         DEV-2: Review not submitted on acme/web #3
         """)
@@ -1482,15 +1485,15 @@ final class BulkPRActionsSummaryTests: XCTestCase {
 
     func testSingularProblem() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 1, jiraFailures: [("DEV-9", nil)], prResults: []
+            movedKeys: ["DEV-1"], jiraFailures: [("DEV-9", nil)], prResults: []
         )
-        XCTAssertTrue(text.hasPrefix("1 PROBLEM — Moved 1 issue:"), text)
+        XCTAssertTrue(text.hasPrefix("1 PROBLEM — Moved 1 issue (DEV-1):"), text)
     }
 
     /// The defect this replaces: "Moved 3, failed 2" with no reason for either failure.
     func testJiraFailuresCarryTheirReasonAndNameTheirTicket() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 3,
+            movedKeys: ["DEV-1", "DEV-2", "DEV-3"],
             jiraFailures: [
                 ("DEV-9", "Testers are required before moving into QA."),
                 ("DEV-8", nil),
@@ -1498,7 +1501,7 @@ final class BulkPRActionsSummaryTests: XCTestCase {
             prResults: []
         )
         XCTAssertEqual(text, """
-        2 PROBLEMS — Moved 3 issues:
+        2 PROBLEMS — Moved 3 issues (DEV-1, DEV-2, DEV-3):
         DEV-9 not moved: Testers are required before moving into QA.
         DEV-8 not moved
         """)
@@ -1507,14 +1510,14 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     /// A per-PR failure is attributed to its ticket, so five tickets' worth of PRs stay tellable apart.
     func testPRFailuresAreAttributedToTheirTicket() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 2, jiraFailures: [],
+            movedKeys: ["DEV-1", "DEV-2"], jiraFailures: [],
             prResults: [
                 ("DEV-1", tally(reviewOK: 1)),
                 ("DEV-2", tally(reviewFailed: ["acme/api #7"])),
             ]
         )
         XCTAssertEqual(text, """
-        1 PROBLEM — Moved 2 issues:
+        1 PROBLEM — Moved 2 issues (DEV-1, DEV-2):
         DEV-2: Review not submitted on acme/api #7
         """)
     }
@@ -1522,20 +1525,32 @@ final class BulkPRActionsSummaryTests: XCTestCase {
     /// "Nothing ran" is reported as itself, not as a failure and not silently.
     func testATicketWhereNothingRanSaysWhy() {
         let text = AppDelegate.bulkPRActionsSummary(
-            moved: 1, jiraFailures: [],
+            movedKeys: ["DEV-1"], jiraFailures: [],
             prResults: [("DEV-1", tally(blocked: "No open linked PRs were found, so no PR action ran."))]
         )
         XCTAssertEqual(text, """
-        1 PROBLEM — Moved 1 issue:
+        1 PROBLEM — Moved 1 issue (DEV-1):
         DEV-1: No open linked PRs were found, so no PR action ran.
         """)
     }
 
     func testSingularMoveCount() {
         XCTAssertEqual(
-            AppDelegate.bulkPRActionsSummary(moved: 1, jiraFailures: [], prResults: []),
-            "Moved 1 issue"
+            AppDelegate.bulkPRActionsSummary(movedKeys: ["DEV-1"], jiraFailures: [], prResults: []),
+            "Moved 1 issue (DEV-1)"
         )
+    }
+
+    /// Every ticket was refused, so there is no key to name and the count must not read "0 issues:"
+    /// with an empty list after it.
+    func testNothingMovedNamesNoKeys() {
+        let text = AppDelegate.bulkPRActionsSummary(
+            movedKeys: [], jiraFailures: [("DEV-9", "Jira said no")], prResults: []
+        )
+        XCTAssertEqual(text, """
+        1 PROBLEM — Moved no issues:
+        DEV-9 not moved: Jira said no
+        """)
     }
 }
 

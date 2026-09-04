@@ -250,7 +250,7 @@ public class JiraClient {
                 case .failure(let error):
                     print("\(url):  \(error)")
                     completion([Transition]())
-                    sendNotification(body: error.localizedDescription)
+                    sendNotification(body: "\(issueKey): couldn't load transitions — \(error.localizedDescription)")
                 }
             }
     }
@@ -446,13 +446,13 @@ public class JiraClient {
             .responseData { response in
                 switch response.result {
                 case .success:
-                    sendNotification(body: "Successfully transitioned issue")
+                    sendNotification(body: "Transitioned \(issueKey)")
                     completion(.success)
                 case .failure(let error):
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
-                    sendNotification(body: "Transition failed: \(message)")
+                    sendNotification(body: "\(issueKey) transition failed: \(message)")
                     completion(.failed(message: message, fieldsAlreadyWritten: fieldsAlreadyWritten))
                 }
             }
@@ -479,7 +479,7 @@ public class JiraClient {
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
-                    sendNotification(body: "Field update failed: \(message)")
+                    sendNotification(body: "\(issueKey) field update failed: \(message)")
                     completion(false, message)
                 }
             }
@@ -567,7 +567,7 @@ public class JiraClient {
                 let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                 print("\(url):  \(error)\n  body: \(bodyText)")
                 let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
-                sendNotification(body: "Upload failed: \(message)")
+                sendNotification(body: "\(issueKey) upload failed: \(message)")
                 completion(false)
             }
         }
@@ -608,7 +608,7 @@ public class JiraClient {
     ) {
         let fieldId = flagFieldId.trimmingCharacters(in: .whitespaces)
         guard !fieldId.isEmpty else {
-            sendNotification(body: "\(flagged ? "Flag" : "Unflag") failed: no field id configured")
+            sendNotification(body: "\(issueKey) \(flagged ? "flag" : "unflag") failed: no field id configured")
             completion(false)
             return
         }
@@ -722,7 +722,7 @@ public class JiraClient {
                     let bodyText = response.data.flatMap { String(data: $0, encoding: .utf8) } ?? "<no body>"
                     print("\(url):  \(error)\n  body: \(bodyText)")
                     let message = JiraClient.extractErrorMessage(from: response.data) ?? error.localizedDescription
-                    sendNotification(body: "Comment failed: \(message)")
+                    sendNotification(body: "\(issueKey) comment failed: \(message)")
                     completion(false)
                 }
             }
