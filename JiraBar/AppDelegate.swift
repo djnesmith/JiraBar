@@ -237,6 +237,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var flagWindow: NSWindow?
     var uploadWindow: NSWindow?
     var bulkMoveWindow: NSWindow?
+    /// What the bulk-move dialog shows next to each ticket key — see `BulkPRLineStore`.
+    let bulkPRLines = BulkPRLineStore()
 
     /// Snapshot of the issues currently rendered in the menu. Captured at each refresh so the
     /// bulk-move dialog has a list of candidates without a fresh API call.
@@ -490,6 +492,11 @@ extension AppDelegate {
             let ranks = extras.ranks
             if let issues = resp.issues {
                 self.lastIssues = issues
+                // A fresh list means a fresh set of PR lines: the rows below re-fetch theirs as they
+                // build, and anything else (backlog rows, a rate-limited answer that read as "no PRs")
+                // is re-asked at the next dialog open instead of standing until restart. Not while a
+                // dialog is up — it captured its candidates at open and its rows would go blank.
+                if self.bulkMoveWindow == nil { self.bulkPRLines.reset() }
                 let display = self.statusDisplay
                 let positionFor: (String) -> Int = { name in
                     display.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) ?? Int.max
@@ -1521,9 +1528,13 @@ extension AppDelegate {
             self.jiraClient.getIssuePullRequests(issueId: issue.id) { prs in
                 self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
                     onPRsCollected?(merged)
-                    guard !merged.isEmpty else { return }
+                    guard !merged.isEmpty else {
+                        self.rememberPRLine(issueKey: issue.key, prs: [], statusByURL: [:])
+                        return
+                    }
                     self.fetchGithubStatuses(for: merged) { statusByURL in
                         DispatchQueue.main.async {
+                            self.rememberPRLine(issueKey: issue.key, prs: merged, statusByURL: statusByURL)
                             issueMenu.addItem(.separator())
                             for pr in merged {
                                 self.addPRMenuItem(pr: pr, ghStatus: statusByURL[pr.url], to: issueMenu)
@@ -1629,8 +1640,9 @@ extension AppDelegate {
 
     private func presentBulkMoveDialog() {
         let backlog = self.todoBacklog.issues
+        let candidates = AppDelegate.bulkMoveCandidates(main: self.lastIssues, backlog: backlog)
         let view = BulkMoveDialog(
-            issues: AppDelegate.bulkMoveCandidates(main: self.lastIssues, backlog: backlog),
+            issues: candidates,
             backlogOnlyKeys: AppDelegate.backlogOnlyKeys(main: self.lastIssues, backlog: backlog),
             // Captured at open, not observed. Letting the candidate list grow under an open dialog
             // would move rows around a checkbox column the user is mid-way through, and could add
@@ -1641,6 +1653,7 @@ extension AppDelegate {
             showMirrorFor: { [weak self] fieldId in
                 self?.shouldShowGithubMirrorCheckbox(forJiraFieldId: fieldId) ?? false
             },
+            prLines: bulkPRLines,
             onSubmit: { [weak self] successfulKeys, users, failures, updateGithub, prActions in
                 DispatchQueue.main.async {
                     self?.bulkMoveWindow?.close()
@@ -1689,6 +1702,27 @@ extension AppDelegate {
             }
         )
         presentDialog(view, title: "Move Multiple Issues", size: NSSize(width: 600, height: 700), window: \.bulkMoveWindow)
+        fillPRLines(for: bulkPRLines.issuesWithoutLine(candidates))
+    }
+
+    /// Fetches the PR line for candidates the menu has not answered for yet — the same three calls a
+    /// menu row makes, so the dialog and the row cannot disagree. Rows fill in as each answer lands.
+    private func fillPRLines(for issues: [Issue]) {
+        for issue in issues {
+            jiraClient.getIssuePullRequests(issueId: issue.id) { [weak self] prs in
+                guard let self else { return }
+                self.prsWithGithubFallback(prs, issueKey: issue.key) { merged in
+                    self.fetchGithubStatuses(for: merged) { statusByURL in
+                        self.rememberPRLine(issueKey: issue.key, prs: merged, statusByURL: statusByURL)
+                    }
+                }
+            }
+        }
+    }
+
+    private func rememberPRLine(issueKey: String, prs: [JiraPullRequest], statusByURL: [String: GithubPRStatus]) {
+        let segments = BulkMoveDialog.prLineSegments(prs: prs, statusByURL: statusByURL)
+        DispatchQueue.main.async { self.bulkPRLines.record(segments, for: issueKey) }
     }
 
     @objc
@@ -3165,7 +3199,7 @@ extension AppDelegate {
         } else if pr.status.uppercased() == "OPEN" && pr.isApproved {
             // Fallback when GitHub data isn't available but Jira has an approved flag.
             title.appendString(string: " - ", color: "#888888")
-            title.appendString(string: "approved", color: "#2DA44E")
+            title.appendString(string: "approved", color: AppDelegate.prApprovedColorHex)
         }
 
         if showOwnership {
@@ -3245,7 +3279,7 @@ extension AppDelegate {
 
         switch status.reviewDecision {
         case "APPROVED":
-            pieces.append(("approved", "#2DA44E"))
+            pieces.append(("approved", AppDelegate.prApprovedColorHex))
         case "CHANGES_REQUESTED":
             pieces.append(("changes requested", "#CF222E"))
         default:
@@ -3322,6 +3356,10 @@ extension AppDelegate {
         }
         return (status.lowercased(), prStatusColorHex(status))
     }
+
+    /// The green an approved review is drawn in, wherever it appears: a PR row's third line, its
+    /// Jira-only fallback, and the bulk-move dialog's PR line.
+    static let prApprovedColorHex = "#2DA44E"
 
     /// Color hex for a PR status badge in the menu. Falls back to a neutral gray for
     /// anything outside the four standard dev-status values.

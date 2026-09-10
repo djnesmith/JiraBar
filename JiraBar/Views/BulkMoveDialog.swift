@@ -24,6 +24,39 @@ enum BulkUserSelectionOrigin {
     case user
 }
 
+/// One coloured run of a bulk-move row's PR line: `PR#43 open`.
+struct BulkPRLineSegment: Equatable {
+    let text: String
+    let colorHex: String
+}
+
+/// The PR line of every ticket the menu has fetched PRs for, keyed by issue key.
+///
+/// Filled from the menu's own per-row fetch, so opening the bulk dialog costs nothing for tickets the
+/// menu has already answered for — in practice the whole main list. Tickets it has not (backlog rows
+/// are fetched on first hover and may never be) are fetched at open, and a recorded empty line counts
+/// as answered: "no PRs" must not be re-asked on every open. Main thread only, as `@Published` is.
+final class BulkPRLineStore: ObservableObject {
+    @Published private(set) var segmentsByKey: [String: [BulkPRLineSegment]] = [:]
+
+    func record(_ segments: [BulkPRLineSegment], for issueKey: String) {
+        segmentsByKey[issueKey] = segments
+    }
+
+    func reset() {
+        segmentsByKey = [:]
+    }
+
+    func segments(for issueKey: String) -> [BulkPRLineSegment]? {
+        segmentsByKey[issueKey]
+    }
+
+    /// The candidates still to fetch for: those with no recorded line, empty or not.
+    func issuesWithoutLine(_ issues: [Issue]) -> [Issue] {
+        issues.filter { segmentsByKey[$0.key] == nil }
+    }
+}
+
 /// Move multiple issues to a new status in one shot.
 ///
 /// Flow: pick a "from" status (only statuses that currently have issues are listed) → pick issues
@@ -48,6 +81,8 @@ struct BulkMoveDialog: View {
     /// (correct field id, token present, mapping path set). Passed in as a closure so the
     /// dialog stays ignorant of Defaults / Keychain plumbing.
     let showMirrorFor: (String) -> Bool
+    /// Each candidate's PRs and their states, as far as they are known — see `BulkPRLineStore`.
+    @ObservedObject var prLines: BulkPRLineStore
     /// Reports the per-key outcome so the caller can fan out the GitHub mirror when
     /// `updateGithub` is true. `users` is the shared reviewer selection applied to every
     /// successfully transitioned issue.
@@ -108,6 +143,40 @@ struct BulkMoveDialog: View {
     @State private var updateGithub: Bool = true
 
     private let client = JiraClient()
+
+    // MARK: - Key line
+
+    /// The caption the key line used, one point larger. The summary above it does not grow.
+    static let keyLineFont = Font.system(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize + 1)
+
+    /// `PR#43 open`, `PR#7 approved`, `PR#345 merged` — one segment per PR, in the order given,
+    /// worded and coloured as the menu's PR rows are (`AppDelegate.prStateLabel`). Approval replaces
+    /// the bare `open`: it is the fact a move decision turns on, and the menu already draws it in
+    /// this green on its third line. A draft or a failed CI run keeps the menu's word, as there.
+    static func prLineSegments(
+        prs: [JiraPullRequest],
+        statusByURL: [String: GithubPRStatus]
+    ) -> [BulkPRLineSegment] {
+        prs.map { pr in
+            let ghStatus = statusByURL[pr.url]
+            var state = AppDelegate.prStateLabel(status: pr.status, ghStatus: ghStatus)
+            // Without GitHub enrichment Jira's own reviewer flags stand in, as the menu row does.
+            let approved = ghStatus.map { $0.reviewDecision == "APPROVED" } ?? pr.isApproved
+            if state.text == "open" && approved {
+                state = ("approved", AppDelegate.prApprovedColorHex)
+            }
+            return BulkPRLineSegment(text: "PR#\(pr.numberOnly) \(state.text)", colorHex: state.colorHex)
+        }
+    }
+
+    /// The segments as one run of text, comma-separated, each in its own colour.
+    static func prLineText(_ segments: [BulkPRLineSegment]) -> Text {
+        segments.enumerated().reduce(Text("")) { line, item in
+            let piece = Text(item.element.text)
+                .foregroundColor(Color(statusHex: item.element.colorHex) ?? .secondary)
+            return item.offset == 0 ? piece : line + Text(", ").foregroundColor(.secondary) + piece
+        }
+    }
 
     // MARK: - Derived
 
@@ -373,13 +442,17 @@ struct BulkMoveDialog: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(AppDelegate.attributedColoringIssueKeys(issue.fields.summary)).lineLimit(1)
                 HStack(spacing: 4) {
-                    Text(issue.key).font(.caption).foregroundColor(.forIssueKey(issue.key))
+                    Text(issue.key).foregroundColor(.forIssueKey(issue.key))
                     // Trails the key rather than leading the row: the checkbox column is the row's
                     // anchor, and a marker in front of it would compete with the thing being read.
                     if backlogOnlyKeys.contains(issue.key) {
-                        Text("backlog").font(.caption).foregroundColor(.secondary)
+                        Text("backlog").foregroundColor(.secondary)
+                    }
+                    if let segments = prLines.segments(for: issue.key), !segments.isEmpty {
+                        BulkMoveDialog.prLineText(segments)
                     }
                 }
+                .font(BulkMoveDialog.keyLineFont)
             }
             Spacer()
         }
