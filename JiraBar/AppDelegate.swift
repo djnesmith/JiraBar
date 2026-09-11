@@ -513,29 +513,14 @@ extension AppDelegate {
                     }
 
                 for (status, issuess) in issuesByStatus {
+                    let group = AppDelegate.statusGroup(
+                        status: status, issues: issuess, ranks: ranks, color: colorFor(status)
+                    )
+
                     self.menu.addItem(.separator())
-                    let statusItem = NSMenuItem(title: status, action: nil, keyEquivalent: "")
-                    if let color = colorFor(status) {
-                        statusItem.attributedTitle = NSAttributedString(
-                            string: status,
-                            attributes: [.foregroundColor: color]
-                        )
-                    }
-                    self.menu.addItem(statusItem)
+                    self.menu.addItem(group.header)
 
-                    // Sort tickets within each status by Lexorank ascending (board order). Unranked
-                    // issues drop to the bottom of the group, alphabetical by key as a tiebreaker.
-                    let sortedIssues = issuess.sorted { lhs, rhs in
-                        let lr = ranks[lhs.key] ?? ""
-                        let rr = ranks[rhs.key] ?? ""
-                        if !lr.isEmpty && !rr.isEmpty { return lr < rr }
-                        if lr.isEmpty && rr.isEmpty {
-                            return lhs.key.localizedCaseInsensitiveCompare(rhs.key) == .orderedAscending
-                        }
-                        return !lr.isEmpty
-                    }
-
-                    for issue in sortedIssues {
+                    for issue in group.issues {
                         let issueItem = self.makeIssueRow(for: issue)
 
                         // Balanced by the leave in onPRsCollected — every client completion
@@ -1107,6 +1092,58 @@ extension AppDelegate {
         return item
     }
 
+    /// One status group of the main menu: the clickable header and the rows that belong under it.
+    ///
+    /// The two travel together because the header copies the rows' keys. Handing the caller a header
+    /// and a separate array would let it render one order and copy another — a drift no test of
+    /// either piece alone can see, since both would still be individually correct.
+    struct StatusGroup {
+        let header: NSMenuItem
+        let issues: [Issue]
+    }
+
+    /// Builds a status group: orders the issues the way the board does, then heads them with a row
+    /// that copies exactly those keys in exactly that order.
+    static func statusGroup(
+        status: String,
+        issues: [Issue],
+        ranks: [String: String],
+        color: NSColor?
+    ) -> StatusGroup {
+        let ordered = orderedInStatusGroup(issues, ranks: ranks)
+        return StatusGroup(header: makeStatusHeader(status: status, issues: ordered, color: color), issues: ordered)
+    }
+
+    /// The coloured status row that heads each group in the main menu, e.g. "QA".
+    ///
+    /// Clicking it copies every key under it, in the order `issues` is already in. Callers go through
+    /// `statusGroup`, which is what guarantees that order is also the order the rows are drawn in.
+    ///
+    /// Unlike `makeSectionHeader` this needs no placeholder submenu: its own action is what keeps it
+    /// clear of NSMenu's enabling latch, the same trick `makeIssueRow` uses. Before it had one the row
+    /// was a bare `action: nil` item and AppKit disabled it on the first `update()`, which is why the
+    /// status rows used to be inert. Making it clickable also makes it render as enabled — a status
+    /// with no colour configured, which is every status until the user sets one, goes from the dimmed
+    /// disabled label colour to full strength.
+    static func makeStatusHeader(status: String, issues: [Issue], color: NSColor?) -> NSMenuItem {
+        let keyList = copyableKeyList(issues.map(\.key))
+        let item = NSMenuItem(
+            title: status,
+            action: keyList.isEmpty ? nil : #selector(AppDelegate.copyToClipboard(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = keyList
+        if !keyList.isEmpty {
+            // Nothing in the row's text says it copies, so the tooltip carries the affordance the
+            // hover highlight only hints at.
+            item.toolTip = "Copy \(issues.count) issue key\(issues.count == 1 ? "" : "s")"
+        }
+        if let color {
+            item.attributedTitle = NSAttributedString(string: status, attributes: [.foregroundColor: color])
+        }
+        return item
+    }
+
     /// One coloured run of text inside a segment of the ownership line.
     typealias OwnershipRun = (text: String, color: NSColor)
 
@@ -1559,6 +1596,27 @@ extension AppDelegate {
             return lhs.offset < rhs.offset
         }
         .map(\.element)
+    }
+
+    /// Orders one status group the way the menu shows it: by Lexorank ascending (board order), with
+    /// unranked tickets below the ranked ones and ties broken alphabetically by key.
+    ///
+    /// Not `orderedByRank`, which breaks ties by keeping the order Jira returned. This one breaks them
+    /// by key instead. The difference is longstanding and its original reason is not recorded here;
+    /// it is preserved rather than endorsed, and pinned by `StatusGroupOrderingTests`.
+    ///
+    /// Extracted because the status header copies these keys: the displayed order and the copied order
+    /// are the same claim, and it is only worth making if it can be tested.
+    static func orderedInStatusGroup(_ issues: [Issue], ranks: [String: String]) -> [Issue] {
+        issues.sorted { lhs, rhs in
+            let lr = ranks[lhs.key] ?? ""
+            let rr = ranks[rhs.key] ?? ""
+            if !lr.isEmpty && !rr.isEmpty { return lr < rr }
+            if lr.isEmpty && rr.isEmpty {
+                return lhs.key.localizedCaseInsensitiveCompare(rhs.key) == .orderedAscending
+            }
+            return !lr.isEmpty
+        }
     }
 
     @objc
@@ -2507,6 +2565,17 @@ extension AppDelegate {
         guard sorted.count > namedIssueKeyLimit else { return sorted.joined(separator: ", ") }
         return sorted.prefix(namedIssueKeyLimit).joined(separator: ", ")
             + " +\(sorted.count - namedIssueKeyLimit) more"
+    }
+
+    /// The keys of a group of issues, ready to paste. Space-separated, which is the shape this was
+    /// asked for — no claim is made about what any particular tool parses.
+    ///
+    /// Deliberately not `issueKeyList`: that one names issues in a notification, where the display
+    /// clips, so it collapses past a limit and sorts to keep its output stable. A clipboard has
+    /// neither problem, and here both behaviours would be bugs — a paste that silently dropped
+    /// tickets, or reordered them out of the order the user just clicked on.
+    static func copyableKeyList(_ keys: [String]) -> String {
+        keys.joined(separator: " ")
     }
 
     /// One line per ticket that had something to report, plus the Jira-side failures. Built from the same
