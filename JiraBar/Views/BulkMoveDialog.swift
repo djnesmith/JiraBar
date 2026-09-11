@@ -149,6 +149,15 @@ struct BulkMoveDialog: View {
     /// The caption the key line used, one point larger. The summary above it does not grow.
     static let keyLineFont = Font.system(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize + 1)
 
+    /// The assignee for the key line, or nil when the ticket has none. Blank rather than the menu
+    /// row's "Unassigned" (`AppDelegate.assigneeSegment`): a bulk row's key line already carries the
+    /// key, a backlog marker and the PR states, and the unassigned case is the common one here — the
+    /// word would cost every such row a segment to say nothing the gap does not.
+    static func assigneeLabel(displayName: String?) -> String? {
+        let name = displayName?.trimmingCharacters(in: .whitespaces) ?? ""
+        return name.isEmpty ? nil : name
+    }
+
     /// `PR#43 open`, `PR#7 approved`, `PR#345 merged` — one segment per PR, in the order given,
     /// worded and coloured as the menu's PR rows are (`AppDelegate.prStateLabel`). Approval replaces
     /// the bare `open`: it is the fact a move decision turns on, and the menu already draws it in
@@ -447,6 +456,11 @@ struct BulkMoveDialog: View {
                     // anchor, and a marker in front of it would compete with the thing being read.
                     if backlogOnlyKeys.contains(issue.key) {
                         Text("backlog").foregroundColor(.secondary)
+                    }
+                    // Muted, between the key and the PR states: the PR colours are what a move
+                    // decision turns on, and a second coloured name would compete with them.
+                    if let assignee = BulkMoveDialog.assigneeLabel(displayName: issue.fields.assignee?.displayName) {
+                        Text(assignee).foregroundColor(.secondary)
                     }
                     if let segments = prLines.segments(for: issue.key), !segments.isEmpty {
                         BulkMoveDialog.prLineText(segments)
