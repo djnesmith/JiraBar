@@ -90,3 +90,6 @@ fastlane/test_output
 iOSInjectionProject/
 
 .DS_Store
+
+# Scratch briefs handed to agents; not part of the project.
+.brief-*.md

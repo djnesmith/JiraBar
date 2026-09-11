@@ -17,9 +17,11 @@ import AppKit
 /// lives inside the `getIssuesByJql` completion in `refreshMenu` with no seam to drive it from —
 /// `JiraClient` is constructed inline rather than injected. A loop that drew its rows from the
 /// pre-sort array while adding `group.header` would still pass this file. Verified by mutation:
-/// swapping `group.issues` for `issuess` at `AppDelegate.swift:523` leaves the suite green. That
+/// swapping `group.issues` for `issuess` in that loop leaves the suite green. That
 /// one line is checked by eye against a live instance, not by a test.
 final class StatusHeaderCopyTests: XCTestCase {
+
+    private let base = "https://example.atlassian.net"
 
     /// Decoded rather than constructed — Issue/Fields expose no memberwise init.
     private func issue(_ key: String) throws -> Issue {
@@ -34,13 +36,17 @@ final class StatusHeaderCopyTests: XCTestCase {
         try keys.map { try issue($0) }
     }
 
+    private func payload(_ item: NSMenuItem) -> AppDelegate.StatusCopyPayload? {
+        item.representedObject as? AppDelegate.StatusCopyPayload
+    }
+
     // MARK: the row survives the enabling latch
 
     /// The whole reason the row has an action. Run through a real `NSMenu.update()`, which is what
     /// AppKit does when the menu opens, because that is the pass that used to disable it.
     func testTheHeaderIsEnabledAfterTheMenuUpdates() throws {
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(["DEV-1", "DEV-2"]), color: .systemGreen
+            status: "QA", issues: try issues(["DEV-1", "DEV-2"]), color: .systemGreen, baseUrl: base
         )
         let menu = NSMenu()
         menu.addItem(header)
@@ -56,7 +62,7 @@ final class StatusHeaderCopyTests: XCTestCase {
         for refresh in 1...3 {
             menu.removeAllItems()
             let header = AppDelegate.makeStatusHeader(
-                status: "QA", issues: try issues(["DEV-1"]), color: .systemGreen
+                status: "QA", issues: try issues(["DEV-1"]), color: .systemGreen, baseUrl: base
             )
             menu.addItem(header)
             menu.update()
@@ -69,9 +75,9 @@ final class StatusHeaderCopyTests: XCTestCase {
 
     func testTheHeaderCarriesEveryKeyUnderIt() throws {
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(["DEV-1", "DEV-2", "DEV-3"]), color: nil
+            status: "QA", issues: try issues(["DEV-1", "DEV-2", "DEV-3"]), color: nil, baseUrl: base
         )
-        XCTAssertEqual(header.representedObject as? String, "DEV-1 DEV-2 DEV-3")
+        XCTAssertEqual(payload(header)?.keys, ["DEV-1", "DEV-2", "DEV-3"])
     }
 
     /// The payload follows the array it was handed, which is the array the rows are drawn from. A
@@ -79,19 +85,19 @@ final class StatusHeaderCopyTests: XCTestCase {
     func testTheKeysAreInTheOrderTheRowsAreDrawn() throws {
         let boardOrder = ["DEV-30", "DEV-2", "DEV-11"]
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(boardOrder), color: nil
+            status: "QA", issues: try issues(boardOrder), color: nil, baseUrl: base
         )
-        XCTAssertEqual(header.representedObject as? String, "DEV-30 DEV-2 DEV-11")
+        XCTAssertEqual(payload(header)?.keys, ["DEV-30", "DEV-2", "DEV-11"])
     }
 
-    /// `copyToClipboard` reads `representedObject as? String`, so the type is part of the contract —
-    /// an array of keys here would leave the clipboard untouched and the click would do nothing.
-    func testThePayloadIsAStringSoCopyToClipboardAccceptsIt() throws {
+    /// `copyStatusList` reads `representedObject as? StatusCopyPayload`, so the type is part of the
+    /// contract — anything else here would leave the clipboard untouched and the click do nothing.
+    func testThePayloadIsTheTypeTheActionReads() throws {
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(["DEV-1"]), color: nil
+            status: "QA", issues: try issues(["DEV-1"]), color: nil, baseUrl: base
         )
-        XCTAssertEqual(header.action, #selector(AppDelegate.copyToClipboard(_:)))
-        XCTAssertNotNil(header.representedObject as? String)
+        XCTAssertEqual(header.action, #selector(AppDelegate.copyStatusList(_:)))
+        XCTAssertNotNil(payload(header), "copyStatusList reads a StatusCopyPayload and nothing else")
     }
 
     // MARK: the title is unchanged
@@ -99,7 +105,7 @@ final class StatusHeaderCopyTests: XCTestCase {
     /// The colour and the text are the part of the row that was explicitly not to change.
     func testTheColouredTitleIsPreserved() throws {
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(["DEV-1"]), color: .systemGreen
+            status: "QA", issues: try issues(["DEV-1"]), color: .systemGreen, baseUrl: base
         )
         XCTAssertEqual(header.attributedTitle?.string, "QA")
         let color = header.attributedTitle?.attribute(.foregroundColor, at: 0, effectiveRange: nil)
@@ -114,7 +120,7 @@ final class StatusHeaderCopyTests: XCTestCase {
     /// applies to every status until the user configures colours.
     func testAStatusWithNoColourKeepsAPlainTitle() throws {
         let header = AppDelegate.makeStatusHeader(
-            status: "QA", issues: try issues(["DEV-1"]), color: nil
+            status: "QA", issues: try issues(["DEV-1"]), color: nil, baseUrl: base
         )
         XCTAssertNil(header.attributedTitle)
         XCTAssertEqual(header.title, "QA")
@@ -125,7 +131,7 @@ final class StatusHeaderCopyTests: XCTestCase {
     /// Grouping cannot produce an empty status, so this is unreachable from the menu. Pinned anyway
     /// because it is what stops a click that would clear the clipboard and paste nothing.
     func testAnEmptyGroupGetsNoClickAction() throws {
-        let header = AppDelegate.makeStatusHeader(status: "QA", issues: [], color: .systemGreen)
+        let header = AppDelegate.makeStatusHeader(status: "QA", issues: [], color: .systemGreen, baseUrl: base)
         XCTAssertNil(header.action, "an empty status must not offer a copy")
         XCTAssertNil(header.toolTip)
     }
@@ -143,11 +149,12 @@ final class StatusHeaderCopyTests: XCTestCase {
         ]
         for ranks in rankings {
             let group = AppDelegate.statusGroup(
-                status: "QA", issues: try issues(["DEV-1", "DEV-2", "DEV-3"]), ranks: ranks, color: nil
+                status: "QA", issues: try issues(["DEV-1", "DEV-2", "DEV-3"]), ranks: ranks,
+                color: nil, baseUrl: base
             )
             XCTAssertEqual(
-                group.header.representedObject as? String,
-                group.issues.map(\.key).joined(separator: " "),
+                payload(group.header)?.keys,
+                group.issues.map(\.key),
                 "the copied keys drifted from the rows drawn under them"
             )
         }
@@ -160,10 +167,11 @@ final class StatusHeaderCopyTests: XCTestCase {
             status: "QA",
             issues: try issues(["DEV-1", "DEV-2", "DEV-3"]),
             ranks: ["DEV-1": "0|c", "DEV-2": "0|a", "DEV-3": "0|b"],
-            color: nil
+            color: nil,
+            baseUrl: base
         )
         XCTAssertEqual(group.issues.map(\.key), ["DEV-2", "DEV-3", "DEV-1"])
-        XCTAssertEqual(group.header.representedObject as? String, "DEV-2 DEV-3 DEV-1")
+        XCTAssertEqual(payload(group.header)?.keys, ["DEV-2", "DEV-3", "DEV-1"])
     }
 
 }

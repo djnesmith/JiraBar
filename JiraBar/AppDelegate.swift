@@ -514,7 +514,8 @@ extension AppDelegate {
 
                 for (status, issuess) in issuesByStatus {
                     let group = AppDelegate.statusGroup(
-                        status: status, issues: issuess, ranks: ranks, color: colorFor(status)
+                        status: status, issues: issuess, ranks: ranks,
+                        color: colorFor(status), baseUrl: self.baseUrl
                     )
 
                     self.menu.addItem(.separator())
@@ -1108,10 +1109,62 @@ extension AppDelegate {
         status: String,
         issues: [Issue],
         ranks: [String: String],
-        color: NSColor?
+        color: NSColor?,
+        baseUrl: String
     ) -> StatusGroup {
         let ordered = orderedInStatusGroup(issues, ranks: ranks)
-        return StatusGroup(header: makeStatusHeader(status: status, issues: ordered, color: color), issues: ordered)
+        return StatusGroup(
+            header: makeStatusHeader(status: status, issues: ordered, color: color, baseUrl: baseUrl),
+            issues: ordered
+        )
+    }
+
+    /// What a click on a status header copies. Keys or browse URLs, one per line or all on one line,
+    /// picked by the modifiers held at the moment of the click.
+    ///
+    /// The two modifiers are independent and compose: command picks the separator, option picks
+    /// whether keys or URLs are listed. Holding neither is the plain case.
+    enum StatusCopyFormat {
+        case keysSpaced
+        case keysLined
+        case urlsSpaced
+        case urlsLined
+
+        /// Only command and option are consulted. Anything else held at the same time — shift,
+        /// control, caps lock, a function key, or a device-dependent bit — is ignored rather than
+        /// blocking the copy, since a stray modifier should not turn a click into nothing.
+        static func forModifiers(_ modifiers: NSEvent.ModifierFlags) -> StatusCopyFormat {
+            let wantsURLs = modifiers.contains(.option)
+            let wantsLines = modifiers.contains(.command)
+            switch (wantsURLs, wantsLines) {
+            case (false, false): return .keysSpaced
+            case (false, true):  return .keysLined
+            case (true, false):  return .urlsSpaced
+            case (true, true):   return .urlsLined
+            }
+        }
+
+        var separator: String { self == .keysLined || self == .urlsLined ? "\n" : " " }
+        var listsURLs: Bool { self == .urlsSpaced || self == .urlsLined }
+    }
+
+    /// The keys a status header was built over, and what is needed to turn them into URLs. Carried on
+    /// the menu item because the format is not known until the click.
+    struct StatusCopyPayload {
+        let keys: [String]
+        let baseUrl: String
+    }
+
+    /// The text a click copies, for the modifiers held.
+    ///
+    /// Derives URLs from the keys rather than carrying a second list, so the two can never disagree
+    /// about which tickets are in the group or what order they are in.
+    static func statusCopyText(_ payload: StatusCopyPayload, modifiers: NSEvent.ModifierFlags) -> String {
+        let format = StatusCopyFormat.forModifiers(modifiers)
+        let lines = format.listsURLs
+            ? payload.keys.map { browseURL(forKey: $0, baseUrl: payload.baseUrl) }
+            : payload.keys
+        return lines.joined(separator: format.separator)
     }
 
     /// The coloured status row that heads each group in the main menu, e.g. "QA".
@@ -1125,18 +1178,26 @@ extension AppDelegate {
     /// status rows used to be inert. Making it clickable also makes it render as enabled — a status
     /// with no colour configured, which is every status until the user sets one, goes from the dimmed
     /// disabled label colour to full strength.
-    static func makeStatusHeader(status: String, issues: [Issue], color: NSColor?) -> NSMenuItem {
-        let keyList = copyableKeyList(issues.map(\.key))
+    static func makeStatusHeader(
+        status: String,
+        issues: [Issue],
+        color: NSColor?,
+        baseUrl: String
+    ) -> NSMenuItem {
+        let keys = issues.map(\.key)
         let item = NSMenuItem(
             title: status,
-            action: keyList.isEmpty ? nil : #selector(AppDelegate.copyToClipboard(_:)),
+            action: keys.isEmpty ? nil : #selector(AppDelegate.copyStatusList(_:)),
             keyEquivalent: ""
         )
-        item.representedObject = keyList
-        if !keyList.isEmpty {
-            // Nothing in the row's text says it copies, so the tooltip carries the affordance the
-            // hover highlight only hints at.
-            item.toolTip = "Copy \(issues.count) issue key\(issues.count == 1 ? "" : "s")"
+        item.representedObject = StatusCopyPayload(keys: keys, baseUrl: baseUrl)
+        if !keys.isEmpty {
+            // Nothing in the row's text says it copies, and the modifiers are invisible on top of
+            // that, so the tooltip carries both. "combine for both" rather than spelling out all
+            // four: the two modifiers are independent, so naming them and saying they compose is
+            // shorter than a four-line matrix and describes the same thing.
+            item.toolTip = "Copy \(keys.count) issue\(keys.count == 1 ? "" : "s")"
+                + "  (⌘ one per line · ⌥ URLs · combine for both)"
         }
         if let color {
             item.attributedTitle = NSAttributedString(string: status, attributes: [.foregroundColor: color])
@@ -1427,7 +1488,9 @@ extension AppDelegate {
                 .appendImage(AppDelegate.flagRowImage)
         }
         issueItem.attributedTitle = title
-        issueItem.representedObject = URL(string: "\(self.baseUrl)/browse/\(issue.key)")
+        issueItem.representedObject = URL(
+            string: AppDelegate.browseURL(forKey: issue.key, baseUrl: self.baseUrl)
+        )
         return issueItem
     }
 
@@ -1486,7 +1549,7 @@ extension AppDelegate {
             issueMenu.addItem(copyKeyItem)
 
             let copyURLItem = NSMenuItem(title: "Copy URL", action: #selector(self.copyToClipboard), keyEquivalent: "")
-            copyURLItem.representedObject = "\(self.baseUrl)/browse/\(issue.key)"
+            copyURLItem.representedObject = AppDelegate.browseURL(forKey: issue.key, baseUrl: self.baseUrl)
             issueMenu.addItem(copyURLItem)
 
             let copyTitleItem = NSMenuItem(title: "Copy Title", action: #selector(self.copyToClipboard), keyEquivalent: "")
@@ -2144,8 +2207,40 @@ extension AppDelegate {
     @objc
     func copyToClipboard(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
+        AppDelegate.putOnClipboard(text)
+    }
+
+    /// Copies a status group, in one of four shapes chosen by the modifier keys held at the click.
+    ///
+    /// The modifiers are read here rather than expressed as four `alternate` menu items: alternates
+    /// would quadruple the rows in an already long menu, and AppKit only swaps them for a modifier
+    /// set declared per item, so the four-way matrix needs all four present under every status.
+    /// One item that reads the flags is the same behaviour at a quarter of the menu.
+    ///
+    /// `NSEvent.modifierFlags` is live keyboard state, not the state carried by the click, so a
+    /// modifier released in the gap between mouse-up and this action running is not seen. The row is
+    /// a plain `NSMenuItem`, which gets no event to read instead; the alternative is a custom
+    /// `NSMenuItem.view` like `PRMenuItemView`, which does read `event.modifierFlags` in `mouseUp` —
+    /// at the cost of not picking up standard menu row metrics or highlighting, the same trade
+    /// `makeSectionHeader` declines. Judged not worth it for a gap a user has to race.
+    @objc
+    func copyStatusList(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? StatusCopyPayload else { return }
+        AppDelegate.putOnClipboard(
+            AppDelegate.statusCopyText(payload, modifiers: NSEvent.modifierFlags)
+        )
+    }
+
+    /// The one place anything in the app writes the pasteboard.
+    static func putOnClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// The browser URL for a ticket. The only construction of it — `baseUrl` already resolves Cloud
+    /// vs Server, so callers must not assemble their own.
+    static func browseURL(forKey key: String, baseUrl: String) -> String {
+        "\(baseUrl)/browse/\(key)"
     }
     
     @objc
@@ -2565,17 +2660,6 @@ extension AppDelegate {
         guard sorted.count > namedIssueKeyLimit else { return sorted.joined(separator: ", ") }
         return sorted.prefix(namedIssueKeyLimit).joined(separator: ", ")
             + " +\(sorted.count - namedIssueKeyLimit) more"
-    }
-
-    /// The keys of a group of issues, ready to paste. Space-separated, which is the shape this was
-    /// asked for — no claim is made about what any particular tool parses.
-    ///
-    /// Deliberately not `issueKeyList`: that one names issues in a notification, where the display
-    /// clips, so it collapses past a limit and sorts to keep its output stable. A clipboard has
-    /// neither problem, and here both behaviours would be bugs — a paste that silently dropped
-    /// tickets, or reordered them out of the order the user just clicked on.
-    static func copyableKeyList(_ keys: [String]) -> String {
-        keys.joined(separator: " ")
     }
 
     /// One line per ticket that had something to report, plus the Jira-side failures. Built from the same
@@ -3294,8 +3378,7 @@ extension AppDelegate {
             onLeftClick: { modifiers in
                 if modifiers.contains(.shift) {
                     if let number = AppDelegate.prNumber(from: urlString) {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(number, forType: .string)
+                        AppDelegate.putOnClipboard(number)
                         sendNotification(body: "Copied PR #\(number)")
                     }
                     return
@@ -3306,8 +3389,7 @@ extension AppDelegate {
                 }
             },
             onRightClick: {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(urlString, forType: .string)
+                AppDelegate.putOnClipboard(urlString)
                 sendNotification(body: "Copied PR URL")
             }
         )
