@@ -26,8 +26,9 @@ extension NSMutableAttributedString {
         return self
     }
 
+    /// Semantic default — an inline glyph sits on the same glass as the text beside it.
     @discardableResult
-    func appendIcon(iconName: String, color: NSColor = NSColor.gray) -> NSMutableAttributedString {
+    func appendIcon(iconName: String, color: NSColor = .secondaryLabelColor) -> NSMutableAttributedString {
         appendImage(NSImage(named: iconName)?.tint(color: color))
         self.appendString(string: " ")
 

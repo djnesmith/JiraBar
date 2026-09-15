@@ -34,6 +34,44 @@ private func srgbComponents(_ color: NSColor, _ appearance: NSAppearance.Name) -
     return out
 }
 
+/// What a colour actually puts on screen over `background`, alpha included.
+///
+/// The label colours carry alpha — `secondaryLabelColor` is white at 0.55 in dark — so components
+/// alone describe a colour that is never drawn, and flatter it: taken opaque it measures pure white.
+private func compositedColor(_ color: NSColor, over background: [CGFloat], _ appearance: NSAppearance.Name) -> [CGFloat] {
+    var out: [CGFloat] = []
+    NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+        guard let s = color.usingColorSpace(.sRGB), background.count == 3 else { return }
+        let a = s.alphaComponent
+        out = [
+            s.redComponent * a + background[0] * (1 - a),
+            s.greenComponent * a + background[1] * (1 - a),
+            s.blueComponent * a + background[2] * (1 - a),
+        ]
+    }
+    return out
+}
+
+/// The menu background is a range, not a value: glass from macOS 26 (`NSGlassEffectView`), so it
+/// carries whatever is behind the window. Measured on 27.0, each array ordered best end first — which
+/// is the opposite wallpaper in each appearance, since a dark menu is darkest over a dark desktop and a
+/// light menu is lightest over a pale one. The single values that stood here, #1E1E1E dark and white
+/// light, describe the opaque menu that came before and sit outside the range, so everything measured
+/// against them scored better than it can draw.
+private let darkMenuRange: [[CGFloat]] = [
+    [0x2B / 255.0, 0x2B / 255.0, 0x2B / 255.0],
+    [0x7B / 255.0, 0x7B / 255.0, 0x7B / 255.0],
+]
+private let lightMenuRange: [[CGFloat]] = [
+    [0xF1 / 255.0, 0xF1 / 255.0, 0xF1 / 255.0],
+    [0xBF / 255.0, 0xBF / 255.0, 0xBF / 255.0],
+]
+
+/// A colour's worst contrast anywhere in one end-to-end menu range.
+private func worstContrast(_ color: NSColor, _ range: [[CGFloat]], _ appearance: NSAppearance.Name) -> CGFloat {
+    range.map { contrastRatio(compositedColor(color, over: $0, appearance), $0) }.min() ?? 0
+}
+
 /// WCAG contrast ratio between two sRGB triples. Returns 0 for a triple `srgbComponents` could not
 /// produce, which fails an assertion rather than trapping on the index.
 private func contrastRatio(_ a: [CGFloat], _ b: [CGFloat]) -> CGFloat {
@@ -260,7 +298,7 @@ final class AppDelegateHelpersTests: XCTestCase {
 
 final class AssigneeSegmentTests: XCTestCase {
 
-    private let grey = NSColor(hex: "#888888")
+    private let grey = AppDelegate.ownershipMetadata
 
     func testUnassignedReadsUnassignedAndStaysGrey() {
         for highlight in [true, false] {
@@ -528,10 +566,11 @@ final class OwnershipSegmentsTests: XCTestCase {
                 "\(name)'s colour is fixed and cannot adapt to a dark menu"
             )
         }
-        // The amber is deliberately a fixed hex, so it is the control: same value in both.
+        // A literal fixed colour as the control, so the assertions above are known to be able to fail.
+        // The amber served as it until it started adapting.
         XCTAssertEqual(
-            srgbComponents(AppDelegate.ownershipAbsent, .aqua),
-            srgbComponents(AppDelegate.ownershipAbsent, .darkAqua)
+            srgbComponents(NSColor(hex: "#BF6900"), .aqua),
+            srgbComponents(NSColor(hex: "#BF6900"), .darkAqua)
         )
     }
 
@@ -1109,8 +1148,10 @@ final class HighlightedProjectFilterTests: XCTestCase {
     }
 }
 
-/// The issue-type colour. Two kinds of type earn one; the rest keep the metadata grey deliberately, so
-/// much of this class is pinning what stays quiet.
+/// The issue-type colour, and the menu palette it has to sit in — the distinctness bar and the glass
+/// contrast floor live here because they are the same bar for every colour on a row. Two kinds of type
+/// earn a colour; the rest keep the metadata grey deliberately, so much of this class is pinning what
+/// stays quiet.
 final class IssueTypeColorTests: XCTestCase {
 
     /// Read through the mapping, never restated as a literal — a property asserted about
@@ -1185,15 +1226,22 @@ final class IssueTypeColorTests: XCTestCase {
     /// Colours the menu already spends, that a type colour must not be mistaken for. Reviewer yellow is
     /// on PR rows rather than ticket rows, and is held to the same bar anyway rather than carving out an
     /// exception that would need revisiting if a ticket row ever grows one.
-    private var alreadySpent: [(String, NSColor)] {
-        [
-            ("key blue", AppDelegate.issueKeyColor),
-            ("assignee green", .systemGreen),
-            ("reviewer yellow", .systemYellow),
-            ("unassigned amber", AppDelegate.ownershipAbsent),
-            ("metadata grey", AppDelegate.ownershipMetadata),
-            ("hash glyph grey", .gray),
-            ("row title", .labelColor),
+    ///
+    /// As components rather than colours, and the two label colours composited on the glass: they carry
+    /// alpha, `srgbComponents` drops it, and taken raw they collapse to flat white or flat black — equal
+    /// to each other and to nothing the menu draws. Composited at the end of the range where they land
+    /// closest to a type colour, which is the pale wallpaper in dark mode and the dark one in light.
+    /// The hash glyph had an entry here until it stopped being its own colour; it draws the metadata
+    /// colour now, so that entry covers it.
+    private func alreadySpent(_ appearance: NSAppearance.Name) -> [(String, [CGFloat])] {
+        let glass = appearance == .darkAqua ? darkMenuRange[1] : lightMenuRange[1]
+        return [
+            ("key blue", srgbComponents(AppDelegate.issueKeyColor, appearance)),
+            ("assignee green", srgbComponents(.systemGreen, appearance)),
+            ("reviewer yellow", srgbComponents(.systemYellow, appearance)),
+            ("unassigned amber", srgbComponents(AppDelegate.ownershipAbsent, appearance)),
+            ("metadata grey", compositedColor(.secondaryLabelColor, over: glass, appearance)),
+            ("row title", compositedColor(.labelColor, over: glass, appearance)),
         ]
     }
 
@@ -1210,8 +1258,8 @@ final class IssueTypeColorTests: XCTestCase {
     func testTypeColorsAreDistinctFromEveryColorTheMenuAlreadyUses() {
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             for (typeName, typeColor) in [("Bug", bug), ("Epic", epic), ("light purple", lightPurple)] {
-                for (otherName, other) in alreadySpent {
-                    let distance = deltaE00(typeColor, other, appearance)
+                for (otherName, other) in alreadySpent(appearance) {
+                    let distance = deltaE00(srgbComponents(typeColor, appearance), other)
                     XCTAssertGreaterThan(
                         distance, distinctEnough,
                         "\(typeName) is ΔE00 \(distance) from \(otherName) in \(appearance.rawValue)"
@@ -1363,25 +1411,76 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 
-    /// Legible rather than sinking into the background it is drawn on. The dark bar is AA; the light one
-    /// is lower on purpose, because the metadata grey these sit among is itself only 3.5:1 on white and
-    /// holding the type to a standard the rest of the row misses would fail for the wrong reason.
+    /// Legible rather than sinking into the background, measured at the best end of the glass range.
+    ///
+    /// The bars are descriptive. They were 4.5:1 dark and 3.0:1 light against an opaque menu; the colours
+    /// have not changed, the surface did. Epic now reaches 3.90:1 here and 1.17:1 at the pale end.
+    /// Recording the floor catches further drift; it is not a finding that these are fine.
+    ///
+    /// A third assertion stood here — that a type colour is never dimmer in light mode than the grey it
+    /// replaces. It is gone rather than relaxed because it now fails: the grey got brighter (3.88:1
+    /// composited) while light purple did not (3.14:1), so the type colours are the dimmer of the two.
+    /// That is a real loss and it is the open question on this palette, not a tidy-up.
     func testTypeColorsAreLegibleOnTheMenuBackground() {
-        // The menu is a vibrancy material rather than a flat fill; these are the flat backgrounds it
-        // resolves closest to, and the values a reader can reproduce.
-        let darkMenu: [CGFloat] = [0x1E / 255.0, 0x1E / 255.0, 0x1E / 255.0]
-        let lightMenu: [CGFloat] = [1, 1, 1]
+        let darkMenu = darkMenuRange[0]
+        let lightMenu = lightMenuRange[0]
         for (name, color) in [("Bug", bug), ("Epic", epic), ("light purple", lightPurple)] {
-            let onDark = contrastRatio(srgbComponents(color, .darkAqua), darkMenu)
-            XCTAssertGreaterThan(onDark, 4.5, "\(name) is \(onDark):1 on the dark menu")
-            let onLight = contrastRatio(srgbComponents(color, .aqua), lightMenu)
+            let onDark = contrastRatio(compositedColor(color, over: darkMenu, .darkAqua), darkMenu)
+            XCTAssertGreaterThan(onDark, 3.8, "\(name) is \(onDark):1 on the dark menu")
+            let onLight = contrastRatio(compositedColor(color, over: lightMenu, .aqua), lightMenu)
             XCTAssertGreaterThan(onLight, 3.0, "\(name) is \(onLight):1 on the light menu")
-            XCTAssertGreaterThan(
-                onLight,
-                contrastRatio(srgbComponents(AppDelegate.ownershipMetadata, .aqua), lightMenu) - 0.1,
-                "\(name) is dimmer in light mode than the grey it replaces"
+        }
+    }
+
+    /// The metadata colour is the second line of every row, so it has to hold across the range rather
+    /// than only at the friendly end. The floor is under AA, which is the ceiling for menu text on glass —
+    /// `labelColor`, what AppKit draws its own items in, manages 3.54:1 at the same end.
+    func testMetadataColorHoldsAcrossTheGlassRange() {
+        let onLight = worstContrast(AppDelegate.ownershipMetadata, lightMenuRange, .aqua)
+        XCTAssertGreaterThan(onLight, 3.0, "metadata is \(onLight):1 somewhere in the light menu range")
+        let onDark = worstContrast(AppDelegate.ownershipMetadata, darkMenuRange, .darkAqua)
+        XCTAssertGreaterThan(onDark, 2.2, "metadata is \(onDark):1 somewhere in the dark menu range")
+
+        // The amber has to stay clear of the grey it exists to stand out from, at both ends.
+        let amberDark = worstContrast(AppDelegate.ownershipAbsent, darkMenuRange, .darkAqua)
+        XCTAssertGreaterThan(amberDark, 2.2, "unassigned amber is \(amberDark):1 in the dark menu range")
+    }
+
+    /// Both resolve per appearance instead of being one fixed value — the property `#888888` and
+    /// `#BF6900` lacked, which is what put the menu out of action on 27.
+    ///
+    /// Compared as drawn, not as components: `secondaryLabelColor` adapts partly by alpha, and
+    /// `srgbComponents` drops it, so a colour that adapted by alpha alone would read here as fixed.
+    func testMetadataColorsAdaptToTheAppearance() {
+        for (name, color) in [("metadata", AppDelegate.ownershipMetadata), ("unassigned amber", AppDelegate.ownershipAbsent)] {
+            XCTAssertNotEqual(
+                compositedColor(color, over: lightMenuRange[0], .aqua),
+                compositedColor(color, over: lightMenuRange[0], .darkAqua),
+                "\(name) cannot adapt to a dark menu"
             )
         }
+    }
+
+    /// The amber has to stay distinct from everything drawn beside it, at the palette's own bar.
+    ///
+    /// `testAbsenceIsAmberAndDistinctFromBothRoleColours` asserts object inequality, which cannot see two
+    /// colours converge. Lifting the old amber for legibility landed it ΔE00 16.3 from the reviewer
+    /// yellow on the same line, and nothing caught it.
+    func testTheAmberIsDistinctFromEveryColourBesideIt() {
+        for (otherName, other) in alreadySpent(.darkAqua) where otherName != "unassigned amber" {
+            let distance = deltaE00(srgbComponents(AppDelegate.ownershipAbsent, .darkAqua), other)
+            XCTAssertGreaterThan(
+                distance, distinctEnough,
+                "the unassigned amber is ΔE00 \(distance) from \(otherName) in dark mode"
+            )
+        }
+    }
+
+    /// The exact value that triggered the bug: a fixed mid-grey cannot clear a background that sweeps
+    /// through mid-grey, wherever in the range it is measured.
+    func testTheOldFixedGreyFailsTheRangeItHadToClear() {
+        let onDark = worstContrast(NSColor(hex: "#888888"), darkMenuRange, .darkAqua)
+        XCTAssertLessThan(onDark, 1.5, "#888888 measured \(onDark):1, so it was not the reported problem")
     }
 }
 

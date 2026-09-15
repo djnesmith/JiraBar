@@ -1281,11 +1281,21 @@ extension AppDelegate {
         return segments
     }
 
-    /// The grey the rest of a PR row's metadata uses.
-    static let ownershipMetadata = NSColor(hex: "#888888")
+    /// The colour the rest of a PR row's metadata uses.
+    ///
+    /// Semantic, not a fixed grey: the menu is glass from macOS 26 and its luminance follows the window
+    /// behind it — #2B2B2B to #7B7B7B in dark mode on 27.0. The `#888888` this was measured 1.19:1
+    /// there; this measures 2.41:1 worst, 5.37:1 best.
+    static let ownershipMetadata = NSColor.secondaryLabelColor
 
     /// Nobody is on it. Amber rather than grey so an unowned PR still catches the eye.
-    static let ownershipAbsent = NSColor(hex: "#BF6900")
+    ///
+    /// A pair because one amber cannot hold both appearances on glass; light is unchanged, dark goes
+    /// 1.06:1 to 2.32:1. The dark value is the *only* point that clears the palette's ΔE00 22 while
+    /// staying legible: lifting the old hue straight up lands on the reviewer yellow drawn beside it
+    /// (#FFBA66 measured 16.3), and everything legible enough sits near the metadata grey, which is
+    /// also light now. 22.1 to its nearest neighbour, which is that grey at the pale end of the glass.
+    static let ownershipAbsent = dynamicColor(light: "#BF6900", dark: "#FCAD8D")
 
     /// State word for reviewers who were asked and haven't answered.
     static let pendingStateWord = "pending"
@@ -1393,7 +1403,8 @@ extension AppDelegate {
     /// Measured in four environments — both appearances against both OS palettes. Deep to light is
     /// ΔE00 24.6 dark and 26.9 light; the nearest either comes to anything else the menu draws is 26.4,
     /// which includes the key blue those rows also carry. Contrast is 4.6:1 and 10.6:1 on the dark menu,
-    /// 10.1:1 and 3.5:1 on white — the last matching, to two decimals, the metadata grey it replaces.
+    /// 10.1:1 and 3.5:1 on white — the last matching the #888888 metadata grey of the time, since
+    /// replaced by `secondaryLabelColor`.
     ///
     /// Two consequences, both chosen rather than overlooked. On the dark menu the lighter colour is the
     /// *louder* one, so Task and Improvement carry more visual weight than Epic — the reverse of their
@@ -1448,7 +1459,7 @@ extension AppDelegate {
         let title = NSMutableAttributedString(string: "")
             .appendString(string: issue.fields.summary.trunc(length: 50))
             .appendNewLine()
-            .appendIcon(iconName: "hash", color: NSColor.gray)
+            .appendIcon(iconName: "hash", color: AppDelegate.ownershipMetadata)
             .appendString(
                 string: issue.key,
                 color: AppDelegate.isHighlightedKey(issue.key)
@@ -3335,7 +3346,7 @@ extension AppDelegate {
         title.appendNewLine()
 
         let slug = pr.repoSlug.isEmpty ? "PR" : pr.repoSlug
-        title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: "#888888")
+        title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: AppDelegate.ownershipMetadata)
 
         let state = AppDelegate.prStateLabel(status: pr.status, ghStatus: ghStatus)
         title.appendString(string: state.text, color: state.colorHex)
@@ -3351,7 +3362,7 @@ extension AppDelegate {
             }
         } else if pr.status.uppercased() == "OPEN" && pr.isApproved {
             // Fallback when GitHub data isn't available but Jira has an approved flag.
-            title.appendString(string: " - ", color: "#888888")
+            title.appendString(string: " - ", color: AppDelegate.ownershipMetadata)
             title.appendString(string: "approved", color: AppDelegate.prApprovedColorHex)
         }
 
@@ -3426,29 +3437,31 @@ extension AppDelegate {
     /// Adds "approved · N unresolved · CI ✓" (or a subset) as a third line. Elements without
     /// signal are omitted along with their separator.
     private func appendLine3(status: GithubPRStatus, into title: NSMutableAttributedString) {
-        var pieces: [(String, String)] = []  // (text, hex color)
+        // Left as hex: no chromatic colour clears 3:1 across the glass range, so there is nothing to
+        // gain, and prApprovedColorHex is shared with BulkMoveDialog, which draws on an opaque sheet.
+        var pieces: [(String, NSColor)] = []
 
         switch status.reviewDecision {
         case "APPROVED":
-            pieces.append(("approved", AppDelegate.prApprovedColorHex))
+            pieces.append(("approved", NSColor(hex: AppDelegate.prApprovedColorHex)))
         case "CHANGES_REQUESTED":
-            pieces.append(("changes requested", "#CF222E"))
+            pieces.append(("changes requested", NSColor(hex: "#CF222E")))
         default:
             break // REVIEW_REQUIRED / nil — no signal worth showing
         }
 
         let unresolved = status.unresolvedThreads
-        let unresolvedColor = unresolved > 0 ? "#BF6900" : "#888888"
+        let unresolvedColor = unresolved > 0 ? AppDelegate.ownershipAbsent : AppDelegate.ownershipMetadata
         pieces.append(("\(unresolved) unresolved", unresolvedColor))
 
         if let ci = status.ciState {
             switch ci {
             case "SUCCESS":
-                pieces.append(("CI ✓", "#2DA44E"))
+                pieces.append(("CI ✓", NSColor(hex: "#2DA44E")))
             case "FAILURE", "ERROR":
-                pieces.append(("CI ✗", "#CF222E"))
+                pieces.append(("CI ✗", NSColor(hex: "#CF222E")))
             case "PENDING", "EXPECTED":
-                pieces.append(("CI …", "#888888"))
+                pieces.append(("CI …", AppDelegate.ownershipMetadata))
             default:
                 break
             }
@@ -3458,7 +3471,7 @@ extension AppDelegate {
         title.appendNewLine()
         for (index, piece) in pieces.enumerated() {
             if index > 0 {
-                title.appendString(string: " · ", color: "#888888")
+                title.appendString(string: " · ", color: AppDelegate.ownershipMetadata)
             }
             title.appendString(string: piece.0, color: piece.1)
         }
@@ -3514,6 +3527,9 @@ extension AppDelegate {
 
     /// Color hex for a PR status badge in the menu. Falls back to a neutral gray for
     /// anything outside the four standard dev-status values.
+    ///
+    /// Still a fixed grey where the row's others are semantic: it is shared with BulkMoveDialog, which
+    /// draws on an opaque sheet.
     static func prStatusColorHex(_ status: String) -> String {
         switch status.uppercased() {
         case "MERGED":   return "#2DA44E" // green
