@@ -1476,6 +1476,45 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 
+    /// The alert red has to stay distinct from everything drawn on a PR row beside it, and readable on
+    /// the dark menu, which the #CF222E it replaced was not (2.64:1).
+    ///
+    /// Checked against the whole row rather than a couple of neighbours: twice today a colour was picked
+    /// against a subset and cleared the bar only because the nearest thing to it was not in the list.
+    func testTheAlertRedIsDistinctFromEverythingOnAPRRow() {
+        let glass = darkMenuRange[0]
+        let onRow: [(String, [CGFloat])] = [
+            ("row title", compositedColor(.labelColor, over: glass, .darkAqua)),
+            ("repo-slug metadata", compositedColor(AppDelegate.ownershipMetadata, over: glass, .darkAqua)),
+            ("issue key", srgbComponents(AppDelegate.issueKeyColor, .darkAqua)),
+            ("assignee green", srgbComponents(.systemGreen, .darkAqua)),
+            ("reviewer yellow", srgbComponents(.systemYellow, .darkAqua)),
+            ("unassigned amber", srgbComponents(AppDelegate.ownershipAbsent, .darkAqua)),
+            ("approved green", srgbComponents(NSColor(hex: AppDelegate.prApprovedColorHex), .darkAqua)),
+            ("open goldenrod", srgbComponents(NSColor(hex: "#DAA520"), .darkAqua)),
+        ]
+        for (name, other) in onRow {
+            let distance = deltaE00(srgbComponents(AppDelegate.prAlertColor, .darkAqua), other)
+            XCTAssertGreaterThan(distance, distinctEnough, "the alert red is ΔE00 \(distance) from \(name)")
+        }
+        let onDark = worstContrast(AppDelegate.prAlertColor, [darkMenuRange[0]], .darkAqua)
+        XCTAssertGreaterThan(onDark, 4.0, "the alert red is \(onDark):1 on the dark menu")
+    }
+
+    /// One red, not two. "error" on a PR row's second line and "CI ✗" on its third are the same signal
+    /// and appear together, so the menu has to draw the shared hex and the menu colour identically.
+    func testTheMenuDrawsOneAlertRed() {
+        XCTAssertEqual(
+            srgbComponents(AppDelegate.menuColor(forHex: AppDelegate.prAlertColorHex), .darkAqua),
+            srgbComponents(AppDelegate.prAlertColor, .darkAqua)
+        )
+        // Anything else in the shared palette is passed through untouched.
+        XCTAssertEqual(
+            srgbComponents(AppDelegate.menuColor(forHex: AppDelegate.prApprovedColorHex), .darkAqua),
+            srgbComponents(NSColor(hex: AppDelegate.prApprovedColorHex), .darkAqua)
+        )
+    }
+
     /// The exact value that triggered the bug: a fixed mid-grey cannot clear a background that sweeps
     /// through mid-grey, wherever in the range it is measured.
     func testTheOldFixedGreyFailsTheRangeItHadToClear() {

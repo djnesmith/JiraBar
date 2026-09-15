@@ -3349,7 +3349,7 @@ extension AppDelegate {
         title.appendString(string: "\(slug) #\(pr.numberOnly) · ", color: AppDelegate.ownershipMetadata)
 
         let state = AppDelegate.prStateLabel(status: pr.status, ghStatus: ghStatus)
-        title.appendString(string: state.text, color: state.colorHex)
+        title.appendString(string: state.text, color: AppDelegate.menuColor(forHex: state.colorHex))
 
         if let ghStatus {
             switch pr.status.uppercased() {
@@ -3445,7 +3445,7 @@ extension AppDelegate {
         case "APPROVED":
             pieces.append(("approved", NSColor(hex: AppDelegate.prApprovedColorHex)))
         case "CHANGES_REQUESTED":
-            pieces.append(("changes requested", NSColor(hex: "#CF222E")))
+            pieces.append(("changes requested", AppDelegate.prAlertColor))
         default:
             break // REVIEW_REQUIRED / nil — no signal worth showing
         }
@@ -3459,7 +3459,7 @@ extension AppDelegate {
             case "SUCCESS":
                 pieces.append(("CI ✓", NSColor(hex: "#2DA44E")))
             case "FAILURE", "ERROR":
-                pieces.append(("CI ✗", NSColor(hex: "#CF222E")))
+                pieces.append(("CI ✗", AppDelegate.prAlertColor))
             case "PENDING", "EXPECTED":
                 pieces.append(("CI …", AppDelegate.ownershipMetadata))
             default:
@@ -3513,7 +3513,7 @@ extension AppDelegate {
     static func prStateLabel(status: String, ghStatus: GithubPRStatus?) -> (text: String, colorHex: String) {
         let upper = status.uppercased()
         if upper == "OPEN" && ciStateIsFailure(ghStatus?.ciState) {
-            return ("error", "#CF222E")
+            return ("error", prAlertColorHex)
         }
         if upper == "OPEN" && ghStatus?.isDraft == true {
             return ("draft", prStatusColorHex("DRAFT"))
@@ -3525,6 +3525,27 @@ extension AppDelegate {
     /// Jira-only fallback, and the bulk-move dialog's PR line.
     static let prApprovedColorHex = "#2DA44E"
 
+    /// The red for a declined PR, a changes-requested review and a failed check, as the shared
+    /// hex palette carries it. `prAlertColor` is what the menu actually draws.
+    static let prAlertColorHex = "#CF222E"
+
+    /// The menu's red for those same states.
+    ///
+    /// A pair: #CF222E is a true alarm red and holds up in light mode (4.74:1), but on the dark menu it
+    /// is 2.64:1 — dark red on dark grey. The dark value is the most saturated red still clearing ΔE00 22
+    /// from everything on a PR row (22.1, against the unassigned amber beside it). Redder fails that
+    /// distance; lighter stops reading as an alarm. 2.64:1 -> 4.61:1.
+    static let prAlertColor = dynamicColor(light: "#CF222E", dark: "#FF576D")
+
+    /// The colour the menu draws a hex from the shared PR palette in.
+    ///
+    /// Only the alert red differs: the menu needs the lifted dark value, while BulkMoveDialog draws on
+    /// an opaque sheet where the original is correct. Routed through one place so a row cannot show the
+    /// lifted red on one line and the original on the next — "error" and "CI ✗" appear together.
+    static func menuColor(forHex hex: String) -> NSColor {
+        hex == prAlertColorHex ? prAlertColor : NSColor(hex: hex)
+    }
+
     /// Color hex for a PR status badge in the menu. Falls back to a neutral gray for
     /// anything outside the four standard dev-status values.
     ///
@@ -3534,7 +3555,7 @@ extension AppDelegate {
         switch status.uppercased() {
         case "MERGED":   return "#2DA44E" // green
         case "OPEN":     return "#DAA520" // goldenrod — readable yellow on light + dark menus
-        case "DECLINED": return "#CF222E" // red
+        case "DECLINED": return prAlertColorHex
         case "DRAFT":    return "#DAA520" // yellow — same as open per user preference
         default:         return "#888888"
         }
