@@ -50,6 +50,7 @@ extension Defaults.Keys {
 
     /// Optional dashboard URL. Accepts an absolute URL or a path that's appended to the Jira base URL.
     /// When non-empty, an "Open Dashboard" entry appears under "Open Search results" in the menu.
+    /// A board URL also becomes the TODO section's source, over `todoJQL` — see `BoardTodoQuery`.
     static let dashboardURL = Key<String>("dashboardURL", default: "")
 
     /// Optional second dashboard URL — e.g. a board view filtered to just the current user's work.
@@ -102,7 +103,8 @@ extension Defaults.Keys {
     /// Optional JQL for the TODO section — a "what would I pick up next" backlog view, which
     /// the main JQL typically can't show because it's scoped to the current user. When non-empty
     /// a TODO entry appears in the menu whose submenu lists the matching tickets, each with the
-    /// same submenu a ticket gets in the main list. Empty disables the section.
+    /// same submenu a ticket gets in the main list. Empty disables the section. Unused while
+    /// `dashboardURL` is a board URL, whose To Do column takes its place.
     static let todoJQL = Key<String>("todoJQL", default: "")
 
     /// Cap on tickets listed in the TODO submenu. Separate from `maxResults` because a backlog

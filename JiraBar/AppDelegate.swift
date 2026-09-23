@@ -618,7 +618,8 @@ extension AppDelegate {
     
     
     /// Starts the TODO backlog search, returning the handle `appendTodoSection` renders from —
-    /// nil when no TODO JQL is configured, which is how the caller knows to skip the section.
+    /// nil when neither a board Dashboard URL nor a TODO JQL is configured, which is how the
+    /// caller knows to skip the section.
     ///
     /// Fired at the top of a refresh, alongside the main JQL search and the GitHub PR search,
     /// rather than from inside the main search's completion. The TODO rows don't depend on the
@@ -638,7 +639,9 @@ extension AppDelegate {
     /// their own query means is worse than a request. Excluding after the fact is also what the
     /// menu's other overlap filter does — see `recentlySeenRows`.
     private func startTodoFetch() -> PendingSection<[Issue]>? {
-        guard let query = AppDelegate.configuredQuery(todoJQL) else { return nil }
+        let board = BoardTodoQuery.boardRef(fromDashboardURL: dashboardURL)
+        let fallbackQuery = AppDelegate.configuredQuery(todoJQL)
+        guard board != nil || fallbackQuery != nil else { return nil }
 
         let generation = refreshGeneration
         let wanted = AppDelegate.maxResultsSetting(todoMaxResults)
@@ -652,15 +655,22 @@ extension AppDelegate {
         var searchFailed = false
 
         group.enter()
-        jiraClient.getIssuesByJql(
-            jql: query,
-            maxResults: AppDelegate.todoFetchSize(wanted) ?? todoMaxResults
-        ) { resp, extras in
-            fetched = resp.issues ?? []
-            ranks = extras.ranks
-            searchFailed = extras.fetchFailed
-            self.recordFlags(extras.flags, generation: generation)
-            group.leave()
+        resolveTodoQuery(board: board, fallback: fallbackQuery) { query in
+            guard let query else {
+                searchFailed = true
+                group.leave()
+                return
+            }
+            self.jiraClient.getIssuesByJql(
+                jql: query,
+                maxResults: AppDelegate.todoFetchSize(wanted) ?? self.todoMaxResults
+            ) { resp, extras in
+                fetched = resp.issues ?? []
+                ranks = extras.ranks
+                searchFailed = extras.fetchFailed
+                self.recordFlags(extras.flags, generation: generation)
+                group.leave()
+            }
         }
 
         group.enter()
@@ -910,6 +920,33 @@ extension AppDelegate {
 
     /// A configured section's query, or nil when it is switched off. Empty means absent rather than
     /// unfiltered — a section showing every closed ticket in the instance would be worse than none.
+    /// The TODO query: the Dashboard board's To Do column when the Dashboard URL is a board, else
+    /// the TODO JQL setting. nil means the search can't be run this refresh and counts as a failed
+    /// search, so the section keeps what it last showed.
+    private func resolveTodoQuery(
+        board: BoardTodoQuery.BoardRef?,
+        fallback: String?,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard let board else {
+            completion(fallback)
+            return
+        }
+        jiraClient.getBoardTodoJQL(board: board) { result in
+            completion(AppDelegate.todoQuery(boardResult: result, fallback: fallback))
+        }
+    }
+
+    /// A board that can't be read this refresh must not fall back to the TODO JQL: that would show
+    /// a different list until the next refresh. Only a board with no usable To Do column does.
+    static func todoQuery(boardResult: JiraClient.BoardTodoJQLResult, fallback: String?) -> String? {
+        switch boardResult {
+        case .success(let jql): return jql
+        case .notApplicable: return fallback
+        case .failure: return nil
+        }
+    }
+
     static func configuredQuery(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed

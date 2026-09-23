@@ -1061,6 +1061,73 @@ public class JiraClient {
             }
     }
 
+    /// The TODO query for a board's To Do column under its selected quick filters — see
+    /// `BoardTodoQuery`. `.failure` is kept apart from `.notApplicable` so a network blip isn't
+    /// answered with the TODO JQL setting, which would swap in a different list for one refresh.
+    enum BoardTodoJQLResult: Equatable {
+        case success(String)
+        /// The board has no "To Do" column, or a quick filter has no JQL.
+        case notApplicable
+        case failure
+    }
+
+    /// Fetched per refresh, like `getCurrentUser`: a board's columns and quick filters are edited
+    /// in Jira, and a cache here would go on showing the column as it was.
+    func getBoardTodoJQL(board: BoardTodoQuery.BoardRef, completion: @escaping (BoardTodoJQLResult) -> Void) {
+        guard isConfigured else {
+            completion(.failure)
+            return
+        }
+        let agile = "\(baseUrl)/rest/agile/1.0/board/\(board.boardId)"
+        let group = DispatchGroup()
+        var config: BoardTodoQuery.BoardConfig?
+        var quickFilterJQLs = [Int: String]()
+        var failed = false
+
+        group.enter()
+        AF.request("\(agile)/configuration", method: .get, headers: authHeaders())
+            .validate(statusCode: 200..<300)
+            .responseData { response in
+                switch response.result {
+                case .success(let data):
+                    config = BoardTodoQuery.boardConfig(from: data)
+                case .failure(let error):
+                    print("\(agile)/configuration:  \(error)")
+                    failed = true
+                }
+                group.leave()
+            }
+
+        for id in board.quickFilterIds {
+            group.enter()
+            AF.request("\(agile)/quickfilter/\(id)", method: .get, headers: authHeaders())
+                .validate(statusCode: 200..<300)
+                .responseData { response in
+                    switch response.result {
+                    case .success(let data):
+                        quickFilterJQLs[id] = BoardTodoQuery.quickFilterJQL(from: data)
+                    case .failure(let error):
+                        print("\(agile)/quickfilter/\(id):  \(error)")
+                        failed = true
+                    }
+                    group.leave()
+                }
+        }
+
+        group.notify(queue: .main) {
+            if failed {
+                completion(.failure)
+                return
+            }
+            let jqls = board.quickFilterIds.compactMap { quickFilterJQLs[$0] }
+            guard let config, jqls.count == board.quickFilterIds.count else {
+                completion(.notApplicable)
+                return
+            }
+            completion(.success(BoardTodoQuery.jql(config: config, quickFilterJQLs: jqls)))
+        }
+    }
+
     /// Result type for assignable-user lookups so callers can show a message instead of an empty list.
     enum AssignableUsersResult {
         case success([JiraUser])
