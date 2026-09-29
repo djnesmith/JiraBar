@@ -1155,13 +1155,19 @@ final class HighlightedProjectFilterTests: XCTestCase {
 final class IssueTypeColorTests: XCTestCase {
 
     /// Read through the mapping, never restated as a literal — a property asserted about
-    /// `NSColor.systemRed` would keep passing after the mapping stopped returning it.
+    /// `AppDelegate.issueTypeRed` would keep passing after the mapping stopped returning it.
     private let bug = AppDelegate.issueTypeColor("Bug")
     private let epic = AppDelegate.issueTypeColor("Epic")
     private let lightPurple = AppDelegate.issueTypeColor("Task")
 
     func testBugIsRed() {
-        XCTAssertEqual(bug, .systemRed)
+        XCTAssertEqual(bug, AppDelegate.issueTypeRed)
+    }
+
+    /// Pinned rather than `systemRed`, so the runner's older OS measures the colour this machine draws.
+    func testBugRedIsTheSameOnEveryOS() {
+        XCTAssertEqual(srgbComponents(bug, .darkAqua), srgb(hex: "#FF4245"))
+        XCTAssertEqual(srgbComponents(bug, .aqua), srgb(hex: "#FF383C"))
     }
 
     func testEpicsAndInitiativesShareOneColor() {
@@ -1337,10 +1343,10 @@ final class IssueTypeColorTests: XCTestCase {
         }
     }
 
-    /// The two purples are the tightest pair in the palette, and Bug red beside them is a system colour
-    /// Apple moves between releases. So the pair is held against **both** OS palettes, from recorded
-    /// values: a distance that survives on this machine and not on the runner's is not a distance the
-    /// app can rely on, which is exactly what `systemIndigo` taught.
+    /// The two purples are the tightest pair in the palette, and the green, yellow and key blue beside
+    /// them are system colours Apple moves between releases. So the pair is held against **both** OS
+    /// palettes, from recorded values: a distance that survives on this machine and not on the runner's
+    /// is not a distance the app can rely on, which is exactly what `systemIndigo` taught.
     func testThePurplePairHoldsAgainstBothOSPalettes() {
         let epicDark = "#DB34F2", imprDark = "#FFB5FF"
         let epicLight = "#70008D", imprLight = "#DD37F4"
@@ -1352,7 +1358,7 @@ final class IssueTypeColorTests: XCTestCase {
             ]),
             ("dark / macOS 15", [epicDark, imprDark], [
                 ("key blue", "#419CFF"), ("assignee green", "#32D74B"), ("reviewer yellow", "#FFD60A"),
-                ("Bug red", "#FF453A"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("Bug red", "#FF4245"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
                 ("hash glyph", "#808080"), ("row title", "#FFFFFF"),
             ]),
             ("light / macOS 26", [epicLight, imprLight], [
@@ -1362,7 +1368,7 @@ final class IssueTypeColorTests: XCTestCase {
             ]),
             ("light / macOS 15", [epicLight, imprLight], [
                 ("key blue", "#0068DA"), ("assignee green", "#28CD41"), ("reviewer yellow", "#FFCC00"),
-                ("Bug red", "#FF3B30"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
+                ("Bug red", "#FF383C"), ("unassigned amber", "#BF6900"), ("metadata grey", "#888888"),
                 ("hash glyph", "#808080"), ("row title", "#000000"),
             ]),
         ]

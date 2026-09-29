@@ -1450,10 +1450,14 @@ extension AppDelegate {
     /// is built on; the grey below is now the exception rather than the rule.
     static let issueTypeDeepPurple = dynamicColor(light: "#70008D", dark: "#DB34F2")
     static let issueTypeLightPurple = dynamicColor(light: "#DD37F4", dark: "#FFB5FF")
+    /// `systemRed` as macOS 27 resolves it, pinned because Apple moves the system red between releases
+    /// and the palette's margins were measured against this one. macOS 15's #FF453A sits ΔE00 21.4 from
+    /// the dark unassigned amber, under the bar; this dark value clears it at 22.2.
+    static let issueTypeRed = dynamicColor(light: "#FF383C", dark: "#FF4245")
 
     static func issueTypeColor(_ typeName: String) -> NSColor {
         let name = typeName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if name == "bug" { return .systemRed }
+        if name == "bug" { return issueTypeRed }
         // The two ordinary work types the menu is mostly made of. Same shade because they are the same
         // kind of thing to whoever is scanning the row — which is the whole reason they share one.
         if name == "task" || name == "improvement" { return issueTypeLightPurple }
