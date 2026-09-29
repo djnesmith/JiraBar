@@ -53,6 +53,44 @@ struct PRActionChoices {
 
 }
 
+extension Binding where Value == Bool {
+    /// This binding, also setting `touched` whenever the user writes through it — so a default the
+    /// dialog re-derives later knows to leave the box alone.
+    func marking(_ touched: Binding<Bool>) -> Binding<Bool> {
+        Binding(
+            get: { wrappedValue },
+            set: {
+                wrappedValue = $0
+                touched.wrappedValue = true
+            }
+        )
+    }
+}
+
+/// What the PR-action checkboxes start as when a transition dialog opens — single or bulk. A default
+/// only: once the user clicks a box, neither dialog moves it again.
+enum PRActionDefaults {
+    /// Approving is opt-in on every open. Request-changes stays checked: its mandatory comment already
+    /// stops a review going out unconsidered.
+    static func reviewStartsChecked(_ action: PRReviewAction) -> Bool {
+        action == .requestChanges
+    }
+
+    /// Unchecked only when every open PR is known to have an assignee, because the sync writes only to
+    /// a blank one and would do nothing. Any PR not yet read — still loading, or its GitHub state
+    /// failed — keeps the checked default, as does no PRs at all: unknown is not "all assigned".
+    ///
+    /// One element per open PR the batch would act on: `true` assigned, `false` blank, `nil` unknown.
+    static func syncAssigneeStartsChecked(openPRsAssigned: [Bool?]) -> Bool {
+        openPRsAssigned.isEmpty || openPRsAssigned.contains { $0 != true }
+    }
+
+    /// The single dialog's input to `syncAssigneeStartsChecked`: the PRs `applyPRActions` targets.
+    static func openPRsAssigned(_ prs: [PRActionsStatus.LinkedPR]) -> [Bool?] {
+        prs.filter { !$0.isMerged }.map { $0.statesKnown ? !$0.assignees.isEmpty : nil }
+    }
+}
+
 /// How a submit attempt ended. The dialog reacts differently to each, so this is deliberately not
 /// a `Bool` — "Jira refused" and "Jira applied it but GitHub didn't follow" need opposite handling:
 /// the first is retryable in place, the second must not offer to transition again.
@@ -225,6 +263,11 @@ final class TransitionFieldRequirements: ObservableObject {
 /// asynchronously (after enriching each linked open PR via GitHub GraphQL) so the dialog
 /// can show status indicators — "you've approved 2/3", etc. — without blocking on open.
 final class PRActionsStatus: ObservableObject {
+    /// The linked PRs any PR action can reach: open in Jira and hosted on GitHub.
+    static func isActionable(_ pr: JiraPullRequest) -> Bool {
+        pr.status.uppercased() == "OPEN" && pr.url.contains("github.com")
+    }
+
     struct LinkedPR: Identifiable {
         var id: String { url }
         let url: String
@@ -412,11 +455,14 @@ struct TransitionDialog: View {
     @State private var selectedOptionValue: String = ""
     @State private var submitting: Bool = false
     @State private var updateGithub: Bool = true
-    @State private var prReview: Bool = true
+    /// Both set from `PRActionDefaults` at open; see there.
+    @State private var prReview: Bool = false
     @State private var prReviewComment: String = ""
     @State private var prMerge: Bool = true
     @State private var prMergeMethod: String = "rebase"
     @State private var prSyncAssignee: Bool = true
+    /// Set once the user clicks the sync box, so a default re-derived when the PRs load never moves it.
+    @State private var prSyncAssigneeTouched: Bool = false
     @State private var prResolveThreads: Bool = true
     /// Unchecked on purpose: ticking it claims he addressed the feedback, so he has to say so.
     @State private var resolveAsked: Bool = false
@@ -506,7 +552,12 @@ struct TransitionDialog: View {
             }
             // Seed the merge-method picker from the config-level default.
             prMergeMethod = config.prMergeMethod
+            prReview = PRActionDefaults.reviewStartsChecked(config.prReviewAction)
+            prSyncAssignee = syncAssigneeDefault
             seedPerPRActions()
+        }
+        .onChange(of: syncAssigneeDefault) { starts in
+            if !prSyncAssigneeTouched { prSyncAssignee = starts }
         }
         .onChange(of: prStatus.openPRs.map(\.url)) { _ in
             seedPerPRActions()
@@ -549,6 +600,12 @@ struct TransitionDialog: View {
             prs: prStatus.openPRs,
             mergeRequested: currentPRChoices.merge,
             resolveRequested: resolveThreadsRequested
+        )
+    }
+
+    private var syncAssigneeDefault: Bool {
+        PRActionDefaults.syncAssigneeStartsChecked(
+            openPRsAssigned: PRActionDefaults.openPRsAssigned(prStatus.openPRs)
         )
     }
 
@@ -631,7 +688,7 @@ struct TransitionDialog: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if config.enablePRAssigneeSync {
-                Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee)
+                Toggle("Set Jira Assignee as PR Assignee (only when PR Assignee is blank)", isOn: $prSyncAssignee.marking($prSyncAssigneeTouched))
             }
         }
     }

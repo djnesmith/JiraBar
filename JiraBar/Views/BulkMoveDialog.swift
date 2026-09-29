@@ -38,13 +38,23 @@ struct BulkPRLineSegment: Equatable {
 /// as answered: "no PRs" must not be re-asked on every open. Main thread only, as `@Published` is.
 final class BulkPRLineStore: ObservableObject {
     @Published private(set) var segmentsByKey: [String: [BulkPRLineSegment]] = [:]
+    /// Per ticket, whether each open PR has an assignee — see `BulkMoveDialog.openPRsAssigned`.
+    @Published private(set) var assignedByKey: [String: [Bool?]] = [:]
 
-    func record(_ segments: [BulkPRLineSegment], for issueKey: String) {
+    func record(_ segments: [BulkPRLineSegment], assigned: [Bool?], for issueKey: String) {
         segmentsByKey[issueKey] = segments
+        assignedByKey[issueKey] = assigned
     }
 
     func reset() {
         segmentsByKey = [:]
+        assignedByKey = [:]
+    }
+
+    /// Every open PR across `keys`, with `nil` standing in for a ticket not answered for yet — so a
+    /// batch whose PRs are still loading never reads as all-assigned.
+    func openPRsAssigned(for keys: Set<String>) -> [Bool?] {
+        keys.flatMap { assignedByKey[$0] ?? [nil] }
     }
 
     func segments(for issueKey: String) -> [BulkPRLineSegment]? {
@@ -95,10 +105,14 @@ struct BulkMoveDialog: View {
     ) -> Void
     let onCancel: () -> Void
 
-    @State private var prReview: Bool = true
+    /// Both set from `PRActionDefaults`, and re-derived as the transition, the checked tickets, or their
+    /// PRs change — until the user clicks the box.
+    @State private var prReview: Bool = false
+    @State private var prReviewTouched: Bool = false
     @State private var prReviewComment: String = ""
     @State private var prMerge: Bool = true
     @State private var prSyncAssignee: Bool = true
+    @State private var prSyncAssigneeTouched: Bool = false
     @State private var prResolveThreads: Bool = true
     @State private var fromStatus: String = ""
     @State private var checkedKeys: Set<String> = []
@@ -176,6 +190,20 @@ struct BulkMoveDialog: View {
             }
             return BulkPRLineSegment(text: "PR#\(pr.numberOnly) \(state.text)", colorHex: state.colorHex)
         }
+    }
+
+    /// Whether each PR the batch would act on has an assignee: `true`, `false`, or `nil` when its GitHub
+    /// state was not read. The PRs `populatePRActionsStatus` and `applyPRActions` act on — actionable, not
+    /// merged — so the default and the sync count the same PRs.
+    static func openPRsAssigned(
+        prs: [JiraPullRequest],
+        statusByURL: [String: GithubPRStatus]
+    ) -> [Bool?] {
+        prs.filter(PRActionsStatus.isActionable)
+            .flatMap { pr -> [Bool?] in
+                guard let gh = statusByURL[pr.url] else { return [nil] }
+                return gh.isMerged ? [] : [!gh.assignees.isEmpty]
+            }
     }
 
     /// The segments as one run of text, comma-separated, each in its own colour.
@@ -327,6 +355,14 @@ struct BulkMoveDialog: View {
             }
             // When the from status is settled, default-check every issue in it.
             DispatchQueue.main.async { applyFromStatusChange() }
+            prReview = reviewDefault
+            prSyncAssignee = syncAssigneeDefault
+        }
+        .onChange(of: reviewDefault) { starts in
+            if !prReviewTouched { prReview = starts }
+        }
+        .onChange(of: syncAssigneeDefault) { starts in
+            if !prSyncAssigneeTouched { prSyncAssignee = starts }
         }
     }
 
@@ -664,6 +700,14 @@ struct BulkMoveDialog: View {
             && !pickedUsers.isEmpty
     }
 
+    private var reviewDefault: Bool {
+        PRActionDefaults.reviewStartsChecked(matchingPromptConfig?.prReviewAction ?? .none)
+    }
+
+    private var syncAssigneeDefault: Bool {
+        PRActionDefaults.syncAssigneeStartsChecked(openPRsAssigned: prLines.openPRsAssigned(for: checkedKeys))
+    }
+
     /// The batch's PR-action choices, from the same config the single-issue dialog uses. No per-PR rows:
     /// see the report — a dozen PRs across five tickets is not a grid anyone acts on.
     private var currentPRChoices: PRActionChoices {
@@ -690,7 +734,7 @@ struct BulkMoveDialog: View {
                         config.prReviewAction == .requestChanges
                             ? "Request changes on linked open PRs"
                             : "Approve linked open PRs",
-                        isOn: $prReview
+                        isOn: $prReview.marking($prReviewTouched)
                     )
                     if prReview {
                         TextField(
@@ -712,7 +756,7 @@ struct BulkMoveDialog: View {
                     Toggle("Resolve open review conversations", isOn: $prResolveThreads)
                 }
                 if config.enablePRAssigneeSync {
-                    Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prSyncAssignee)
+                    Toggle("Sync Jira Assignee to PR (only when PR Assignee is blank)", isOn: $prSyncAssignee.marking($prSyncAssigneeTouched))
                 }
             }
         }

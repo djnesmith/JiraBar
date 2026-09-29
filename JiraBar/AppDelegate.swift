@@ -1891,7 +1891,8 @@ extension AppDelegate {
 
     private func rememberPRLine(issueKey: String, prs: [JiraPullRequest], statusByURL: [String: GithubPRStatus]) {
         let segments = BulkMoveDialog.prLineSegments(prs: prs, statusByURL: statusByURL)
-        DispatchQueue.main.async { self.bulkPRLines.record(segments, for: issueKey) }
+        let assigned = BulkMoveDialog.openPRsAssigned(prs: prs, statusByURL: statusByURL)
+        DispatchQueue.main.async { self.bulkPRLines.record(segments, assigned: assigned, for: issueKey) }
     }
 
     @objc
@@ -2592,9 +2593,7 @@ extension AppDelegate {
             }
             self.jiraClient.getIssuePullRequests(issueId: issueId) { prs in
                 self.prsWithGithubFallback(prs, issueKey: issueKey) { merged in
-                    let openGithub = merged.filter {
-                        $0.status.uppercased() == "OPEN" && $0.url.contains("github.com")
-                    }
+                    let openGithub = merged.filter(PRActionsStatus.isActionable)
                     guard !token.isEmpty, !openGithub.isEmpty else {
                         DispatchQueue.main.async {
                             status.openPRs = []
