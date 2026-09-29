@@ -1891,8 +1891,8 @@ extension AppDelegate {
 
     private func rememberPRLine(issueKey: String, prs: [JiraPullRequest], statusByURL: [String: GithubPRStatus]) {
         let segments = BulkMoveDialog.prLineSegments(prs: prs, statusByURL: statusByURL)
-        let assigned = BulkMoveDialog.openPRsAssigned(prs: prs, statusByURL: statusByURL)
-        DispatchQueue.main.async { self.bulkPRLines.record(segments, assigned: assigned, for: issueKey) }
+        let openPRs = BulkMoveDialog.openPRs(prs: prs, statusByURL: statusByURL)
+        DispatchQueue.main.async { self.bulkPRLines.record(segments, openPRs: openPRs, for: issueKey) }
     }
 
     @objc
@@ -2622,7 +2622,8 @@ extension AppDelegate {
                                 assignees: gh?.assignees ?? [],
                                 mergeCommitAllowed: gh?.mergeCommitAllowed ?? false,
                                 squashMergeAllowed: gh?.squashMergeAllowed ?? false,
-                                rebaseMergeAllowed: gh?.rebaseMergeAllowed ?? false
+                                rebaseMergeAllowed: gh?.rebaseMergeAllowed ?? false,
+                                reviews: gh?.reviews
                             )
                             syncQueue.async {
                                 results[pr.url] = entry

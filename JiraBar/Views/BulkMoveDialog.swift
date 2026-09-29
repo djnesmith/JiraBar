@@ -38,23 +38,23 @@ struct BulkPRLineSegment: Equatable {
 /// as answered: "no PRs" must not be re-asked on every open. Main thread only, as `@Published` is.
 final class BulkPRLineStore: ObservableObject {
     @Published private(set) var segmentsByKey: [String: [BulkPRLineSegment]] = [:]
-    /// Per ticket, whether each open PR has an assignee — see `BulkMoveDialog.openPRsAssigned`.
-    @Published private(set) var assignedByKey: [String: [Bool?]] = [:]
+    /// Per ticket, what the checkbox defaults know about each open PR — see `BulkMoveDialog.openPRs`.
+    @Published private(set) var openPRsByKey: [String: [PRActionDefaults.OpenPR]] = [:]
 
-    func record(_ segments: [BulkPRLineSegment], assigned: [Bool?], for issueKey: String) {
+    func record(_ segments: [BulkPRLineSegment], openPRs: [PRActionDefaults.OpenPR], for issueKey: String) {
         segmentsByKey[issueKey] = segments
-        assignedByKey[issueKey] = assigned
+        openPRsByKey[issueKey] = openPRs
     }
 
     func reset() {
         segmentsByKey = [:]
-        assignedByKey = [:]
+        openPRsByKey = [:]
     }
 
-    /// Every open PR across `keys`, with `nil` standing in for a ticket not answered for yet — so a
-    /// batch whose PRs are still loading never reads as all-assigned.
-    func openPRsAssigned(for keys: Set<String>) -> [Bool?] {
-        keys.flatMap { assignedByKey[$0] ?? [nil] }
+    /// Every open PR across `keys`, with an unknown PR standing in for a ticket not answered for yet —
+    /// so a batch whose PRs are still loading never reads as all-approved or all-assigned.
+    func openPRs(for keys: Set<String>) -> [PRActionDefaults.OpenPR] {
+        keys.flatMap { openPRsByKey[$0] ?? [.unknown] }
     }
 
     func segments(for issueKey: String) -> [BulkPRLineSegment]? {
@@ -192,17 +192,18 @@ struct BulkMoveDialog: View {
         }
     }
 
-    /// Whether each PR the batch would act on has an assignee: `true`, `false`, or `nil` when its GitHub
-    /// state was not read. The PRs `populatePRActionsStatus` and `applyPRActions` act on — actionable, not
-    /// merged — so the default and the sync count the same PRs.
-    static func openPRsAssigned(
+    /// Whether each PR the batch would act on is assigned and approved, unknown when its GitHub state was
+    /// not read. The PRs `populatePRActionsStatus` and `applyPRActions` act on — actionable, not merged —
+    /// so the defaults and the batch count the same PRs.
+    static func openPRs(
         prs: [JiraPullRequest],
         statusByURL: [String: GithubPRStatus]
-    ) -> [Bool?] {
+    ) -> [PRActionDefaults.OpenPR] {
         prs.filter(PRActionsStatus.isActionable)
-            .flatMap { pr -> [Bool?] in
-                guard let gh = statusByURL[pr.url] else { return [nil] }
-                return gh.isMerged ? [] : [!gh.assignees.isEmpty]
+            .flatMap { pr -> [PRActionDefaults.OpenPR] in
+                guard let gh = statusByURL[pr.url] else { return [.unknown] }
+                if gh.isMerged { return [] }
+                return [.init(assigned: !gh.assignees.isEmpty, approved: PRActionDefaults.approved(gh.reviews))]
             }
     }
 
@@ -701,11 +702,13 @@ struct BulkMoveDialog: View {
     }
 
     private var reviewDefault: Bool {
-        PRActionDefaults.reviewStartsChecked(matchingPromptConfig?.prReviewAction ?? .none)
+        PRActionDefaults.reviewStartsChecked(
+            matchingPromptConfig?.prReviewAction ?? .none, openPRs: prLines.openPRs(for: checkedKeys)
+        )
     }
 
     private var syncAssigneeDefault: Bool {
-        PRActionDefaults.syncAssigneeStartsChecked(openPRsAssigned: prLines.openPRsAssigned(for: checkedKeys))
+        PRActionDefaults.syncAssigneeStartsChecked(openPRs: prLines.openPRs(for: checkedKeys))
     }
 
     /// The batch's PR-action choices, from the same config the single-issue dialog uses. No per-PR rows:

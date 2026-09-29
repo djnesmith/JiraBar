@@ -106,8 +106,8 @@ final class BulkPRLineStoreTests: XCTestCase {
     /// this store exists to avoid.
     func testRecordedEmptyLineCountsAsKnown() {
         let store = BulkPRLineStore()
-        store.record([], assigned: [], for: "ABC-1")
-        store.record([BulkPRLineSegment(text: "PR#1 open", colorHex: "#DAA520")], assigned: [nil], for: "ABC-2")
+        store.record([], openPRs: [], for: "ABC-1")
+        store.record([BulkPRLineSegment(text: "PR#1 open", colorHex: "#DAA520")], openPRs: [.unknown], for: "ABC-2")
         let missing = store.issuesWithoutLine([issue("ABC-1"), issue("ABC-2"), issue("ABC-3")])
         XCTAssertEqual(missing.map(\.key), ["ABC-3"])
     }

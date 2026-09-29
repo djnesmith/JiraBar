@@ -69,25 +69,53 @@ extension Binding where Value == Bool {
 
 /// What the PR-action checkboxes start as when a transition dialog opens — single or bulk. A default
 /// only: once the user clicks a box, neither dialog moves it again.
+///
+/// Each box starts unchecked only when every open PR it would act on is known to need nothing — all
+/// approved, or all assigned. Anything not yet read (still loading, GitHub failed, no token) keeps the
+/// checked default, as does no PRs at all: unknown is not "all done".
 enum PRActionDefaults {
-    /// Approving is opt-in on every open. Request-changes stays checked: its mandatory comment already
-    /// stops a review going out unconsidered.
-    static func reviewStartsChecked(_ action: PRReviewAction) -> Bool {
-        action == .requestChanges
+    /// What the defaults know about one open PR the batch would act on. `nil` is unknown.
+    struct OpenPR: Equatable {
+        var assigned: Bool?
+        var approved: Bool?
+
+        static let unknown = OpenPR(assigned: nil, approved: nil)
     }
 
-    /// Unchecked only when every open PR is known to have an assignee, because the sync writes only to
-    /// a blank one and would do nothing. Any PR not yet read — still loading, or its GitHub state
-    /// failed — keeps the checked default, as does no PRs at all: unknown is not "all assigned".
+    /// Approved by anyone, going by each reviewer's latest review: an approval later superseded by
+    /// changes requested, or dismissed, does not count. `nil` when the reviews were not read.
     ///
-    /// One element per open PR the batch would act on: `true` assigned, `false` blank, `nil` unknown.
-    static func syncAssigneeStartsChecked(openPRsAssigned: [Bool?]) -> Bool {
-        openPRsAssigned.isEmpty || openPRsAssigned.contains { $0 != true }
+    /// `latestReviews` already gives one review per reviewer; this still keeps only the last per login,
+    /// oldest first, so a fuller review list could not count a superseded approval.
+    static func approved(_ reviews: [PRReview]?) -> Bool? {
+        reviews.map { reviews in
+            reviews.reduce(into: [String: String]()) { $0[$1.login] = $1.state }
+                .values.contains("APPROVED")
+        }
     }
 
-    /// The single dialog's input to `syncAssigneeStartsChecked`: the PRs `applyPRActions` targets.
-    static func openPRsAssigned(_ prs: [PRActionsStatus.LinkedPR]) -> [Bool?] {
-        prs.filter { !$0.isMerged }.map { $0.statesKnown ? !$0.assignees.isEmpty : nil }
+    /// Request-changes stays checked whatever the approvals: its mandatory comment already stops a
+    /// review going out unconsidered.
+    static func reviewStartsChecked(_ action: PRReviewAction, openPRs: [OpenPR]) -> Bool {
+        switch action {
+        case .none:           return false
+        case .requestChanges: return true
+        case .approve:        return openPRs.isEmpty || openPRs.contains { $0.approved != true }
+        }
+    }
+
+    /// The sync writes only to a blank PR assignee, so with every PR assigned it would do nothing.
+    static func syncAssigneeStartsChecked(openPRs: [OpenPR]) -> Bool {
+        openPRs.isEmpty || openPRs.contains { $0.assigned != true }
+    }
+
+    /// The single dialog's input: the PRs `applyPRActions` targets.
+    static func openPRs(_ prs: [PRActionsStatus.LinkedPR]) -> [OpenPR] {
+        prs.filter { !$0.isMerged }.map { pr in
+            pr.statesKnown
+                ? OpenPR(assigned: !pr.assignees.isEmpty, approved: approved(pr.reviews))
+                : .unknown
+        }
     }
 }
 
@@ -290,6 +318,8 @@ final class PRActionsStatus: ObservableObject {
         let mergeCommitAllowed: Bool
         let squashMergeAllowed: Bool
         let rebaseMergeAllowed: Bool
+        /// Each reviewer's latest review, or nil when GitHub did not return them.
+        var reviews: [PRReview]? = nil
     }
     @Published var loading: Bool = true
     @Published var openPRs: [LinkedPR] = []
@@ -455,8 +485,9 @@ struct TransitionDialog: View {
     @State private var selectedOptionValue: String = ""
     @State private var submitting: Bool = false
     @State private var updateGithub: Bool = true
-    /// Both set from `PRActionDefaults` at open; see there.
+    /// Both set from `PRActionDefaults` at open, and re-derived as the PRs load until the user clicks.
     @State private var prReview: Bool = false
+    @State private var prReviewTouched: Bool = false
     @State private var prReviewComment: String = ""
     @State private var prMerge: Bool = true
     @State private var prMergeMethod: String = "rebase"
@@ -552,9 +583,12 @@ struct TransitionDialog: View {
             }
             // Seed the merge-method picker from the config-level default.
             prMergeMethod = config.prMergeMethod
-            prReview = PRActionDefaults.reviewStartsChecked(config.prReviewAction)
+            prReview = reviewDefault
             prSyncAssignee = syncAssigneeDefault
             seedPerPRActions()
+        }
+        .onChange(of: reviewDefault) { starts in
+            if !prReviewTouched { prReview = starts }
         }
         .onChange(of: syncAssigneeDefault) { starts in
             if !prSyncAssigneeTouched { prSyncAssignee = starts }
@@ -603,10 +637,14 @@ struct TransitionDialog: View {
         )
     }
 
-    private var syncAssigneeDefault: Bool {
-        PRActionDefaults.syncAssigneeStartsChecked(
-            openPRsAssigned: PRActionDefaults.openPRsAssigned(prStatus.openPRs)
+    private var reviewDefault: Bool {
+        PRActionDefaults.reviewStartsChecked(
+            config.prReviewAction, openPRs: PRActionDefaults.openPRs(prStatus.openPRs)
         )
+    }
+
+    private var syncAssigneeDefault: Bool {
+        PRActionDefaults.syncAssigneeStartsChecked(openPRs: PRActionDefaults.openPRs(prStatus.openPRs))
     }
 
     private var blanketAction: PRReviewAction {
@@ -652,7 +690,7 @@ struct TransitionDialog: View {
             prStatusSummary
 
             if config.prReviewAction != .none {
-                Toggle(reviewToggleLabel, isOn: $prReview)
+                Toggle(reviewToggleLabel, isOn: $prReview.marking($prReviewTouched))
                 if prReview, !prStatus.openPRs.isEmpty {
                     perPRRows
                 }
