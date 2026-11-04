@@ -1600,10 +1600,7 @@ extension AppDelegate {
             for row in linkedRows {
                 let linkedItem = NSMenuItem(title: row.title, action: #selector(self.openLink), keyEquivalent: "")
                 if let color = AppDelegate.linkedRowColor(row.role) {
-                    linkedItem.attributedTitle = NSAttributedString(string: row.title, attributes: [
-                        .foregroundColor: color,
-                        .font: NSFont.menuFont(ofSize: 0),
-                    ])
+                    linkedItem.attributedTitle = AppDelegate.linkedRowTitle(row.title, key: row.key, labelColor: color)
                 }
                 linkedItem.representedObject = URL(
                     string: AppDelegate.browseURL(forKey: row.key, baseUrl: self.baseUrl)
@@ -2397,6 +2394,14 @@ extension AppDelegate {
         case .blocker: return issueTypeRed
         case .plain: return nil
         }
+    }
+
+    /// Only the words before the key take the colour; the key keeps the normal menu text colour.
+    static func linkedRowTitle(_ title: String, key: String, labelColor: NSColor) -> NSAttributedString {
+        let attr = NSMutableAttributedString(string: title, attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        let labelLength = (title as NSString).length - (key as NSString).length
+        attr.addAttribute(.foregroundColor, value: labelColor, range: NSRange(location: 0, length: labelLength))
+        return attr
     }
 
     /// "is blocked by" -> "Blocked by", "blocks" -> "Blocks", "relates to" -> "Relates to".

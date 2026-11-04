@@ -75,4 +75,15 @@ final class LinkedTicketRowsTests: XCTestCase {
         """)
         XCTAssertEqual(AppDelegate.linkedTicketRows(for: issue).map(\.role), [.plain])
     }
+
+    func testOnlyTheLabelTakesTheColor() {
+        let title = AppDelegate.linkedRowTitle("Blocked by: ABC-2", key: "ABC-2", labelColor: AppDelegate.issueTypeRed)
+        var labelRange = NSRange()
+        let labelColor = title.attribute(.foregroundColor, at: 0, effectiveRange: &labelRange) as? NSColor
+        XCTAssertEqual(labelColor, AppDelegate.issueTypeRed)
+        XCTAssertEqual((title.string as NSString).substring(with: labelRange), "Blocked by: ")
+        let keyStart = title.length - "ABC-2".count
+        XCTAssertNil(title.attribute(.foregroundColor, at: keyStart, effectiveRange: nil))
+        XCTAssertEqual(title.attribute(.font, at: keyStart, effectiveRange: nil) as? NSFont, NSFont.menuFont(ofSize: 0))
+    }
 }
