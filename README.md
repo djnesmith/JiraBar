@@ -34,6 +34,7 @@ Native MacOS menubar application to show Jira issues in your menu bar:
 
 ## Per-issue submenu
 
+- **Linked tickets** — above Copy Key, the ticket's epic (`Epic: KEY`) and one row per issue link in Jira's wording (`Blocked by: KEY`, `Blocks: KEY`, `Relates to: KEY`). Clicking one opens that ticket in the browser. The section is left out when there are none.
 - **Copy Key / Copy URL / Copy Title / Copy Branch Name / Copy PR Name** — the branch name uses `KEY-slugified-title` (max 50-char slug, git-safe).
 - **Add Comment / Add Flag / Upload Files** — the upload dialog supports drag-and-drop. The flag entry only appears when a Flagged custom-field id is configured; on a ticket that is already flagged it reads **Remove Flag** and clears the flag without a dialog, and the ticket's row carries a red flag icon.
 - **Change Assignee / Change Reviewer / Change Tester** (and any other user-picker fields you add) — configured per install as "User Field Shortcuts" so it works against whatever your custom-field ids are. Opening a ticket's submenu lazily fetches each shortcut field's current users and renders them under the shortcut label, colored by the ticket's status color (or a per-shortcut status-color override). A label beginning `Change ` switches to `Add ` when the field turns out to be empty — but only on a successful read: if the value can't be established, the label stays as configured rather than claiming the field is free.

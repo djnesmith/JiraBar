@@ -1596,6 +1596,18 @@ extension AppDelegate {
                 issueMenu.addItem(.separator())
             }
 
+            let linkedRows = AppDelegate.linkedTicketRows(for: issue)
+            for row in linkedRows {
+                let linkedItem = NSMenuItem(title: row.title, action: #selector(self.openLink), keyEquivalent: "")
+                linkedItem.representedObject = URL(
+                    string: AppDelegate.browseURL(forKey: row.key, baseUrl: self.baseUrl)
+                )
+                issueMenu.addItem(linkedItem)
+            }
+            if !linkedRows.isEmpty {
+                issueMenu.addItem(.separator())
+            }
+
             let copyKeyItem = NSMenuItem(title: "Copy Key", action: #selector(self.copyToClipboard), keyEquivalent: "")
             copyKeyItem.representedObject = issue.key
             issueMenu.addItem(copyKeyItem)
@@ -2343,6 +2355,40 @@ extension AppDelegate {
         aboutWindow.makeKeyAndOrderFront(nil)
     }
     
+    /// The linked-ticket rows for a ticket's submenu: its epic (or a sub-task's parent), then one row
+    /// per issue link in Jira's order. Titles like "Epic: ABC-1" or "Blocked by: ABC-2".
+    static func linkedTicketRows(for issue: Issue) -> [(title: String, key: String)] {
+        var rows: [(title: String, key: String)] = []
+        if let parent = issue.fields.parent {
+            let label = parent.fields?.issuetype?.name == "Epic" ? "Epic" : "Parent"
+            rows.append(("\(label): \(parent.key)", parent.key))
+        }
+        for link in issue.fields.issuelinks ?? [] {
+            let other: LinkedIssue
+            let phrase: String?
+            if let inward = link.inwardIssue {
+                other = inward
+                phrase = link.type.inward
+            } else if let outward = link.outwardIssue {
+                other = outward
+                phrase = link.type.outward
+            } else {
+                continue
+            }
+            rows.append(("\(linkLabel(phrase ?? "linked")): \(other.key)", other.key))
+        }
+        return rows
+    }
+
+    /// "is blocked by" -> "Blocked by", "blocks" -> "Blocks", "relates to" -> "Relates to".
+    static func linkLabel(_ phrase: String) -> String {
+        var words = phrase.trimmingCharacters(in: .whitespaces)
+        if words.lowercased().hasPrefix("is ") {
+            words = String(words.dropFirst(3))
+        }
+        return words.prefix(1).uppercased() + words.dropFirst()
+    }
+
     /// Builds a git-safe branch name like `PROJ-1234-fix-flaky-login`. Title is lowercased,
     /// non-alphanumerics become hyphens, runs collapse, leading/trailing hyphens stripped,
     /// title slug is capped so the full branch stays under ~60 chars.

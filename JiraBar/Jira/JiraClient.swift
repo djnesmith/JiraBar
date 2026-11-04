@@ -144,7 +144,7 @@ public class JiraClient {
 
         let rankId = rankFieldId.trimmingCharacters(in: .whitespaces)
         let flagId = flagFieldId.trimmingCharacters(in: .whitespaces)
-        var fieldList = "id,assignee,summary,status,issuetype,project"
+        var fieldList = "id,assignee,summary,status,issuetype,project,parent,issuelinks"
         if !rankId.isEmpty {
             fieldList += ",\(rankId)"
         }

@@ -28,6 +28,9 @@ struct Fields: Codable {
     var issuetype: IssueType
     var project: Project
     var assignee: JiraUser?
+    /// The epic on Cloud; on any instance, a sub-task's parent.
+    var parent: LinkedIssue? = nil
+    var issuelinks: [IssueLink]? = nil
     
     enum CodingKeys: String, CodingKey {
         case summary
@@ -35,7 +38,32 @@ struct Fields: Codable {
         case issuetype
         case project
         case assignee
+        case parent
+        case issuelinks
     }
+}
+
+struct LinkedIssue: Codable {
+    var key: String
+    var fields: LinkedIssueFields?
+}
+
+struct LinkedIssueFields: Codable {
+    var issuetype: IssueType?
+}
+
+/// Exactly one of `inwardIssue` / `outwardIssue` is set: the other end of the link. Its wording
+/// comes from the same side — `inwardIssue` reads `type.inward`. Checked on live Cloud: a ticket
+/// blocked by ABC-2 carries `inwardIssue: ABC-2` with `type.inward` "is blocked by".
+struct IssueLink: Codable {
+    var type: IssueLinkType
+    var inwardIssue: LinkedIssue?
+    var outwardIssue: LinkedIssue?
+}
+
+struct IssueLinkType: Codable {
+    var inward: String?
+    var outward: String?
 }
 
 struct IssueStatus: Codable {

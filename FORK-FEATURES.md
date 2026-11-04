@@ -22,11 +22,11 @@ Status groups follow a set order with a colour per header; tickets sort by the b
 
 ## 2. Per-issue submenu
 
-Copy Key / URL / Title / Branch Name / PR Name; Add Comment, Add/Remove Flag (flag icon on the row), Upload Files; user-field shortcuts (Change Assignee/Reviewer/Tester) that show current users and read "Add" when empty. Assignee writes are read back to confirm they landed.
+Linked tickets above Copy Key ("Epic: KEY", "Blocked by: KEY", one row per issue link, click opens it); Copy Key / URL / Title / Branch Name / PR Name; Add Comment, Add/Remove Flag (flag icon on the row), Upload Files; user-field shortcuts (Change Assignee/Reviewer/Tester) that show current users and read "Add" when empty. Assignee writes are read back to confirm they landed.
 
 - Commits: `45a7280`, `9a2f281`, `d4cb5e3`, `c4afdb8`, `4efd68d`, `9c7d420`, `7aa2494`
 - Files: `JiraBar/Views/UserFieldDialog.swift`, `CommentDialog.swift`, `FlagDialog.swift`, `UploadFilesDialog.swift`, `JiraBar/Extensions/UserFieldShortcut.swift`, `JiraClient.swift`
-- Check: tests `FlagRowMarkerTests`, `JiraClientParsingTests`. Click path: open a ticket's submenu, Change Assignee, pick a user, the ticket shows the new assignee after refresh.
+- Check: tests `FlagRowMarkerTests`, `JiraClientParsingTests`, `LinkedTicketRowsTests`. Click path: open a ticket's submenu, Change Assignee, pick a user, the ticket shows the new assignee after refresh.
 
 ## 3. Transition prompts
 
