@@ -1599,6 +1599,12 @@ extension AppDelegate {
             let linkedRows = AppDelegate.linkedTicketRows(for: issue)
             for row in linkedRows {
                 let linkedItem = NSMenuItem(title: row.title, action: #selector(self.openLink), keyEquivalent: "")
+                if let color = AppDelegate.linkedRowColor(row.role) {
+                    linkedItem.attributedTitle = NSAttributedString(string: row.title, attributes: [
+                        .foregroundColor: color,
+                        .font: NSFont.menuFont(ofSize: 0),
+                    ])
+                }
                 linkedItem.representedObject = URL(
                     string: AppDelegate.browseURL(forKey: row.key, baseUrl: self.baseUrl)
                 )
@@ -2357,11 +2363,11 @@ extension AppDelegate {
     
     /// The linked-ticket rows for a ticket's submenu: its epic (or a sub-task's parent), then one row
     /// per issue link in Jira's order. Titles like "Epic: ABC-1" or "Blocked by: ABC-2".
-    static func linkedTicketRows(for issue: Issue) -> [(title: String, key: String)] {
-        var rows: [(title: String, key: String)] = []
+    static func linkedTicketRows(for issue: Issue) -> [(title: String, key: String, role: LinkedRowRole)] {
+        var rows: [(title: String, key: String, role: LinkedRowRole)] = []
         if let parent = issue.fields.parent {
-            let label = parent.fields?.issuetype?.name == "Epic" ? "Epic" : "Parent"
-            rows.append(("\(label): \(parent.key)", parent.key))
+            let isEpic = parent.fields?.issuetype?.name == "Epic"
+            rows.append(("\(isEpic ? "Epic" : "Parent"): \(parent.key)", parent.key, isEpic ? .epic : .plain))
         }
         for link in issue.fields.issuelinks ?? [] {
             let other: LinkedIssue
@@ -2375,9 +2381,22 @@ extension AppDelegate {
             } else {
                 continue
             }
-            rows.append(("\(linkLabel(phrase ?? "linked")): \(other.key)", other.key))
+            let label = linkLabel(phrase ?? "linked")
+            let role: LinkedRowRole = label == "Blocks" || label == "Blocked by" ? .blocker : .plain
+            rows.append(("\(label): \(other.key)", other.key, role))
         }
         return rows
+    }
+
+    enum LinkedRowRole { case epic, blocker, plain }
+
+    /// Blockers take the Bug red and an epic the Epic purple, so both read the same as on ticket rows.
+    static func linkedRowColor(_ role: LinkedRowRole) -> NSColor? {
+        switch role {
+        case .epic: return issueTypeColor("Epic")
+        case .blocker: return issueTypeRed
+        case .plain: return nil
+        }
     }
 
     /// "is blocked by" -> "Blocked by", "blocks" -> "Blocks", "relates to" -> "Relates to".

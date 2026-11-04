@@ -50,4 +50,29 @@ final class LinkedTicketRowsTests: XCTestCase {
         XCTAssertTrue(AppDelegate.linkedTicketRows(for: try decode("")).isEmpty)
         XCTAssertTrue(AppDelegate.linkedTicketRows(for: try decode(", \"issuelinks\": []")).isEmpty)
     }
+
+    func testBlockersAreRedAndEpicIsEpicPurple() throws {
+        let issue = try decode("""
+        , "parent": {"key": "ABC-100", "fields": {"issuetype": {"name": "Epic"}}},
+          "issuelinks": [
+            {"type": {"inward": "is blocked by", "outward": "blocks"}, "inwardIssue": {"key": "ABC-2"}},
+            {"type": {"inward": "is blocked by", "outward": "blocks"}, "outwardIssue": {"key": "ABC-3"}},
+            {"type": {"inward": "relates to", "outward": "relates to"}, "outwardIssue": {"key": "ABC-5"}},
+            {"type": {"inward": "is duplicated by", "outward": "duplicates"}, "inwardIssue": {"key": "ABC-4"}}]
+        """)
+        XCTAssertEqual(
+            AppDelegate.linkedTicketRows(for: issue).map(\.role),
+            [.epic, .blocker, .blocker, .plain, .plain]
+        )
+        XCTAssertEqual(AppDelegate.linkedRowColor(.epic), AppDelegate.issueTypeDeepPurple)
+        XCTAssertEqual(AppDelegate.linkedRowColor(.blocker), AppDelegate.issueTypeRed)
+        XCTAssertNil(AppDelegate.linkedRowColor(.plain))
+    }
+
+    func testParentRowStaysPlain() throws {
+        let issue = try decode("""
+        , "parent": {"key": "ABC-7", "fields": {"issuetype": {"name": "Story"}}}
+        """)
+        XCTAssertEqual(AppDelegate.linkedTicketRows(for: issue).map(\.role), [.plain])
+    }
 }
